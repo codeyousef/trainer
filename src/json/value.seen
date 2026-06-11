@@ -1,0 +1,52 @@
+class JsonValue {
+    var kind: Int
+    var boolValue: Bool
+    var numberValue: Float
+    var stringValue: String
+    var objectKeys: Array<String>
+    var objectValues: Array<JsonValue>
+
+    fun isNull() r: Bool { return this.kind == 0 }
+    fun isBool() r: Bool { return this.kind == 1 }
+    fun isNumber() r: Bool { return this.kind == 2 }
+    fun isString() r: Bool { return this.kind == 3 }
+    fun isObject() r: Bool { return this.kind == 5 }
+    fun getBool() r: Bool { return this.boolValue }
+    fun getNumber() r: Float { return this.numberValue }
+    fun getInt() r: Int { return this.numberValue.toInt() }
+    fun getString() r: String { return this.stringValue }
+
+    fun get(key: String) r: JsonValue? {
+        if this.kind != 5 {
+            return null
+        }
+        var i = 0
+        while i < this.objectKeys.length() {
+            if this.objectKeys[i] == key {
+                return this.objectValues[i]
+            }
+            i = i + 1
+        }
+        return null
+    }
+}
+
+fun JsonValue_nullValue() r: JsonValue {
+    return JsonValue{ kind: 0, boolValue: false, numberValue: 0.0, stringValue: "", objectKeys: Array<String>(), objectValues: Array<JsonValue>() }
+}
+
+fun JsonValue_bool(value: Bool) r: JsonValue {
+    return JsonValue{ kind: 1, boolValue: value, numberValue: 0.0, stringValue: "", objectKeys: Array<String>(), objectValues: Array<JsonValue>() }
+}
+
+fun JsonValue_numberFloat(value: Float) r: JsonValue {
+    return JsonValue{ kind: 2, boolValue: false, numberValue: value, stringValue: "", objectKeys: Array<String>(), objectValues: Array<JsonValue>() }
+}
+
+fun JsonValue_string(value: String) r: JsonValue {
+    return JsonValue{ kind: 3, boolValue: false, numberValue: 0.0, stringValue: value, objectKeys: Array<String>(), objectValues: Array<JsonValue>() }
+}
+
+fun JsonValue_object(keys: Array<String>, values: Array<JsonValue>) r: JsonValue {
+    return JsonValue{ kind: 5, boolValue: false, numberValue: 0.0, stringValue: "", objectKeys: keys, objectValues: values }
+}

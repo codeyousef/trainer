@@ -1,0 +1,191 @@
+import io_utils.{writeAtomicText}
+import json.builder.{escapeJsonString}
+import safetensors.{SafeTensorInfo, findTensorEntryIndex, tensorCols, tensorRows}
+
+class MiniLMWeightMap {
+    var validSource: Bool
+    var hiddenSize: Int
+    var layersExpected: Int
+    var intermediateSize: Int
+    var totalSlots: Int
+    var foundSlots: Int
+    var missingSlots: Int
+    var loadedSlots: Int
+    var embeddingSlots: Int
+    var embeddingFound: Int
+    var firstLayerSlots: Int
+    var firstLayerFound: Int
+    var slotsJson: String
+    var firstMissing: String
+
+    static fun inspect(info: SafeTensorInfo, hiddenSize: Int, layersExpected: Int, intermediateSize: Int, maxLoadElements: Int) r: MiniLMWeightMap {
+        let map = MiniLMWeightMap{
+            validSource: info.validHeader,
+            hiddenSize: hiddenSize,
+            layersExpected: layersExpected,
+            intermediateSize: intermediateSize,
+            totalSlots: 0,
+            foundSlots: 0,
+            missingSlots: 0,
+            loadedSlots: 0,
+            embeddingSlots: 0,
+            embeddingFound: 0,
+            firstLayerSlots: 0,
+            firstLayerFound: 0,
+            slotsJson: "",
+            firstMissing: ""
+        }
+        if not info.validHeader {
+            return map
+        }
+
+        map.addResolvedEmbeddingSlot(info, "embeddings.word", "embeddings.word_embeddings.weight", maxLoadElements)
+        map.addResolvedEmbeddingSlot(info, "embeddings.position", "embeddings.position_embeddings.weight", maxLoadElements)
+        map.addResolvedEmbeddingSlot(info, "embeddings.token_type", "embeddings.token_type_embeddings.weight", maxLoadElements)
+        map.addResolvedEmbeddingSlot(info, "embeddings.layer_norm.weight", "embeddings.LayerNorm.weight", maxLoadElements)
+        map.addResolvedEmbeddingSlot(info, "embeddings.layer_norm.bias", "embeddings.LayerNorm.bias", maxLoadElements)
+
+        var layer = 0
+        while layer < layersExpected {
+            map.addLayerSlots(info, layer, maxLoadElements)
+            layer = layer + 1
+        }
+        return map
+    }
+
+    fun addResolvedEmbeddingSlot(info: SafeTensorInfo, logicalName: String, canonicalName: String, maxLoadElements: Int) r: Void {
+        this.embeddingSlots = this.embeddingSlots + 1
+        if this.addResolvedSlotValues(info, logicalName, canonicalName, maxLoadElements) {
+            this.embeddingFound = this.embeddingFound + 1
+        }
+    }
+
+    fun addSlotValues(logicalName: String, tensorName: String, found: Bool, dtype: String, rows: Int, cols: Int, elements: Int, loadError: String) r: Void {
+        this.totalSlots = this.totalSlots + 1
+        if this.slotsJson.length() > 0 {
+            this.slotsJson = this.slotsJson + ",\n"
+        }
+        this.slotsJson = this.slotsJson + miniLMWeightSlotJsonValues(logicalName, tensorName, found, dtype, rows, cols, elements, loadError)
+        if found {
+            this.foundSlots = this.foundSlots + 1
+        } else {
+            this.missingSlots = this.missingSlots + 1
+            if this.firstMissing.length() == 0 {
+                this.firstMissing = logicalName
+            }
+        }
+    }
+
+    fun addResolvedSlotValues(info: SafeTensorInfo, logicalName: String, canonicalName: String, maxLoadElements: Int) r: Bool {
+        let index = mwFindCandidateIndex(info, canonicalName)
+        if index < 0 {
+            this.addSlotValues(logicalName, "", false, "", 0, 0, 0, "missing")
+            return false
+        }
+        let entry = info.entries[index]
+        this.addSlotValues(logicalName, entry.name, true, entry.dtype, tensorRows(entry), tensorCols(entry), entry.elementCount(), "")
+        return true
+    }
+
+    fun addLayerSlots(info: SafeTensorInfo, layer: Int, maxLoadElements: Int) r: Void {
+        let prefix = "encoder.layer." + layer.toString() + "."
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.query.weight", prefix + "attention.self.query.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.query.bias", prefix + "attention.self.query.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.key.weight", prefix + "attention.self.key.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.key.bias", prefix + "attention.self.key.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.value.weight", prefix + "attention.self.value.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.value.bias", prefix + "attention.self.value.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.output.weight", prefix + "attention.output.dense.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.output.bias", prefix + "attention.output.dense.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.layer_norm.weight", prefix + "attention.output.LayerNorm.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".attention.layer_norm.bias", prefix + "attention.output.LayerNorm.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".intermediate.weight", prefix + "intermediate.dense.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".intermediate.bias", prefix + "intermediate.dense.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".output.weight", prefix + "output.dense.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".output.bias", prefix + "output.dense.bias", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".output.layer_norm.weight", prefix + "output.LayerNorm.weight", maxLoadElements)
+        this.addResolvedLayerSlot(info, layer, "layer." + layer.toString() + ".output.layer_norm.bias", prefix + "output.LayerNorm.bias", maxLoadElements)
+    }
+
+    fun addResolvedLayerSlot(info: SafeTensorInfo, layer: Int, logicalName: String, canonicalName: String, maxLoadElements: Int) r: Void {
+        if layer == 0 {
+            this.firstLayerSlots = this.firstLayerSlots + 1
+        }
+        if this.addResolvedSlotValues(info, logicalName, canonicalName, maxLoadElements) {
+            if layer == 0 {
+                this.firstLayerFound = this.firstLayerFound + 1
+            }
+        }
+    }
+
+    fun embeddingsReady() r: Bool {
+        return this.embeddingSlots > 0 and this.embeddingFound == this.embeddingSlots
+    }
+
+    fun firstLayerReady() r: Bool {
+        return this.firstLayerSlots > 0 and this.firstLayerFound == this.firstLayerSlots
+    }
+
+    fun summary() r: String {
+        return "minilm_slots=" + this.foundSlots.toString() + "/" + this.totalSlots.toString()
+            + " embeddings=" + this.embeddingFound.toString() + "/" + this.embeddingSlots.toString()
+            + " first_layer=" + this.firstLayerFound.toString() + "/" + this.firstLayerSlots.toString()
+    }
+}
+
+fun mwFindCandidateIndex(info: SafeTensorInfo, canonicalName: String) r: Int {
+    var index = findTensorEntryIndex(info, canonicalName)
+    if index >= 0 { return index }
+    index = findTensorEntryIndex(info, "bert." + canonicalName)
+    if index >= 0 { return index }
+    index = findTensorEntryIndex(info, "model." + canonicalName)
+    if index >= 0 { return index }
+    index = findTensorEntryIndex(info, "auto_model." + canonicalName)
+    if index >= 0 { return index }
+    index = findTensorEntryIndex(info, "0.auto_model." + canonicalName)
+    if index >= 0 { return index }
+    return findTensorEntryIndex(info, "0_Transformer.auto_model." + canonicalName)
+}
+
+fun writeMiniLMWeightMap(path: String, map: MiniLMWeightMap) r: Bool {
+    return writeAtomicText(path, miniLMWeightMapJson(map))
+}
+
+fun miniLMWeightMapJson(map: MiniLMWeightMap) r: String {
+    var json = "{\n"
+        + "  \"format\": \"seen-minilm-weight-map-v1\",\n"
+        + "  \"valid_source\": " + map.validSource.toString() + ",\n"
+        + "  \"hidden_size\": " + map.hiddenSize.toString() + ",\n"
+        + "  \"layers_expected\": " + map.layersExpected.toString() + ",\n"
+        + "  \"intermediate_size\": " + map.intermediateSize.toString() + ",\n"
+        + "  \"total_slots\": " + map.totalSlots.toString() + ",\n"
+        + "  \"found_slots\": " + map.foundSlots.toString() + ",\n"
+        + "  \"missing_slots\": " + map.missingSlots.toString() + ",\n"
+        + "  \"loaded_slots\": " + map.loadedSlots.toString() + ",\n"
+        + "  \"embedding_slots\": " + map.embeddingSlots.toString() + ",\n"
+        + "  \"embedding_found\": " + map.embeddingFound.toString() + ",\n"
+        + "  \"embeddings_ready\": " + map.embeddingsReady().toString() + ",\n"
+        + "  \"first_layer_slots\": " + map.firstLayerSlots.toString() + ",\n"
+        + "  \"first_layer_found\": " + map.firstLayerFound.toString() + ",\n"
+        + "  \"first_layer_ready\": " + map.firstLayerReady().toString() + ",\n"
+        + "  \"first_missing\": " + escapeJsonString(map.firstMissing) + ",\n"
+        + "  \"slots\": [\n"
+        + map.slotsJson
+        + "\n  ]\n}\n"
+    return json
+}
+
+fun miniLMWeightSlotJsonValues(logicalName: String, tensorName: String, found: Bool, dtype: String, rows: Int, cols: Int, elements: Int, loadError: String) r: String {
+    return "    {"
+        + "\"logical\": " + escapeJsonString(logicalName)
+        + ", \"tensor\": " + escapeJsonString(tensorName)
+        + ", \"found\": " + found.toString()
+        + ", \"dtype\": " + escapeJsonString(dtype)
+        + ", \"rows\": " + rows.toString()
+        + ", \"cols\": " + cols.toString()
+        + ", \"elements\": " + elements.toString()
+        + ", \"loaded\": false"
+        + ", \"loaded_values\": 0"
+        + ", \"load_error\": " + escapeJsonString(loadError)
+        + "}"
+}

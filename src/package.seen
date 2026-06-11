@@ -1,0 +1,609 @@
+import io.file.{copyFileBytes, exists, readText}
+import capabilities.{trainerCapabilitiesJson, trainerPackageReadmeNote}
+import config.{TrainerConfig}
+import dense_lora.{miniLMLayerAttentionDenseDeltaPath, miniLMLayerAttentionLayerNormDeltaPath, miniLMLayerIntermediateDeltaPath, miniLMLayerKeyDeltaPath, miniLMLayerOutputDeltaPath, miniLMLayerOutputLayerNormDeltaPath, miniLMLayerQueryDeltaPath, miniLMLayerValueDeltaPath}
+import embedding_delta.{miniLMEmbeddingDeltasPath}
+import io_utils.{writeAtomicText}
+import minilm_weights.{MiniLMWeightMap, writeMiniLMWeightMap}
+import model.{readBertConfig}
+import safetensors.{SafeTensorInfo, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors, writeSeenWeightsManifest}
+
+class PackageResult {
+    var outputDir: String
+    var filesWritten: Int
+
+    static fun new(outputDir: String, filesWritten: Int) r: PackageResult {
+        return PackageResult{ outputDir: outputDir, filesWritten: filesWritten }
+    }
+}
+
+fun writeModelPackage(cfg: TrainerConfig) r: PackageResult {
+    var files = 0
+    let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
+    if cfg.copyBaseArtifacts {
+        files = files + copyBaseModelArtifacts(cfg)
+    }
+    let embeddingDeltaMaterialized = materializePackagedEmbeddingDeltas(cfg, modelMeta.hiddenSize)
+    let allLayerDeltaMaterialized = materializePackagedAllLayerDeltas(cfg, modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+    var denseDeltaMaterialized = false
+    var intermediateDeltaMaterialized = false
+    var queryDeltaMaterialized = false
+    var keyDeltaMaterialized = false
+    var valueDeltaMaterialized = false
+    var attentionDenseDeltaMaterialized = false
+    var attentionLayerNormDeltaMaterialized = false
+    var layerNormDeltaMaterialized = false
+    if allLayerDeltaMaterialized <= 0 {
+        denseDeltaMaterialized = materializePackagedDenseDelta(cfg, modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+        intermediateDeltaMaterialized = materializePackagedIntermediateDelta(cfg, modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+        queryDeltaMaterialized = materializePackagedSelfAttentionDelta(cfg, modelMeta.layers, modelMeta.hiddenSize, "query", cfg.minilmQueryDeltaPath())
+        keyDeltaMaterialized = materializePackagedSelfAttentionDelta(cfg, modelMeta.layers, modelMeta.hiddenSize, "key", cfg.minilmKeyDeltaPath())
+        valueDeltaMaterialized = materializePackagedSelfAttentionDelta(cfg, modelMeta.layers, modelMeta.hiddenSize, "value", cfg.minilmValueDeltaPath())
+        attentionDenseDeltaMaterialized = materializePackagedAttentionDenseDelta(cfg, modelMeta.layers, modelMeta.hiddenSize)
+        attentionLayerNormDeltaMaterialized = materializePackagedAttentionLayerNormDelta(cfg, modelMeta.layers, modelMeta.hiddenSize)
+        layerNormDeltaMaterialized = materializePackagedLayerNormDelta(cfg, modelMeta.layers, modelMeta.hiddenSize)
+    }
+    if writeAtomicText(cfg.outputModelDir + "/modules.json", modulesJson()) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/sentence_bert_config.json", sentenceBertConfigJson(cfg)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/1_Pooling/config.json", poolingConfigJson(cfg)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/README.md", packageReadme()) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_adapter_manifest.json", adapterManifestJson(cfg)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_layer_adapter_manifest.json", layerAdapterManifestJson(cfg)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_layer_adapter_manifest.json", minilmLayerAdapterManifestJson(cfg)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_dense_adapter_manifest.json", minilmDenseAdapterManifestJson(cfg)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_dense_delta_manifest.json", minilmDenseDeltaManifestJson(cfg, denseDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_embedding_deltas_manifest.json", minilmEmbeddingDeltasManifestJson(cfg, embeddingDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_all_layer_deltas_manifest.json", minilmAllLayerDeltasManifestJson(cfg, modelMeta.layers, allLayerDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_intermediate_delta_manifest.json", minilmIntermediateDeltaManifestJson(cfg, intermediateDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_query_delta_manifest.json", minilmSelfAttentionDeltaManifestJson(cfg, "query", cfg.minilmQueryDeltaPath(), queryDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_key_delta_manifest.json", minilmSelfAttentionDeltaManifestJson(cfg, "key", cfg.minilmKeyDeltaPath(), keyDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_value_delta_manifest.json", minilmSelfAttentionDeltaManifestJson(cfg, "value", cfg.minilmValueDeltaPath(), valueDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_attention_dense_delta_manifest.json", minilmAttentionDenseDeltaManifestJson(cfg, attentionDenseDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_attention_layernorm_delta_manifest.json", minilmAttentionLayerNormDeltaManifestJson(cfg, attentionLayerNormDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_minilm_layernorm_delta_manifest.json", minilmLayerNormDeltaManifestJson(cfg, layerNormDeltaMaterialized)) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/seen_trainer_capabilities.json", trainerCapabilitiesJson(cfg)) { files = files + 1 }
+    let weights = SafeTensorInfo.inspect(packagedWeightsPathOrBase(cfg))
+    let weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
+    if writeMiniLMWeightMap(cfg.outputModelDir + "/minilm_weight_map.json", weightMap) {
+        files = files + 1
+    }
+    if writeSeenWeightsManifest(cfg.outputModelDir + "/model.safetensors.manifest.json", cfg.embeddingDim, weights, packageWeightsManifestNote(denseDeltaMaterialized, intermediateDeltaMaterialized, queryDeltaMaterialized, keyDeltaMaterialized, valueDeltaMaterialized, attentionDenseDeltaMaterialized, attentionLayerNormDeltaMaterialized, layerNormDeltaMaterialized, allLayerDeltaMaterialized, embeddingDeltaMaterialized)) {
+        files = files + 1
+    }
+    copyIfPresent(cfg.thresholdsPath, cfg.outputModelDir + "/thresholds.json")
+    copyIfPresent(cfg.evalResultsPath, cfg.outputModelDir + "/eval_results.json")
+    return PackageResult.new(cfg.outputModelDir, files)
+}
+
+fun packagedWeightsPath(cfg: TrainerConfig) r: String {
+    return cfg.outputModelDir + "/model.safetensors"
+}
+
+fun packagedWeightsPathOrBase(cfg: TrainerConfig) r: String {
+    let packaged = packagedWeightsPath(cfg)
+    if exists(packaged) {
+        return packaged
+    }
+    return cfg.modelWeightsPath()
+}
+
+fun materializePackagedEmbeddingDeltas(cfg: TrainerConfig, hiddenSize: Int) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    let deltaPath = miniLMEmbeddingDeltasPath(cfg.outputModelDir)
+    if not exists(deltaPath) {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    return materializeEmbeddingDeltasSafetensors(info, packaged, deltaPath, hiddenSize)
+}
+
+fun materializePackagedDenseDelta(cfg: TrainerConfig, layers: Int, hiddenSize: Int, intermediateSize: Int) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    if not exists(cfg.minilmDenseDeltaPath()) {
+        return false
+    }
+    let layer = normalizePackageDenseLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    let prefix = "encoder.layer." + layer.toString() + "."
+    return materializeDenseDeltaSafetensors(info, packaged, prefix + "output.dense.weight", prefix + "output.dense.bias", cfg.minilmDenseDeltaPath(), intermediateSize, hiddenSize)
+}
+
+fun materializePackagedAllLayerDeltas(cfg: TrainerConfig, layers: Int, hiddenSize: Int, intermediateSize: Int) r: Int {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return 0
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    if not info.validHeader {
+        return 0
+    }
+    var materialized = 0
+    var layer = 0
+    while layer < layers {
+        let prefix = "encoder.layer." + layer.toString() + "."
+        if materializeDenseDeltaSafetensors(info, packaged, prefix + "attention.self.query.weight", prefix + "attention.self.query.bias", miniLMLayerQueryDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, packaged, prefix + "attention.self.key.weight", prefix + "attention.self.key.bias", miniLMLayerKeyDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, packaged, prefix + "attention.self.value.weight", prefix + "attention.self.value.bias", miniLMLayerValueDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, packaged, prefix + "attention.output.dense.weight", prefix + "attention.output.dense.bias", miniLMLayerAttentionDenseDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeLayerNormDeltaSafetensors(info, packaged, prefix + "attention.output.LayerNorm.weight", prefix + "attention.output.LayerNorm.bias", miniLMLayerAttentionLayerNormDeltaPath(cfg.outputModelDir, layer), hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, packaged, prefix + "intermediate.dense.weight", prefix + "intermediate.dense.bias", miniLMLayerIntermediateDeltaPath(cfg.outputModelDir, layer), hiddenSize, intermediateSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, packaged, prefix + "output.dense.weight", prefix + "output.dense.bias", miniLMLayerOutputDeltaPath(cfg.outputModelDir, layer), intermediateSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeLayerNormDeltaSafetensors(info, packaged, prefix + "output.LayerNorm.weight", prefix + "output.LayerNorm.bias", miniLMLayerOutputLayerNormDeltaPath(cfg.outputModelDir, layer), hiddenSize) { materialized = materialized + 1 }
+        layer = layer + 1
+    }
+    return materialized
+}
+
+fun materializePackagedIntermediateDelta(cfg: TrainerConfig, layers: Int, hiddenSize: Int, intermediateSize: Int) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    if not exists(cfg.minilmIntermediateDeltaPath()) {
+        return false
+    }
+    let layer = normalizePackageDenseLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    let prefix = "encoder.layer." + layer.toString() + "."
+    return materializeDenseDeltaSafetensors(info, packaged, prefix + "intermediate.dense.weight", prefix + "intermediate.dense.bias", cfg.minilmIntermediateDeltaPath(), hiddenSize, intermediateSize)
+}
+
+fun materializePackagedSelfAttentionDelta(cfg: TrainerConfig, layers: Int, hiddenSize: Int, projection: String, deltaPath: String) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    if not exists(deltaPath) {
+        return false
+    }
+    let layer = normalizePackageDenseLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    let prefix = "encoder.layer." + layer.toString() + ".attention.self." + projection + "."
+    return materializeDenseDeltaSafetensors(info, packaged, prefix + "weight", prefix + "bias", deltaPath, hiddenSize, hiddenSize)
+}
+
+fun materializePackagedAttentionDenseDelta(cfg: TrainerConfig, layers: Int, hiddenSize: Int) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    if not exists(cfg.minilmAttentionDenseDeltaPath()) {
+        return false
+    }
+    let layer = normalizePackageDenseLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    let prefix = "encoder.layer." + layer.toString() + "."
+    return materializeDenseDeltaSafetensors(info, packaged, prefix + "attention.output.dense.weight", prefix + "attention.output.dense.bias", cfg.minilmAttentionDenseDeltaPath(), hiddenSize, hiddenSize)
+}
+
+fun materializePackagedAttentionLayerNormDelta(cfg: TrainerConfig, layers: Int, hiddenSize: Int) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    if not exists(cfg.minilmAttentionLayerNormDeltaPath()) {
+        return false
+    }
+    let layer = normalizePackageDenseLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    let prefix = "encoder.layer." + layer.toString() + "."
+    return materializeLayerNormDeltaSafetensors(info, packaged, prefix + "attention.output.LayerNorm.weight", prefix + "attention.output.LayerNorm.bias", cfg.minilmAttentionLayerNormDeltaPath(), hiddenSize)
+}
+
+fun materializePackagedLayerNormDelta(cfg: TrainerConfig, layers: Int, hiddenSize: Int) r: Bool {
+    let packaged = packagedWeightsPath(cfg)
+    if not exists(packaged) {
+        return false
+    }
+    if not exists(cfg.minilmLayerNormDeltaPath()) {
+        return false
+    }
+    let layer = normalizePackageDenseLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(packaged)
+    let prefix = "encoder.layer." + layer.toString() + "."
+    return materializeLayerNormDeltaSafetensors(info, packaged, prefix + "output.LayerNorm.weight", prefix + "output.LayerNorm.bias", cfg.minilmLayerNormDeltaPath(), hiddenSize)
+}
+
+fun normalizePackageDenseLayer(configured: Int, layers: Int) r: Int {
+    if layers <= 0 {
+        return -1
+    }
+    if configured < 0 {
+        return layers - 1
+    }
+    if configured >= layers {
+        return layers - 1
+    }
+    return configured
+}
+
+fun packageWeightsManifestNote(denseMaterialized: Bool, intermediateMaterialized: Bool, queryMaterialized: Bool, keyMaterialized: Bool, valueMaterialized: Bool, attentionDenseMaterialized: Bool, attentionLayerNormMaterialized: Bool, layerNormMaterialized: Bool, allLayerMaterialized: Int, embeddingMaterialized: Bool) r: String {
+    if allLayerMaterialized > 0 and embeddingMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM sparse embedding deltas and all-ready-layer delta surfaces have been materialized into packaged model.safetensors"
+    }
+    if allLayerMaterialized > 0 {
+        return "Seen-native safetensors metadata; trained MiniLM all-ready-layer delta surfaces have been materialized into packaged model.safetensors"
+    }
+    if embeddingMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM sparse embedding deltas have been materialized into packaged model.safetensors"
+    }
+    if denseMaterialized and intermediateMaterialized and queryMaterialized and keyMaterialized and valueMaterialized and attentionDenseMaterialized and attentionLayerNormMaterialized and layerNormMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM target-layer query, key, value, attention-output-dense, attention-output-LayerNorm, intermediate-dense, output-dense, and output-LayerNorm deltas have been materialized into packaged model.safetensors"
+    }
+    if queryMaterialized or keyMaterialized or valueMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM target-layer self-attention and feed-forward deltas were partially materialized into packaged model.safetensors"
+    }
+    if attentionDenseMaterialized or attentionLayerNormMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM attention-block and feed-forward deltas were partially materialized into packaged model.safetensors"
+    }
+    if denseMaterialized and layerNormMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM output-dense and output-LayerNorm deltas have been materialized into packaged model.safetensors"
+    }
+    if intermediateMaterialized and denseMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM intermediate-dense and output-dense deltas have been materialized into packaged model.safetensors"
+    }
+    if intermediateMaterialized and layerNormMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM intermediate-dense and output-LayerNorm deltas have been materialized into packaged model.safetensors"
+    }
+    if denseMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM output-dense delta has been materialized into packaged model.safetensors"
+    }
+    if intermediateMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM intermediate-dense delta has been materialized into packaged model.safetensors"
+    }
+    if layerNormMaterialized {
+        return "Seen-native safetensors metadata; trained MiniLM output-LayerNorm delta has been materialized into packaged model.safetensors"
+    }
+    return "Seen-native safetensors metadata; no trained MiniLM intermediate-dense, output-dense, or output-LayerNorm delta was materialized into packaged weights"
+}
+
+fun copyBaseModelArtifacts(cfg: TrainerConfig) r: Int {
+    if cfg.baseModelPath.length() == 0 {
+        return 0
+    }
+    var count = 0
+    count = count + copyArtifact(cfg.baseModelPath, cfg.outputModelDir, "config.json")
+    count = count + copyArtifact(cfg.baseModelPath, cfg.outputModelDir, "tokenizer.json")
+    count = count + copyArtifact(cfg.baseModelPath, cfg.outputModelDir, "tokenizer_config.json")
+    count = count + copyArtifact(cfg.baseModelPath, cfg.outputModelDir, "special_tokens_map.json")
+    count = count + copyArtifact(cfg.baseModelPath, cfg.outputModelDir, "vocab.txt")
+    count = count + copyArtifact(cfg.baseModelPath, cfg.outputModelDir, "model.safetensors")
+    return count
+}
+
+fun copyArtifact(base: String, out: String, name: String) r: Int {
+    let src = base + "/" + name
+    if copyFileBytes(src, out + "/" + name) {
+        return 1
+    }
+    return 0
+}
+
+fun copyIfPresent(src: String, dst: String) r: Bool {
+    if not exists(src) {
+        return false
+    }
+    return writeAtomicText(dst, readText(src))
+}
+
+fun modulesJson() r: String {
+    return "[\n"
+        + "  {\"idx\": 0, \"name\": \"0_Transformer\", \"path\": \"\", \"type\": \"sentence_transformers.models.Transformer\"},\n"
+        + "  {\"idx\": 1, \"name\": \"1_Pooling\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"}\n"
+        + "]\n"
+}
+
+fun sentenceBertConfigJson(cfg: TrainerConfig) r: String {
+    return "{\n"
+        + "  \"max_seq_length\": " + cfg.maxSequenceLength.toString() + ",\n"
+        + "  \"do_lower_case\": true,\n"
+        + "  \"seen_trainer\": true,\n"
+        + "  \"pooling\": \"mean\"\n"
+        + "}\n"
+}
+
+fun poolingConfigJson(cfg: TrainerConfig) r: String {
+    return "{\n"
+        + "  \"word_embedding_dimension\": " + cfg.embeddingDim.toString() + ",\n"
+        + "  \"pooling_mode_cls_token\": false,\n"
+        + "  \"pooling_mode_mean_tokens\": true,\n"
+        + "  \"pooling_mode_max_tokens\": false,\n"
+        + "  \"pooling_mode_mean_sqrt_len_tokens\": false\n"
+        + "}\n"
+}
+
+fun packageReadme() r: String {
+    return "# Seen-native Sinai trainer package\n\n"
+        + "This package was produced by the 100% Seen trainer project.\n"
+        + "The active pooling contract is mean pooling for training, evaluation, and inference.\n\n"
+        + trainerPackageReadmeNote()
+}
+
+fun adapterManifestJson(cfg: TrainerConfig) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-adapter-manifest-v1\",\n"
+        + "  \"adapter_path\": \"" + cfg.adapterPath() + "\",\n"
+        + "  \"minilm_intermediate_delta_path\": \"" + cfg.minilmIntermediateDeltaPath() + "\",\n"
+        + "  \"minilm_intermediate_delta_exists\": " + exists(cfg.minilmIntermediateDeltaPath()).toString() + ",\n"
+        + "  \"minilm_query_delta_path\": \"" + cfg.minilmQueryDeltaPath() + "\",\n"
+        + "  \"minilm_query_delta_exists\": " + exists(cfg.minilmQueryDeltaPath()).toString() + ",\n"
+        + "  \"minilm_key_delta_path\": \"" + cfg.minilmKeyDeltaPath() + "\",\n"
+        + "  \"minilm_key_delta_exists\": " + exists(cfg.minilmKeyDeltaPath()).toString() + ",\n"
+        + "  \"minilm_value_delta_path\": \"" + cfg.minilmValueDeltaPath() + "\",\n"
+        + "  \"minilm_value_delta_exists\": " + exists(cfg.minilmValueDeltaPath()).toString() + ",\n"
+        + "  \"minilm_attention_dense_delta_path\": \"" + cfg.minilmAttentionDenseDeltaPath() + "\",\n"
+        + "  \"minilm_attention_dense_delta_exists\": " + exists(cfg.minilmAttentionDenseDeltaPath()).toString() + ",\n"
+        + "  \"minilm_attention_layernorm_delta_path\": \"" + cfg.minilmAttentionLayerNormDeltaPath() + "\",\n"
+        + "  \"minilm_attention_layernorm_delta_exists\": " + exists(cfg.minilmAttentionLayerNormDeltaPath()).toString() + ",\n"
+        + "  \"minilm_dense_delta_path\": \"" + cfg.minilmDenseDeltaPath() + "\",\n"
+        + "  \"minilm_dense_delta_exists\": " + exists(cfg.minilmDenseDeltaPath()).toString() + ",\n"
+        + "  \"minilm_layernorm_delta_path\": \"" + cfg.minilmLayerNormDeltaPath() + "\",\n"
+        + "  \"minilm_layernorm_delta_exists\": " + exists(cfg.minilmLayerNormDeltaPath()).toString() + ",\n"
+        + "  \"minilm_dense_adapter_path\": \"" + cfg.minilmDenseAdapterPath() + "\",\n"
+        + "  \"minilm_dense_adapter_exists\": " + exists(cfg.minilmDenseAdapterPath()).toString() + ",\n"
+        + "  \"minilm_layer_adapter_path\": \"" + cfg.minilmLayerAdapterPath() + "\",\n"
+        + "  \"minilm_layer_adapter_exists\": " + exists(cfg.minilmLayerAdapterPath()).toString() + ",\n"
+        + "  \"layer_adapter_path\": \"" + cfg.layerAdapterPath() + "\",\n"
+        + "  \"layer_adapter_exists\": " + exists(cfg.layerAdapterPath()).toString() + ",\n"
+        + "  \"adapter_exists\": " + exists(cfg.adapterPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"low_rank_projection\",\n"
+        + "  \"adapter_gradient\": \"normalized_cosine_low_rank_projection\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"applied_before_normalization\": true\n"
+        + "}\n"
+}
+
+fun minilmDenseDeltaManifestJson(cfg: TrainerConfig, materialized: Bool) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-output-dense-delta-manifest-v1\",\n"
+        + "  \"minilm_dense_delta_path\": \"" + cfg.minilmDenseDeltaPath() + "\",\n"
+        + "  \"minilm_dense_delta_exists\": " + exists(cfg.minilmDenseDeltaPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_output_dense_weight_bias_delta\",\n"
+        + "  \"adapter_gradient\": \"output_dense_weight_bias_delta_to_output_layernorm_through_downstream_transformer_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmDenseAttachedTo(cfg) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"output_dense_weight_bias_delta_to_output_layernorm_downstream_transformer_tail_to_mean_pool\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_before_output_layer_norm\": true,\n"
+        + "  \"applied_before_pooling\": true,\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmAllLayerDeltasManifestJson(cfg: TrainerConfig, layers: Int, materialized: Int) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-all-layer-deltas-manifest-v1\",\n"
+        + "  \"layers\": " + layers.toString() + ",\n"
+        + "  \"surfaces_per_layer\": 8,\n"
+        + "  \"surface_names\": [\"attention.self.query\", \"attention.self.key\", \"attention.self.value\", \"attention.output.dense\", \"attention.output.LayerNorm\", \"intermediate.dense\", \"output.dense\", \"output.LayerNorm\"],\n"
+        + "  \"delta_path_pattern\": \"" + cfg.outputModelDir + "/minilm_layer_{layer}_{surface}_delta.json\",\n"
+        + "  \"adapter_gradient\": \"simultaneous_delta_aware_per_triplet_gradients_through_layer_tail_to_mean_pool\",\n"
+        + "  \"update_mode\": \"accumulate_all_ready_layer_gradients_then_global_clip_then_adamw\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"materialized_surface_count\": " + materialized.toString() + ",\n"
+        + "  \"base_safetensors_rewritten\": " + (materialized > 0).toString() + "\n"
+        + "}\n"
+}
+
+fun minilmEmbeddingDeltasManifestJson(cfg: TrainerConfig, materialized: Bool) r: String {
+    let path = miniLMEmbeddingDeltasPath(cfg.outputModelDir)
+    return "{\n"
+        + "  \"format\": \"seen-minilm-embedding-deltas-manifest-v1\",\n"
+        + "  \"minilm_embedding_delta_path\": \"" + path + "\",\n"
+        + "  \"minilm_embedding_delta_exists\": " + exists(path).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_sparse_embedding_rows_and_embedding_layernorm_delta\",\n"
+        + "  \"adapter_gradient\": \"sparse_embedding_rows_and_embedding_layernorm_through_delta_aware_all_ready_transformer_layers_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"surface_names\": [\"embeddings.word_embeddings.sparse_rows\", \"embeddings.position_embeddings.sparse_rows\", \"embeddings.token_type_embeddings.sparse_rows\", \"embeddings.LayerNorm\"],\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmIntermediateDeltaManifestJson(cfg: TrainerConfig, materialized: Bool) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-intermediate-dense-delta-manifest-v1\",\n"
+        + "  \"minilm_intermediate_delta_path\": \"" + cfg.minilmIntermediateDeltaPath() + "\",\n"
+        + "  \"minilm_intermediate_delta_exists\": " + exists(cfg.minilmIntermediateDeltaPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_intermediate_dense_weight_bias_delta\",\n"
+        + "  \"adapter_gradient\": \"intermediate_dense_weight_bias_delta_through_gelu_output_dense_output_layernorm_downstream_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmIntermediateAttachedTo(cfg) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"intermediate_dense_delta_to_mean_pool_via_target_layer_output_and_downstream_tail\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_before_gelu\": true,\n"
+        + "  \"applied_before_output_dense\": true,\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmSelfAttentionDeltaManifestJson(cfg: TrainerConfig, projection: String, deltaPath: String, materialized: Bool) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-attention-" + projection + "-delta-manifest-v1\",\n"
+        + "  \"minilm_attention_" + projection + "_delta_path\": \"" + deltaPath + "\",\n"
+        + "  \"minilm_attention_" + projection + "_delta_exists\": " + exists(deltaPath).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_attention_" + projection + "_weight_bias_delta\",\n"
+        + "  \"adapter_gradient\": \"self_attention_" + projection + "_weight_bias_delta_through_attention_output_ffn_downstream_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmSelfAttentionAttachedTo(cfg, projection) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"self_attention_" + projection + "_delta_to_mean_pool_via_target_layer_attention_output_ffn_and_downstream_tail\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_before_attention_context\": true,\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmAttentionDenseDeltaManifestJson(cfg: TrainerConfig, materialized: Bool) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-attention-output-dense-delta-manifest-v1\",\n"
+        + "  \"minilm_attention_dense_delta_path\": \"" + cfg.minilmAttentionDenseDeltaPath() + "\",\n"
+        + "  \"minilm_attention_dense_delta_exists\": " + exists(cfg.minilmAttentionDenseDeltaPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_attention_output_dense_weight_bias_delta\",\n"
+        + "  \"adapter_gradient\": \"attention_output_dense_weight_bias_delta_through_attention_layernorm_ffn_output_layernorm_downstream_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmAttentionDenseAttachedTo(cfg) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"attention_output_dense_delta_to_mean_pool_via_target_layer_ffn_and_downstream_tail\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_before_attention_layer_norm\": true,\n"
+        + "  \"applied_before_output_dense\": true,\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmAttentionLayerNormDeltaManifestJson(cfg: TrainerConfig, materialized: Bool) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-attention-output-layernorm-delta-manifest-v1\",\n"
+        + "  \"minilm_attention_layernorm_delta_path\": \"" + cfg.minilmAttentionLayerNormDeltaPath() + "\",\n"
+        + "  \"minilm_attention_layernorm_delta_exists\": " + exists(cfg.minilmAttentionLayerNormDeltaPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_attention_output_layernorm_gamma_beta_delta\",\n"
+        + "  \"adapter_gradient\": \"attention_output_layernorm_gamma_beta_delta_through_ffn_output_layernorm_downstream_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmAttentionLayerNormAttachedTo(cfg) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"attention_output_layernorm_delta_to_mean_pool_via_target_layer_ffn_and_downstream_tail\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_after_attention_output_dense_residual\": true,\n"
+        + "  \"applied_before_intermediate_dense\": true,\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmLayerNormDeltaManifestJson(cfg: TrainerConfig, materialized: Bool) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-output-layernorm-delta-manifest-v1\",\n"
+        + "  \"minilm_layernorm_delta_path\": \"" + cfg.minilmLayerNormDeltaPath() + "\",\n"
+        + "  \"minilm_layernorm_delta_exists\": " + exists(cfg.minilmLayerNormDeltaPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_output_layernorm_gamma_beta_delta\",\n"
+        + "  \"adapter_gradient\": \"output_layernorm_gamma_beta_delta_through_downstream_transformer_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmLayerNormAttachedTo(cfg) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"output_layernorm_gamma_beta_delta_downstream_transformer_tail_to_mean_pool\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_after_output_dense_residual\": true,\n"
+        + "  \"applied_before_pooling\": true,\n"
+        + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
+        + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
+        + "}\n"
+}
+
+fun minilmDenseAdapterManifestJson(cfg: TrainerConfig) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-dense-adapter-manifest-v1\",\n"
+        + "  \"minilm_dense_adapter_path\": \"" + cfg.minilmDenseAdapterPath() + "\",\n"
+        + "  \"minilm_dense_adapter_exists\": " + exists(cfg.minilmDenseAdapterPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_output_dense_lora\",\n"
+        + "  \"adapter_gradient\": \"output_dense_lora_to_output_layernorm_through_downstream_transformer_tail_to_mean_pool\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"" + minilmDenseAttachedTo(cfg) + "\",\n"
+        + "  \"configured_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
+        + "  \"gradient_scope\": \"output_dense_lora_to_output_layernorm_downstream_transformer_tail_to_mean_pool\",\n"
+        + "  \"downstream_tail_transformer_backprop\": true,\n"
+        + "  \"applied_before_output_layer_norm\": true,\n"
+        + "  \"applied_before_pooling\": true\n"
+        + "}\n"
+}
+
+fun minilmDenseAttachedTo(cfg: TrainerConfig) r: String {
+    if cfg.minilmDenseAdapterLayer < 0 {
+        return "encoder.layer.final_ready.output.dense"
+    }
+    return "encoder.layer." + cfg.minilmDenseAdapterLayer.toString() + ".output.dense"
+}
+
+fun minilmIntermediateAttachedTo(cfg: TrainerConfig) r: String {
+    if cfg.minilmDenseAdapterLayer < 0 {
+        return "encoder.layer.final_ready.intermediate.dense"
+    }
+    return "encoder.layer." + cfg.minilmDenseAdapterLayer.toString() + ".intermediate.dense"
+}
+
+fun minilmSelfAttentionAttachedTo(cfg: TrainerConfig, projection: String) r: String {
+    if cfg.minilmDenseAdapterLayer < 0 {
+        return "encoder.layer.final_ready.attention.self." + projection
+    }
+    return "encoder.layer." + cfg.minilmDenseAdapterLayer.toString() + ".attention.self." + projection
+}
+
+fun minilmAttentionDenseAttachedTo(cfg: TrainerConfig) r: String {
+    if cfg.minilmDenseAdapterLayer < 0 {
+        return "encoder.layer.final_ready.attention.output.dense"
+    }
+    return "encoder.layer." + cfg.minilmDenseAdapterLayer.toString() + ".attention.output.dense"
+}
+
+fun minilmAttentionLayerNormAttachedTo(cfg: TrainerConfig) r: String {
+    if cfg.minilmDenseAdapterLayer < 0 {
+        return "encoder.layer.final_ready.attention.output.LayerNorm"
+    }
+    return "encoder.layer." + cfg.minilmDenseAdapterLayer.toString() + ".attention.output.LayerNorm"
+}
+
+fun minilmLayerNormAttachedTo(cfg: TrainerConfig) r: String {
+    if cfg.minilmDenseAdapterLayer < 0 {
+        return "encoder.layer.final_ready.output.LayerNorm"
+    }
+    return "encoder.layer." + cfg.minilmDenseAdapterLayer.toString() + ".output.LayerNorm"
+}
+
+fun minilmLayerAdapterManifestJson(cfg: TrainerConfig) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-layer-adapter-manifest-v1\",\n"
+        + "  \"minilm_layer_adapter_path\": \"" + cfg.minilmLayerAdapterPath() + "\",\n"
+        + "  \"minilm_layer_adapter_exists\": " + exists(cfg.minilmLayerAdapterPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_layer_low_rank_projection\",\n"
+        + "  \"adapter_gradient\": \"normalized_cosine_low_rank_projection_on_layer_mean\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"encoder.layer." + cfg.minilmAdapterLayer.toString() + ".output.LayerNorm\",\n"
+        + "  \"applied_to\": \"token_hidden_states_before_downstream_layers\",\n"
+        + "  \"applied_before_pooling\": true,\n"
+        + "  \"applied_before_output_adapters\": true\n"
+        + "}\n"
+}
+
+fun layerAdapterManifestJson(cfg: TrainerConfig) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-layer-adapter-manifest-v1\",\n"
+        + "  \"layer_adapter_path\": \"" + cfg.layerAdapterPath() + "\",\n"
+        + "  \"layer_adapter_exists\": " + exists(cfg.layerAdapterPath()).toString() + ",\n"
+        + "  \"adapter_type\": \"minilm_output_low_rank_projection\",\n"
+        + "  \"adapter_gradient\": \"normalized_cosine_low_rank_projection\",\n"
+        + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"attached_to\": \"minilm_mean_pooled_output\",\n"
+        + "  \"applied_before_final_adapter\": true\n"
+        + "}\n"
+}

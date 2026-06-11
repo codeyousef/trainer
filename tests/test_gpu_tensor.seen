@@ -1,0 +1,42 @@
+import trainer.gpu_tensor_ops.{tensorGpuBinary, tensorGpuMatmul}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun approx(value: Float, expected: Float) r: Bool {
+    let diff = if value > expected { value - expected } else { expected - value }
+    return diff < 0.001
+}
+
+fun main() -> Int {
+    let a = Array<Float>()
+    a.push(1.0)
+    a.push(2.0)
+    a.push(3.0)
+    a.push(4.0)
+    let b = Array<Float>()
+    b.push(5.0)
+    b.push(6.0)
+    b.push(7.0)
+    b.push(8.0)
+
+    let added = tensorGpuBinary(a, b, 2, 2, "tensorElementwiseAdd")
+    if added.ok == 0 {
+        println("SKIP test_gpu_tensor: GPU dispatch unavailable")
+        return 0
+    }
+    expect(approx(added.values[0], 6.0), "gpu add 0")
+    expect(approx(added.values[3], 12.0), "gpu add 3")
+
+    let product = tensorGpuMatmul(a, b, 2, 2, 2)
+    expect(product.ok == 1, "gpu matmul dispatch")
+    expect(approx(product.values[0], 19.0), "gpu matmul 00")
+    expect(approx(product.values[1], 22.0), "gpu matmul 01")
+    expect(approx(product.values[2], 43.0), "gpu matmul 10")
+    expect(approx(product.values[3], 50.0), "gpu matmul 11")
+    println("PASS test_gpu_tensor")
+    return 0
+}

@@ -1,0 +1,93 @@
+import env.env.{args}
+import config.{TrainerConfig, readConfig}
+import pipeline.{Pipeline}
+
+fun trainerMain() r: Int {
+    let argv = args()
+    if argv.length() < 2 {
+        printUsage()
+        return 1
+    }
+
+    let command = argv[1]
+    if command == "help" or command == "--help" or command == "-h" {
+        printUsage()
+        return 0
+    }
+
+    let configPath = parseConfigArg(argv)
+    let cfg = readConfig(configPath)
+    let pipeline = Pipeline.new(cfg)
+
+    println("trainer: backend " + cfg.backend + " requires_gpu " + cfg.backendGpu.toString())
+    let backendReady = pipeline.prepareBackend()
+    if backendReady == false {
+        return 2
+    }
+
+    let modelSummary = pipeline.bundle.summary()
+    var modelLine = "trainer: model "
+    modelLine = modelLine + modelSummary
+    println(modelLine)
+
+    if command == "mine" {
+        let result = pipeline.mine()
+        println("trainer: mined " + result.count.toString() + " triplets -> " + result.outputPath)
+        return 0
+    }
+    if command == "train" {
+        let result = pipeline.train()
+        println("trainer: final loss " + result.finalLoss.toString())
+        return 0
+    }
+    if command == "calibrate" {
+        let count = pipeline.calibrate()
+        println("trainer: calibrated " + count.toString() + " domains")
+        return 0
+    }
+    if command == "eval" {
+        let result = pipeline.eval()
+        println("trainer: answer rate " + result.answerRate.toString())
+        return 0
+    }
+    if command == "package" {
+        let result = pipeline.packageModel()
+        println("trainer: package -> " + result.outputDir)
+        return 0
+    }
+    if command == "run-all" {
+        return pipeline.runAll()
+    }
+
+    println("trainer: unknown command: " + command)
+    printUsage()
+    return 1
+}
+
+fun parseConfigArg(argv: Array<String>) r: String {
+    var i = 2
+    while i < argv.length() {
+        if argv[i] == "--config" {
+            if i + 1 < argv.length() {
+                return argv[i + 1]
+            }
+        }
+        if startsWithFlag(argv[i], "--config=") {
+            return argv[i].substring(9, argv[i].length())
+        }
+        i = i + 1
+    }
+    return "config/example.config.json"
+}
+
+fun startsWithFlag(text: String, prefix: String) r: Bool {
+    if text.length() < prefix.length() {
+        return false
+    }
+    return text.substring(0, prefix.length()) == prefix
+}
+
+fun printUsage() r: Void {
+    println("Seen Sinai trainer")
+    println("usage: trainer <mine|train|calibrate|eval|package|run-all> --config config.json")
+}

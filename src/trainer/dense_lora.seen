@@ -1,0 +1,1143 @@
+import io.file.{exists, readText}
+import adapter.{adapterClamp, adapterContains, adapterLowRankSeed, adapterPowFloat, adapterSqrtApprox}
+import io_utils.{writeAtomicText}
+
+class DenseLoRAAdapter {
+    var inputDim: Int
+    var outputDim: Int
+    var rank: Int
+    var rankA: Array<Float>
+    var rankB: Array<Float>
+    var rankAM: Array<Float>
+    var rankAV: Array<Float>
+    var rankBM: Array<Float>
+    var rankBV: Array<Float>
+    var stepCount: Int
+    var loaded: Bool
+    var path: String
+
+    static fun identity(inputDim: Int, outputDim: Int) r: DenseLoRAAdapter {
+        let rank = denseDefaultRank(inputDim, outputDim)
+        return DenseLoRAAdapter{
+            inputDim: inputDim,
+            outputDim: outputDim,
+            rank: rank,
+            rankA: denseRankAValues(inputDim, rank),
+            rankB: denseZeros(outputDim * rank),
+            rankAM: denseZeros(inputDim * rank),
+            rankAV: denseZeros(inputDim * rank),
+            rankBM: denseZeros(outputDim * rank),
+            rankBV: denseZeros(outputDim * rank),
+            stepCount: 0,
+            loaded: false,
+            path: ""
+        }
+    }
+
+    static fun load(path: String, inputDim: Int, outputDim: Int) r: DenseLoRAAdapter {
+        let adapter = DenseLoRAAdapter.identity(inputDim, outputDim)
+        adapter.path = path
+        if not exists(path) {
+            return adapter
+        }
+        let text = readText(path)
+        if not adapterContains(text, "\"format\": \"seen-minilm-dense-lora-adapter-v1\"") {
+            return adapter
+        }
+        let fileInput = denseParseIntValue(text, "input_dim", inputDim)
+        let fileOutput = denseParseIntValue(text, "output_dim", outputDim)
+        if fileInput != inputDim or fileOutput != outputDim {
+            return adapter
+        }
+        let rank = denseNormalizeRank(denseParseIntValue(text, "rank", denseDefaultRank(inputDim, outputDim)), inputDim, outputDim)
+        if rank != adapter.rank {
+            adapter.rank = rank
+            adapter.rankA = denseRankAValues(inputDim, rank)
+            adapter.rankB = denseZeros(outputDim * rank)
+            adapter.rankAM = denseZeros(inputDim * rank)
+            adapter.rankAV = denseZeros(inputDim * rank)
+            adapter.rankBM = denseZeros(outputDim * rank)
+            adapter.rankBV = denseZeros(outputDim * rank)
+        }
+        let parsedA = denseParseArray(text, "rank_a", inputDim * rank)
+        if parsedA.length() == inputDim * rank {
+            var i = 0
+            while i < parsedA.length() and i < adapter.rankA.length() {
+                adapter.rankA[i] = parsedA[i]
+                i = i + 1
+            }
+        }
+        let parsedB = denseParseArray(text, "rank_b", outputDim * rank)
+        if parsedB.length() == outputDim * rank {
+            var j = 0
+            while j < parsedB.length() and j < adapter.rankB.length() {
+                adapter.rankB[j] = parsedB[j]
+                j = j + 1
+            }
+        }
+        adapter.loaded = true
+        return adapter
+    }
+
+    fun apply(input: Array<Float>) r: Array<Float> {
+        let out = denseZeros(this.outputDim)
+        var o = 0
+        while o < this.outputDim {
+            var value = 0.0
+            var rankIndex = 0
+            while rankIndex < this.rank {
+                let b = denseRankBAt(this.rankB, o, rankIndex, this.rank)
+                if b != 0.0 {
+                    value = value + b * denseRankBottleneckAt(input, this.rankA, this.rank, this.inputDim, rankIndex)
+                }
+                rankIndex = rankIndex + 1
+            }
+            out[o] = value
+            o = o + 1
+        }
+        return out
+    }
+
+    fun applyGradients(gradA: Array<Float>, gradB: Array<Float>, lr: Float, weightDecay: Float, gradClip: Float) r: Bool {
+        if gradA.length() != this.rankA.length() or gradB.length() != this.rankB.length() {
+            return false
+        }
+        var norm = 0.0
+        var i = 0
+        while i < gradA.length() {
+            norm = norm + gradA[i] * gradA[i]
+            i = i + 1
+        }
+        i = 0
+        while i < gradB.length() {
+            norm = norm + gradB[i] * gradB[i]
+            i = i + 1
+        }
+        norm = adapterSqrtApprox(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        this.stepCount = this.stepCount + 1
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - adapterPowFloat(beta1, this.stepCount)
+        let beta2Correction = 1.0 - adapterPowFloat(beta2, this.stepCount)
+
+        i = 0
+        while i < this.rankA.length() {
+            let g = gradA[i] * scale
+            this.rankAM[i] = beta1 * this.rankAM[i] + (1.0 - beta1) * g
+            this.rankAV[i] = beta2 * this.rankAV[i] + (1.0 - beta2) * g * g
+            let mHat = this.rankAM[i] / beta1Correction
+            let vHat = this.rankAV[i] / beta2Correction
+            var next = this.rankA[i] - lr * weightDecay * this.rankA[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.rankA[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        i = 0
+        while i < this.rankB.length() {
+            let g = gradB[i] * scale
+            this.rankBM[i] = beta1 * this.rankBM[i] + (1.0 - beta1) * g
+            this.rankBV[i] = beta2 * this.rankBV[i] + (1.0 - beta2) * g * g
+            let mHat = this.rankBM[i] / beta1Correction
+            let vHat = this.rankBV[i] / beta2Correction
+            var next = this.rankB[i] - lr * weightDecay * this.rankB[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.rankB[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        return true
+    }
+
+    fun save(path: String) r: Bool {
+        this.path = path
+        this.loaded = true
+        return writeAtomicText(path, this.toJson())
+    }
+
+    fun toJson() r: String {
+        var out = "{\n"
+            + "  \"format\": \"seen-minilm-dense-lora-adapter-v1\",\n"
+            + "  \"input_dim\": " + this.inputDim.toString() + ",\n"
+            + "  \"output_dim\": " + this.outputDim.toString() + ",\n"
+            + "  \"rank\": " + this.rank.toString() + ",\n"
+            + "  \"rank_a\": ["
+        var i = 0
+        while i < this.rankA.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.rankA[i].toString()
+            i = i + 1
+        }
+        out = out + "],\n"
+            + "  \"rank_b\": ["
+        i = 0
+        while i < this.rankB.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.rankB[i].toString()
+            i = i + 1
+        }
+        out = out + "]\n}\n"
+        return out
+    }
+
+    fun summaryNamed(prefix: String) r: String {
+        var out = prefix + "_input_dim=" + this.inputDim.toString()
+        out = out + " " + prefix + "_output_dim=" + this.outputDim.toString()
+        out = out + " " + prefix + "_rank=" + this.rank.toString()
+        out = out + " " + prefix + "_optimizer=adamw"
+        out = out + " " + prefix + "_step=" + this.stepCount.toString()
+        out = out + " " + prefix + "_path_configured=" + denseBoolText(this.path.length() > 0)
+        return out
+    }
+}
+
+class DenseDeltaAdapter {
+    var inputDim: Int
+    var outputDim: Int
+    var weightDelta: Array<Float>
+    var biasDelta: Array<Float>
+    var weightM: Array<Float>
+    var weightV: Array<Float>
+    var biasM: Array<Float>
+    var biasV: Array<Float>
+    var stepCount: Int
+    var loaded: Bool
+    var path: String
+
+    static fun identity(inputDim: Int, outputDim: Int) r: DenseDeltaAdapter {
+        return DenseDeltaAdapter{
+            inputDim: inputDim,
+            outputDim: outputDim,
+            weightDelta: denseZeros(inputDim * outputDim),
+            biasDelta: denseZeros(outputDim),
+            weightM: denseZeros(inputDim * outputDim),
+            weightV: denseZeros(inputDim * outputDim),
+            biasM: denseZeros(outputDim),
+            biasV: denseZeros(outputDim),
+            stepCount: 0,
+            loaded: false,
+            path: ""
+        }
+    }
+
+    static fun load(path: String, inputDim: Int, outputDim: Int) r: DenseDeltaAdapter {
+        let adapter = DenseDeltaAdapter.identity(inputDim, outputDim)
+        adapter.path = path
+        if not exists(path) {
+            return adapter
+        }
+        let text = readText(path)
+        if not denseDeltaFormatRecognized(text) {
+            return adapter
+        }
+        let fileInput = denseParseIntValue(text, "input_dim", inputDim)
+        let fileOutput = denseParseIntValue(text, "output_dim", outputDim)
+        if fileInput != inputDim or fileOutput != outputDim {
+            return adapter
+        }
+        let weightCount = denseCountArray(text, "weight_delta", inputDim * outputDim)
+        let biasCount = denseCountArray(text, "bias_delta", outputDim)
+        if weightCount != inputDim * outputDim or biasCount != outputDim {
+            return adapter
+        }
+        denseCopyArrayInto(text, "weight_delta", inputDim * outputDim, adapter.weightDelta)
+        denseCopyArrayInto(text, "bias_delta", outputDim, adapter.biasDelta)
+        adapter.loaded = true
+        return adapter
+    }
+
+    fun apply(input: Array<Float>) r: Array<Float> {
+        let out = denseZeros(this.outputDim)
+        var o = 0
+        while o < this.outputDim {
+            var value = 0.0
+            if o < this.biasDelta.length() {
+                value = this.biasDelta[o]
+            }
+            var i = 0
+            while i < this.inputDim and i < input.length() {
+                let idx = o * this.inputDim + i
+                if idx < this.weightDelta.length() {
+                    value = value + this.weightDelta[idx] * input[i]
+                }
+                i = i + 1
+            }
+            out[o] = value
+            o = o + 1
+        }
+        return out
+    }
+
+    fun applyGradients(gradWeight: Array<Float>, gradBias: Array<Float>, lr: Float, weightDecay: Float, gradClip: Float) r: Bool {
+        if gradWeight.length() != this.weightDelta.length() or gradBias.length() != this.biasDelta.length() {
+            return false
+        }
+        var norm = 0.0
+        var i = 0
+        while i < gradWeight.length() {
+            norm = norm + gradWeight[i] * gradWeight[i]
+            i = i + 1
+        }
+        i = 0
+        while i < gradBias.length() {
+            norm = norm + gradBias[i] * gradBias[i]
+            i = i + 1
+        }
+        norm = adapterSqrtApprox(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        this.stepCount = this.stepCount + 1
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - adapterPowFloat(beta1, this.stepCount)
+        let beta2Correction = 1.0 - adapterPowFloat(beta2, this.stepCount)
+
+        i = 0
+        while i < this.weightDelta.length() {
+            let g = gradWeight[i] * scale
+            this.weightM[i] = beta1 * this.weightM[i] + (1.0 - beta1) * g
+            this.weightV[i] = beta2 * this.weightV[i] + (1.0 - beta2) * g * g
+            let mHat = this.weightM[i] / beta1Correction
+            let vHat = this.weightV[i] / beta2Correction
+            var next = this.weightDelta[i] - lr * weightDecay * this.weightDelta[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.weightDelta[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        i = 0
+        while i < this.biasDelta.length() {
+            let g = gradBias[i] * scale
+            this.biasM[i] = beta1 * this.biasM[i] + (1.0 - beta1) * g
+            this.biasV[i] = beta2 * this.biasV[i] + (1.0 - beta2) * g * g
+            let mHat = this.biasM[i] / beta1Correction
+            let vHat = this.biasV[i] / beta2Correction
+            var next = this.biasDelta[i] - lr * weightDecay * this.biasDelta[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.biasDelta[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        return true
+    }
+
+    fun save(path: String) r: Bool {
+        return this.saveAs(path, "seen-minilm-output-dense-delta-v1")
+    }
+
+    fun saveIntermediate(path: String) r: Bool {
+        return this.saveAs(path, "seen-minilm-intermediate-dense-delta-v1")
+    }
+
+    fun saveAs(path: String, format: String) r: Bool {
+        this.path = path
+        this.loaded = true
+        return writeAtomicText(path, this.toJsonWithFormat(format))
+    }
+
+    fun toJson() r: String {
+        return this.toJsonWithFormat("seen-minilm-output-dense-delta-v1")
+    }
+
+    fun toJsonWithFormat(format: String) r: String {
+        var out = "{\n"
+            + "  \"format\": \"" + format + "\",\n"
+            + "  \"input_dim\": " + this.inputDim.toString() + ",\n"
+            + "  \"output_dim\": " + this.outputDim.toString() + ",\n"
+            + "  \"weight_delta\": ["
+        var i = 0
+        while i < this.weightDelta.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.weightDelta[i].toString()
+            i = i + 1
+        }
+        out = out + "],\n"
+            + "  \"bias_delta\": ["
+        i = 0
+        while i < this.biasDelta.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.biasDelta[i].toString()
+            i = i + 1
+        }
+        out = out + "]\n}\n"
+        return out
+    }
+
+    fun summaryNamed(prefix: String) r: String {
+        var out = prefix + "_input_dim=" + this.inputDim.toString()
+        out = out + " " + prefix + "_output_dim=" + this.outputDim.toString()
+        out = out + " " + prefix + "_params=" + (this.weightDelta.length() + this.biasDelta.length()).toString()
+        out = out + " " + prefix + "_optimizer=adamw"
+        out = out + " " + prefix + "_step=" + this.stepCount.toString()
+        out = out + " " + prefix + "_path_configured=" + denseBoolText(this.path.length() > 0)
+        return out
+    }
+}
+
+fun denseDeltaFormatRecognized(text: String) r: Bool {
+    if adapterContains(text, "\"format\": \"seen-minilm-output-dense-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-intermediate-dense-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-attention-output-dense-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-attention-query-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-attention-key-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-attention-value-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-attention-query-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-attention-key-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-attention-value-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-attention-output-dense-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-intermediate-dense-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-output-dense-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-dense-delta-v1\"") {
+        return true
+    }
+    return false
+}
+
+class LayerNormDeltaAdapter {
+    var dim: Int
+    var weightDelta: Array<Float>
+    var biasDelta: Array<Float>
+    var weightM: Array<Float>
+    var weightV: Array<Float>
+    var biasM: Array<Float>
+    var biasV: Array<Float>
+    var stepCount: Int
+    var loaded: Bool
+    var path: String
+
+    static fun identity(dim: Int) r: LayerNormDeltaAdapter {
+        return LayerNormDeltaAdapter{
+            dim: dim,
+            weightDelta: denseZeros(dim),
+            biasDelta: denseZeros(dim),
+            weightM: denseZeros(dim),
+            weightV: denseZeros(dim),
+            biasM: denseZeros(dim),
+            biasV: denseZeros(dim),
+            stepCount: 0,
+            loaded: false,
+            path: ""
+        }
+    }
+
+    static fun load(path: String, dim: Int) r: LayerNormDeltaAdapter {
+        let adapter = LayerNormDeltaAdapter.identity(dim)
+        adapter.path = path
+        if not exists(path) {
+            return adapter
+        }
+        let text = readText(path)
+        if not layerNormDeltaFormatRecognized(text) {
+            return adapter
+        }
+        let fileDim = denseParseIntValue(text, "dim", dim)
+        if fileDim != dim {
+            return adapter
+        }
+        let weightCount = denseCountArray(text, "weight_delta", dim)
+        let biasCount = denseCountArray(text, "bias_delta", dim)
+        if weightCount != dim or biasCount != dim {
+            return adapter
+        }
+        denseCopyArrayInto(text, "weight_delta", dim, adapter.weightDelta)
+        denseCopyArrayInto(text, "bias_delta", dim, adapter.biasDelta)
+        adapter.loaded = true
+        return adapter
+    }
+
+    fun effectiveWeight(base: Array<Float>) r: Array<Float> {
+        let out = Array<Float>()
+        var i = 0
+        while i < this.dim {
+            var value = 1.0
+            if i < base.length() {
+                value = base[i]
+            }
+            if i < this.weightDelta.length() {
+                value = value + this.weightDelta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        return out
+    }
+
+    fun effectiveBias(base: Array<Float>) r: Array<Float> {
+        let out = Array<Float>()
+        var i = 0
+        while i < this.dim {
+            var value = 0.0
+            if i < base.length() {
+                value = base[i]
+            }
+            if i < this.biasDelta.length() {
+                value = value + this.biasDelta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        return out
+    }
+
+    fun applyGradients(gradWeight: Array<Float>, gradBias: Array<Float>, lr: Float, weightDecay: Float, gradClip: Float) r: Bool {
+        if gradWeight.length() != this.weightDelta.length() or gradBias.length() != this.biasDelta.length() {
+            return false
+        }
+        var norm = 0.0
+        var i = 0
+        while i < gradWeight.length() {
+            norm = norm + gradWeight[i] * gradWeight[i]
+            i = i + 1
+        }
+        i = 0
+        while i < gradBias.length() {
+            norm = norm + gradBias[i] * gradBias[i]
+            i = i + 1
+        }
+        norm = adapterSqrtApprox(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        this.stepCount = this.stepCount + 1
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - adapterPowFloat(beta1, this.stepCount)
+        let beta2Correction = 1.0 - adapterPowFloat(beta2, this.stepCount)
+
+        i = 0
+        while i < this.weightDelta.length() {
+            let g = gradWeight[i] * scale
+            this.weightM[i] = beta1 * this.weightM[i] + (1.0 - beta1) * g
+            this.weightV[i] = beta2 * this.weightV[i] + (1.0 - beta2) * g * g
+            let mHat = this.weightM[i] / beta1Correction
+            let vHat = this.weightV[i] / beta2Correction
+            var next = this.weightDelta[i] - lr * weightDecay * this.weightDelta[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.weightDelta[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        i = 0
+        while i < this.biasDelta.length() {
+            let g = gradBias[i] * scale
+            this.biasM[i] = beta1 * this.biasM[i] + (1.0 - beta1) * g
+            this.biasV[i] = beta2 * this.biasV[i] + (1.0 - beta2) * g * g
+            let mHat = this.biasM[i] / beta1Correction
+            let vHat = this.biasV[i] / beta2Correction
+            var next = this.biasDelta[i] - lr * weightDecay * this.biasDelta[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.biasDelta[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        return true
+    }
+
+    fun save(path: String) r: Bool {
+        return this.saveAs(path, "seen-minilm-output-layernorm-delta-v1")
+    }
+
+    fun saveAttentionOutput(path: String) r: Bool {
+        return this.saveAs(path, "seen-minilm-attention-output-layernorm-delta-v1")
+    }
+
+    fun saveAs(path: String, format: String) r: Bool {
+        this.path = path
+        this.loaded = true
+        return writeAtomicText(path, this.toJsonWithFormat(format))
+    }
+
+    fun toJson() r: String {
+        return this.toJsonWithFormat("seen-minilm-output-layernorm-delta-v1")
+    }
+
+    fun toJsonWithFormat(format: String) r: String {
+        var out = "{\n"
+            + "  \"format\": \"" + format + "\",\n"
+            + "  \"dim\": " + this.dim.toString() + ",\n"
+            + "  \"weight_delta\": ["
+        var i = 0
+        while i < this.weightDelta.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.weightDelta[i].toString()
+            i = i + 1
+        }
+        out = out + "],\n"
+            + "  \"bias_delta\": ["
+        i = 0
+        while i < this.biasDelta.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.biasDelta[i].toString()
+            i = i + 1
+        }
+        out = out + "]\n}\n"
+        return out
+    }
+
+    fun summaryNamed(prefix: String) r: String {
+        var out = prefix + "_dim=" + this.dim.toString()
+        out = out + " " + prefix + "_params=" + (this.weightDelta.length() + this.biasDelta.length()).toString()
+        out = out + " " + prefix + "_optimizer=adamw"
+        out = out + " " + prefix + "_step=" + this.stepCount.toString()
+        out = out + " " + prefix + "_path_configured=" + denseBoolText(this.path.length() > 0)
+        return out
+    }
+}
+
+class MiniLMLayerDeltas {
+    var layers: Int
+    var hiddenSize: Int
+    var intermediateSize: Int
+    var queryDeltas: Array<DenseDeltaAdapter>
+    var keyDeltas: Array<DenseDeltaAdapter>
+    var valueDeltas: Array<DenseDeltaAdapter>
+    var attentionDenseDeltas: Array<DenseDeltaAdapter>
+    var attentionLayerNormDeltas: Array<LayerNormDeltaAdapter>
+    var intermediateDeltas: Array<DenseDeltaAdapter>
+    var outputDeltas: Array<DenseDeltaAdapter>
+    var outputLayerNormDeltas: Array<LayerNormDeltaAdapter>
+    var loadedFiles: Int
+
+    static fun identity(layers: Int, hiddenSize: Int, intermediateSize: Int) r: MiniLMLayerDeltas {
+        let queryDeltas = Array<DenseDeltaAdapter>()
+        let keyDeltas = Array<DenseDeltaAdapter>()
+        let valueDeltas = Array<DenseDeltaAdapter>()
+        let attentionDenseDeltas = Array<DenseDeltaAdapter>()
+        let attentionLayerNormDeltas = Array<LayerNormDeltaAdapter>()
+        let intermediateDeltas = Array<DenseDeltaAdapter>()
+        let outputDeltas = Array<DenseDeltaAdapter>()
+        let outputLayerNormDeltas = Array<LayerNormDeltaAdapter>()
+        var layer = 0
+        while layer < layers {
+            queryDeltas.push(DenseDeltaAdapter.identity(hiddenSize, hiddenSize))
+            keyDeltas.push(DenseDeltaAdapter.identity(hiddenSize, hiddenSize))
+            valueDeltas.push(DenseDeltaAdapter.identity(hiddenSize, hiddenSize))
+            attentionDenseDeltas.push(DenseDeltaAdapter.identity(hiddenSize, hiddenSize))
+            attentionLayerNormDeltas.push(LayerNormDeltaAdapter.identity(hiddenSize))
+            intermediateDeltas.push(DenseDeltaAdapter.identity(hiddenSize, intermediateSize))
+            outputDeltas.push(DenseDeltaAdapter.identity(intermediateSize, hiddenSize))
+            outputLayerNormDeltas.push(LayerNormDeltaAdapter.identity(hiddenSize))
+            layer = layer + 1
+        }
+        return MiniLMLayerDeltas{
+            layers: layers,
+            hiddenSize: hiddenSize,
+            intermediateSize: intermediateSize,
+            queryDeltas: queryDeltas,
+            keyDeltas: keyDeltas,
+            valueDeltas: valueDeltas,
+            attentionDenseDeltas: attentionDenseDeltas,
+            attentionLayerNormDeltas: attentionLayerNormDeltas,
+            intermediateDeltas: intermediateDeltas,
+            outputDeltas: outputDeltas,
+            outputLayerNormDeltas: outputLayerNormDeltas,
+            loadedFiles: 0
+        }
+    }
+
+    static fun load(outputDir: String, layers: Int, hiddenSize: Int, intermediateSize: Int) r: MiniLMLayerDeltas {
+        let deltas = MiniLMLayerDeltas.identity(layers, hiddenSize, intermediateSize)
+        var layer = 0
+        while layer < layers {
+            deltas.queryDeltas[layer] = DenseDeltaAdapter.load(miniLMLayerQueryDeltaPath(outputDir, layer), hiddenSize, hiddenSize)
+            if deltas.queryDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.keyDeltas[layer] = DenseDeltaAdapter.load(miniLMLayerKeyDeltaPath(outputDir, layer), hiddenSize, hiddenSize)
+            if deltas.keyDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.valueDeltas[layer] = DenseDeltaAdapter.load(miniLMLayerValueDeltaPath(outputDir, layer), hiddenSize, hiddenSize)
+            if deltas.valueDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.attentionDenseDeltas[layer] = DenseDeltaAdapter.load(miniLMLayerAttentionDenseDeltaPath(outputDir, layer), hiddenSize, hiddenSize)
+            if deltas.attentionDenseDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.attentionLayerNormDeltas[layer] = LayerNormDeltaAdapter.load(miniLMLayerAttentionLayerNormDeltaPath(outputDir, layer), hiddenSize)
+            if deltas.attentionLayerNormDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.intermediateDeltas[layer] = DenseDeltaAdapter.load(miniLMLayerIntermediateDeltaPath(outputDir, layer), hiddenSize, intermediateSize)
+            if deltas.intermediateDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.outputDeltas[layer] = DenseDeltaAdapter.load(miniLMLayerOutputDeltaPath(outputDir, layer), intermediateSize, hiddenSize)
+            if deltas.outputDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            deltas.outputLayerNormDeltas[layer] = LayerNormDeltaAdapter.load(miniLMLayerOutputLayerNormDeltaPath(outputDir, layer), hiddenSize)
+            if deltas.outputLayerNormDeltas[layer].loaded { deltas.loadedFiles = deltas.loadedFiles + 1 }
+            layer = layer + 1
+        }
+        return deltas
+    }
+
+    fun hasLayer(layer: Int) r: Bool {
+        return layer >= 0 and layer < this.layers
+            and layer < this.queryDeltas.length()
+            and layer < this.keyDeltas.length()
+            and layer < this.valueDeltas.length()
+            and layer < this.attentionDenseDeltas.length()
+            and layer < this.attentionLayerNormDeltas.length()
+            and layer < this.intermediateDeltas.length()
+            and layer < this.outputDeltas.length()
+            and layer < this.outputLayerNormDeltas.length()
+    }
+
+    fun saveAll(outputDir: String) r: Int {
+        var count = 0
+        var layer = 0
+        while layer < this.layers {
+            if this.hasLayer(layer) {
+                if this.queryDeltas[layer].saveAs(miniLMLayerQueryDeltaPath(outputDir, layer), "seen-minilm-layer-attention-query-delta-v1") { count = count + 1 }
+                if this.keyDeltas[layer].saveAs(miniLMLayerKeyDeltaPath(outputDir, layer), "seen-minilm-layer-attention-key-delta-v1") { count = count + 1 }
+                if this.valueDeltas[layer].saveAs(miniLMLayerValueDeltaPath(outputDir, layer), "seen-minilm-layer-attention-value-delta-v1") { count = count + 1 }
+                if this.attentionDenseDeltas[layer].saveAs(miniLMLayerAttentionDenseDeltaPath(outputDir, layer), "seen-minilm-layer-attention-output-dense-delta-v1") { count = count + 1 }
+                if this.attentionLayerNormDeltas[layer].saveAs(miniLMLayerAttentionLayerNormDeltaPath(outputDir, layer), "seen-minilm-layer-attention-output-layernorm-delta-v1") { count = count + 1 }
+                if this.intermediateDeltas[layer].saveAs(miniLMLayerIntermediateDeltaPath(outputDir, layer), "seen-minilm-layer-intermediate-dense-delta-v1") { count = count + 1 }
+                if this.outputDeltas[layer].saveAs(miniLMLayerOutputDeltaPath(outputDir, layer), "seen-minilm-layer-output-dense-delta-v1") { count = count + 1 }
+                if this.outputLayerNormDeltas[layer].saveAs(miniLMLayerOutputLayerNormDeltaPath(outputDir, layer), "seen-minilm-layer-output-layernorm-delta-v1") { count = count + 1 }
+            }
+            layer = layer + 1
+        }
+        return count
+    }
+
+    fun summaryNamed(prefix: String) r: String {
+        let surfaces = this.layers * 8
+        var out = prefix + "_layers=" + this.layers.toString()
+        out = out + " " + prefix + "_surfaces=" + surfaces.toString()
+        out = out + " " + prefix + "_loaded_files=" + this.loadedFiles.toString()
+        out = out + " " + prefix + "_optimizer=adamw"
+        return out
+    }
+}
+
+fun miniLMLayerQueryDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_attention_query_delta.json"
+}
+
+fun miniLMLayerKeyDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_attention_key_delta.json"
+}
+
+fun miniLMLayerValueDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_attention_value_delta.json"
+}
+
+fun miniLMLayerAttentionDenseDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_attention_output_dense_delta.json"
+}
+
+fun miniLMLayerAttentionLayerNormDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_attention_output_layernorm_delta.json"
+}
+
+fun miniLMLayerIntermediateDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_intermediate_dense_delta.json"
+}
+
+fun miniLMLayerOutputDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_output_dense_delta.json"
+}
+
+fun miniLMLayerOutputLayerNormDeltaPath(outputDir: String, layer: Int) r: String {
+    return outputDir + "/minilm_layer_" + layer.toString() + "_output_layernorm_delta.json"
+}
+
+fun layerNormDeltaFormatRecognized(text: String) r: Bool {
+    if adapterContains(text, "\"format\": \"seen-minilm-output-layernorm-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-attention-output-layernorm-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-attention-output-layernorm-delta-v1\"") {
+        return true
+    }
+    if adapterContains(text, "\"format\": \"seen-minilm-layer-output-layernorm-delta-v1\"") {
+        return true
+    }
+    return false
+}
+
+fun denseBoolText(value: Bool) r: String {
+    if value {
+        return "true"
+    }
+    return "false"
+}
+
+fun denseDefaultRank(inputDim: Int, outputDim: Int) r: Int {
+    let minDim = denseMin(inputDim, outputDim)
+    if minDim <= 0 {
+        return 0
+    }
+    if minDim < 8 {
+        return 2
+    }
+    return 4
+}
+
+fun denseNormalizeRank(rank: Int, inputDim: Int, outputDim: Int) r: Int {
+    let minDim = denseMin(inputDim, outputDim)
+    if minDim <= 0 {
+        return 0
+    }
+    var out = rank
+    if out < 0 {
+        out = denseDefaultRank(inputDim, outputDim)
+    }
+    if out > minDim {
+        out = minDim
+    }
+    return out
+}
+
+fun denseRankAValues(inputDim: Int, rank: Int) r: Array<Float> {
+    let values = Array<Float>()
+    var rankIndex = 0
+    while rankIndex < rank {
+        var i = 0
+        while i < inputDim {
+            values.push(adapterLowRankSeed(rankIndex, i))
+            i = i + 1
+        }
+        rankIndex = rankIndex + 1
+    }
+    return values
+}
+
+fun denseZeros(count: Int) r: Array<Float> {
+    let values = Array<Float>()
+    var i = 0
+    while i < count {
+        values.push(0.0)
+        i = i + 1
+    }
+    return values
+}
+
+fun denseRankBottleneckAt(input: Array<Float>, rankA: Array<Float>, rank: Int, inputDim: Int, rankIndex: Int) r: Float {
+    if rank <= 0 or rankIndex < 0 or rankIndex >= rank {
+        return 0.0
+    }
+    var value = 0.0
+    var i = 0
+    while i < inputDim and i < input.length() {
+        let idx = rankIndex * inputDim + i
+        if idx < rankA.length() {
+            value = value + rankA[idx] * input[i]
+        }
+        i = i + 1
+    }
+    return value
+}
+
+fun denseRankBAt(rankB: Array<Float>, outputIndex: Int, rankIndex: Int, rank: Int) r: Float {
+    if rank <= 0 or outputIndex < 0 or rankIndex < 0 or rankIndex >= rank {
+        return 0.0
+    }
+    let idx = outputIndex * rank + rankIndex
+    if idx < 0 or idx >= rankB.length() {
+        return 0.0
+    }
+    return rankB[idx]
+}
+
+fun denseParseArray(text: String, key: String, maxCount: Int) r: Array<Float> {
+    let values = Array<Float>()
+    let start = denseFindArrayStart(text, key)
+    if start < 0 {
+        return values
+    }
+    var i = start
+    while i < text.length() and values.length() < maxCount {
+        i = denseSkipWs(text, i)
+        if i >= text.length() or text.charAt(i) == 93 {
+            return values
+        }
+        let numberStart = i
+        while i < text.length() {
+            let ch = text.charAt(i)
+            if (ch >= 48 and ch <= 57) or ch == 45 or ch == 43 or ch == 46 or ch == 101 or ch == 69 {
+                i = i + 1
+            } else {
+                break
+            }
+        }
+        if i > numberStart {
+            values.push(denseParseFloat(text.substring(numberStart, i)))
+        }
+        i = denseSkipWs(text, i)
+        if i < text.length() and text.charAt(i) == 44 {
+            i = i + 1
+        }
+    }
+    return values
+}
+
+fun denseCountArray(text: String, key: String, maxCount: Int) r: Int {
+    let start = denseFindArrayStart(text, key)
+    if start < 0 {
+        return 0
+    }
+    var count = 0
+    var i = start
+    while i < text.length() and count <= maxCount {
+        i = denseSkipWs(text, i)
+        if i >= text.length() or text.charAt(i) == 93 {
+            return count
+        }
+        let numberStart = i
+        while i < text.length() {
+            let ch = text.charAt(i)
+            if (ch >= 48 and ch <= 57) or ch == 45 or ch == 43 or ch == 46 or ch == 101 or ch == 69 {
+                i = i + 1
+            } else {
+                break
+            }
+        }
+        if i > numberStart {
+            count = count + 1
+        } else {
+            i = i + 1
+        }
+        i = denseSkipWs(text, i)
+        if i < text.length() and text.charAt(i) == 44 {
+            i = i + 1
+        }
+    }
+    return count
+}
+
+fun denseCopyArrayInto(text: String, key: String, maxCount: Int, target: Array<Float>) r: Int {
+    let start = denseFindArrayStart(text, key)
+    if start < 0 {
+        return 0
+    }
+    var count = 0
+    var i = start
+    while i < text.length() and count < maxCount and count < target.length() {
+        i = denseSkipWs(text, i)
+        if i >= text.length() or text.charAt(i) == 93 {
+            return count
+        }
+        let numberStart = i
+        while i < text.length() {
+            let ch = text.charAt(i)
+            if (ch >= 48 and ch <= 57) or ch == 45 or ch == 43 or ch == 46 or ch == 101 or ch == 69 {
+                i = i + 1
+            } else {
+                break
+            }
+        }
+        if i > numberStart {
+            target[count] = denseParseFloat(text.substring(numberStart, i))
+            count = count + 1
+        } else {
+            i = i + 1
+        }
+        i = denseSkipWs(text, i)
+        if i < text.length() and text.charAt(i) == 44 {
+            i = i + 1
+        }
+    }
+    return count
+}
+
+fun denseParseIntValue(text: String, key: String, fallback: Int) r: Int {
+    let start = denseFindValueStart(text, key)
+    if start < 0 {
+        return fallback
+    }
+    var i = denseSkipWs(text, start)
+    let numberStart = i
+    if i < text.length() and text.charAt(i) == 45 {
+        i = i + 1
+    }
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        i = i + 1
+    }
+    if i <= numberStart {
+        return fallback
+    }
+    return denseParseInt(text.substring(numberStart, i))
+}
+
+fun denseFindArrayStart(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if denseMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 91 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun denseFindValueStart(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if denseMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun denseMatchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun denseSkipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+fun denseParseFloat(text: String) r: Float {
+    var sign = 1.0
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1.0
+        i = 1
+    } else if text.length() > 0 and text.charAt(0) == 43 {
+        i = 1
+    }
+    var value = 0.0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10.0 + (text.charAt(i) - 48).toFloat()
+        i = i + 1
+    }
+    if i < text.length() and text.charAt(i) == 46 {
+        i = i + 1
+        var place = 0.1
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            value = value + (text.charAt(i) - 48).toFloat() * place
+            place = place * 0.1
+            i = i + 1
+        }
+    }
+    if i < text.length() and (text.charAt(i) == 101 or text.charAt(i) == 69) {
+        i = i + 1
+        var expSign = 1
+        if i < text.length() and text.charAt(i) == 45 {
+            expSign = -1
+            i = i + 1
+        } else if i < text.length() and text.charAt(i) == 43 {
+            i = i + 1
+        }
+        var exponent = 0
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            exponent = exponent * 10 + (text.charAt(i) - 48)
+            i = i + 1
+        }
+        value = value * densePow10(expSign * exponent)
+    }
+    return sign * value
+}
+
+fun denseParseInt(text: String) r: Int {
+    var sign = 1
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1
+        i = 1
+    } else if text.length() > 0 and text.charAt(0) == 43 {
+        i = 1
+    }
+    var value = 0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10 + (text.charAt(i) - 48)
+        i = i + 1
+    }
+    return sign * value
+}
+
+fun densePow10(exponent: Int) r: Float {
+    var value = 1.0
+    if exponent >= 0 {
+        var i = 0
+        while i < exponent {
+            value = value * 10.0
+            i = i + 1
+        }
+        return value
+    }
+    var j = 0
+    while j < 0 - exponent {
+        value = value / 10.0
+        j = j + 1
+    }
+    return value
+}
+
+fun denseMin(a: Int, b: Int) r: Int {
+    if a < b {
+        return a
+    }
+    return b
+}

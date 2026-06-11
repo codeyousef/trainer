@@ -1,0 +1,182 @@
+import trainer.base_update.{directBaseUpdateManifestPath, writeDirectBaseWeightUpdateArtifact}
+import trainer.config.{TrainerConfig}
+import trainer.dense_lora.{DenseDeltaAdapter, miniLMLayerQueryDeltaPath}
+import trainer.embedding_delta.{MiniLMEmbeddingDeltas, miniLMEmbeddingDeltasPath}
+import trainer.io.file.{exists, readText}
+import trainer.safetensors.{SafeTensorInfo, SafeTensorWriteSpec, loadTensorF32, writeTensorBundleF32}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun closeEnough(value: Float, expected: Float) r: Bool {
+    let diff = value - expected
+    if diff < 0.0 {
+        return (0.0 - diff) < 0.0001
+    }
+    return diff < 0.0001
+}
+
+fun stringContains(text: String, needle: String) r: Bool {
+    if needle.length() == 0 {
+        return true
+    }
+    if text.length() < needle.length() {
+        return false
+    }
+    var i = 0
+    while i <= text.length() - needle.length() {
+        var matched = true
+        var j = 0
+        while j < needle.length() {
+            if text.charAt(i + j) != needle.charAt(j) {
+                matched = false
+                j = needle.length()
+            } else {
+                j = j + 1
+            }
+        }
+        if matched {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fun hasNul(text: String) r: Bool {
+    var i = 0
+    while i < text.length() {
+        if text.charAt(i) == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fun main() -> Int {
+    let baseDir = "/tmp/seen_trainer_base_update/base"
+    let outDir = "/tmp/seen_trainer_base_update/out"
+    let specs = Array<SafeTensorWriteSpec>()
+
+    let word = Array<Float>()
+    word.push(0.0)
+    word.push(0.1)
+    word.push(0.2)
+    word.push(0.3)
+    specs.push(SafeTensorWriteSpec.new("embeddings.word_embeddings.weight", 2, 2, word))
+
+    let position = Array<Float>()
+    position.push(1.0)
+    position.push(1.1)
+    position.push(1.2)
+    position.push(1.3)
+    specs.push(SafeTensorWriteSpec.new("embeddings.position_embeddings.weight", 2, 2, position))
+
+    let tokenType = Array<Float>()
+    tokenType.push(2.0)
+    tokenType.push(2.1)
+    specs.push(SafeTensorWriteSpec.new("embeddings.token_type_embeddings.weight", 1, 2, tokenType))
+
+    let embeddingNormWeight = Array<Float>()
+    embeddingNormWeight.push(1.0)
+    embeddingNormWeight.push(1.0)
+    specs.push(SafeTensorWriteSpec.new("embeddings.LayerNorm.weight", 1, 2, embeddingNormWeight))
+
+    let embeddingNormBias = Array<Float>()
+    embeddingNormBias.push(0.0)
+    embeddingNormBias.push(0.0)
+    specs.push(SafeTensorWriteSpec.new("embeddings.LayerNorm.bias", 1, 2, embeddingNormBias))
+
+    let queryWeight = Array<Float>()
+    queryWeight.push(3.0)
+    queryWeight.push(3.1)
+    queryWeight.push(3.2)
+    queryWeight.push(3.3)
+    specs.push(SafeTensorWriteSpec.new("encoder.layer.0.attention.self.query.weight", 2, 2, queryWeight))
+
+    let queryBias = Array<Float>()
+    queryBias.push(0.4)
+    queryBias.push(0.5)
+    specs.push(SafeTensorWriteSpec.new("encoder.layer.0.attention.self.query.bias", 1, 2, queryBias))
+
+    expect(writeTensorBundleF32(baseDir + "/model.safetensors", specs), "write base model bundle")
+
+    let cfg = TrainerConfig.defaults()
+    cfg.baseModelPath = baseDir
+    cfg.outputModelDir = outDir
+
+    let embeddingDeltas = MiniLMEmbeddingDeltas.identity(2, 2, 2, 1)
+    embeddingDeltas.wordRowIds.push(1)
+    embeddingDeltas.wordDelta.push(0.01)
+    embeddingDeltas.wordDelta.push(0.02)
+    embeddingDeltas.positionRowIds.push(0)
+    embeddingDeltas.positionDelta.push(-0.1)
+    embeddingDeltas.positionDelta.push(-0.2)
+    embeddingDeltas.tokenTypeRowIds.push(0)
+    embeddingDeltas.tokenTypeDelta.push(0.3)
+    embeddingDeltas.tokenTypeDelta.push(0.4)
+    embeddingDeltas.layerNormWeightDelta[0] = 0.5
+    embeddingDeltas.layerNormWeightDelta[1] = -0.25
+    embeddingDeltas.layerNormBiasDelta[0] = 0.05
+    embeddingDeltas.layerNormBiasDelta[1] = -0.05
+    expect(embeddingDeltas.save(miniLMEmbeddingDeltasPath(outDir)), "save embedding deltas")
+
+    let queryDelta = DenseDeltaAdapter.identity(2, 2)
+    queryDelta.weightDelta[0] = 0.1
+    queryDelta.weightDelta[1] = 0.2
+    queryDelta.weightDelta[2] = 0.3
+    queryDelta.weightDelta[3] = 0.4
+    queryDelta.biasDelta[0] = -0.1
+    queryDelta.biasDelta[1] = 0.25
+    expect(queryDelta.saveAs(miniLMLayerQueryDeltaPath(outDir, 0), "seen-minilm-layer-attention-query-delta-v1"), "save query delta")
+
+    let staleLegacyQueryDelta = DenseDeltaAdapter.identity(2, 2)
+    staleLegacyQueryDelta.weightDelta[0] = 10.0
+    staleLegacyQueryDelta.weightDelta[1] = 10.0
+    staleLegacyQueryDelta.weightDelta[2] = 10.0
+    staleLegacyQueryDelta.weightDelta[3] = 10.0
+    staleLegacyQueryDelta.biasDelta[0] = 10.0
+    staleLegacyQueryDelta.biasDelta[1] = 10.0
+    expect(staleLegacyQueryDelta.saveAs(cfg.minilmQueryDeltaPath(), "seen-minilm-attention-query-delta-v1"), "save stale legacy query delta")
+
+    let result = writeDirectBaseWeightUpdateArtifact(cfg, 1, 2, 2)
+    expect(result.copied, "base safetensors copied")
+    expect(result.embeddingMaterialized, "embedding deltas flushed")
+    expect(result.allLayerSurfaces == 1, "one layer surface flushed")
+    expect(result.legacySurfaces == 0, "legacy surfaces skipped when all-layer deltas exist")
+    expect(result.totalSurfaces == 2, "surface count includes embedding bundle")
+    expect(exists(result.outputPath), "direct base weights artifact exists")
+    expect(exists(directBaseUpdateManifestPath(cfg)), "direct base update manifest exists")
+    let manifest = readText(directBaseUpdateManifestPath(cfg))
+    expect(not hasNul(manifest), "direct base update manifest must not contain nul bytes")
+    expect(stringContains(manifest, "\"copied_base_safetensors\": true,"), "manifest bool field is plain json")
+    expect(stringContains(manifest, "\"full_base_model_weight_backprop\": false,"), "partial fixture does not claim full base backprop")
+    expect(stringContains(manifest, "\"expected_all_layer_surface_count\": 8,"), "manifest records expected full layer surface count")
+    expect(stringContains(manifest, "\"legacy_target_surface_count\": 0,"), "manifest records skipped legacy surfaces")
+
+    let info = SafeTensorInfo.inspect(result.outputPath)
+    let wordLoaded = loadTensorF32(info, "embeddings.word_embeddings.weight")
+    let positionLoaded = loadTensorF32(info, "embeddings.position_embeddings.weight")
+    let tokenTypeLoaded = loadTensorF32(info, "embeddings.token_type_embeddings.weight")
+    let embeddingWeightLoaded = loadTensorF32(info, "embeddings.LayerNorm.weight")
+    let embeddingBiasLoaded = loadTensorF32(info, "embeddings.LayerNorm.bias")
+    let queryWeightLoaded = loadTensorF32(info, "encoder.layer.0.attention.self.query.weight")
+    let queryBiasLoaded = loadTensorF32(info, "encoder.layer.0.attention.self.query.bias")
+    expect(wordLoaded.ok and positionLoaded.ok and tokenTypeLoaded.ok, "embedding tensors load")
+    expect(embeddingWeightLoaded.ok and embeddingBiasLoaded.ok, "embedding layernorm tensors load")
+    expect(queryWeightLoaded.ok and queryBiasLoaded.ok, "query tensors load")
+    expect(closeEnough(wordLoaded.tensor.at(1, 0), 0.21) and closeEnough(wordLoaded.tensor.at(1, 1), 0.32), "word row updated in direct base")
+    expect(closeEnough(positionLoaded.tensor.at(0, 0), 0.9) and closeEnough(positionLoaded.tensor.at(0, 1), 0.9), "position row updated in direct base")
+    expect(closeEnough(tokenTypeLoaded.tensor.at(0, 0), 2.3) and closeEnough(tokenTypeLoaded.tensor.at(0, 1), 2.5), "token type row updated in direct base")
+    expect(closeEnough(embeddingWeightLoaded.tensor.at(0, 0), 1.5) and closeEnough(embeddingWeightLoaded.tensor.at(0, 1), 0.75), "embedding layernorm weight updated in direct base")
+    expect(closeEnough(embeddingBiasLoaded.tensor.at(0, 0), 0.05) and closeEnough(embeddingBiasLoaded.tensor.at(0, 1), -0.05), "embedding layernorm bias updated in direct base")
+    expect(closeEnough(queryWeightLoaded.tensor.at(0, 0), 3.1) and closeEnough(queryWeightLoaded.tensor.at(1, 1), 3.7), "query weight updated in direct base")
+    expect(closeEnough(queryBiasLoaded.tensor.at(0, 0), 0.3) and closeEnough(queryBiasLoaded.tensor.at(0, 1), 0.75), "query bias updated in direct base")
+
+    println("PASS test_base_update")
+    return 0
+}

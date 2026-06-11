@@ -1,0 +1,146 @@
+import calibration.{DomainThreshold, calibrateThresholds, holdoutSplit, readCalibrationDataset, thresholdFor}
+import config.{TrainerConfig}
+import encoder.{Encoder}
+import io.file.{exists}
+import io_utils.{writeAtomicText}
+import json.builder.{escapeJsonString}
+import jsonl.{TripletExample, readTriplets}
+import math_utils.{cosine}
+
+class EvalResult {
+    var total: Int
+    var answered: Int
+    var answerRate: Float
+    var outputPath: String
+
+    static fun new(total: Int, answered: Int, answerRate: Float, outputPath: String) r: EvalResult {
+        return EvalResult{ total: total, answered: answered, answerRate: answerRate, outputPath: outputPath }
+    }
+}
+
+fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThreshold>) r: EvalResult {
+    let items = readEvalDataset(cfg)
+    let domains = uniqueEvalDomains(items)
+    let totals = evalInitializedIntArray(domains.length(), 0)
+    let answeredTotals = evalInitializedIntArray(domains.length(), 0)
+    var total = 0
+    var answered = 0
+    var i = 0
+    while i < items.length() {
+        let domain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
+        let threshold = thresholdFor(thresholds, domain)
+        let score = cosine(encoder.encode(items[i].queryText), encoder.encode(items[i].positiveChunkText))
+        let domainIndex = findDomainIndex(domains, domain)
+        if domainIndex >= 0 {
+            totals[domainIndex] = totals[domainIndex] + 1
+        }
+        if score >= threshold {
+            answered = answered + 1
+            if domainIndex >= 0 {
+                answeredTotals[domainIndex] = answeredTotals[domainIndex] + 1
+            }
+        }
+        total = total + 1
+        i = i + 1
+    }
+    var rate = 0.0
+    if total > 0 {
+        rate = answered.toFloat() / total.toFloat()
+    }
+    writeAtomicText(cfg.evalResultsPath, evalJson(total, answered, rate, domains, totals, answeredTotals))
+    return EvalResult.new(total, answered, rate, cfg.evalResultsPath)
+}
+
+fun readEvalDataset(cfg: TrainerConfig) r: Array<TripletExample> {
+    if cfg.testJsonlPath.length() > 0 and exists(cfg.testJsonlPath) {
+        return readTriplets(cfg.testJsonlPath)
+    }
+    return holdoutSplit(readCalibrationDataset(cfg), cfg.seed)
+}
+
+fun evalWithCalibration(cfg: TrainerConfig, encoder: Encoder) r: EvalResult {
+    let thresholds = calibrateThresholds(cfg, encoder)
+    return evaluate(cfg, encoder, thresholds)
+}
+
+fun evalJson(total: Int, answered: Int, rate: Float, domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>) r: String {
+    return "{\n"
+        + "  \"total\": " + total.toString() + ",\n"
+        + "  \"answered\": " + answered.toString() + ",\n"
+        + "  \"answer_rate\": " + rate.toString() + ",\n"
+        + "  \"pass_overall_88\": " + boolJson(rate >= 0.88) + ",\n"
+        + "  \"per_domain\": " + perDomainJson(domains, totals, answeredTotals) + "\n"
+        + "}\n"
+}
+
+fun perDomainJson(domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>) r: String {
+    var out = "{\n"
+    var i = 0
+    while i < domains.length() {
+        var rate = 0.0
+        if totals[i] > 0 {
+            rate = answeredTotals[i].toFloat() / totals[i].toFloat()
+        }
+        out = out + "    " + escapeJsonString(domains[i]) + ": {"
+            + "\"total\": " + totals[i].toString() + ", "
+            + "\"answered\": " + answeredTotals[i].toString() + ", "
+            + "\"answer_rate\": " + rate.toString() + ", "
+            + "\"pass_domain_90\": " + boolJson(rate >= 0.9) + "}"
+        if i + 1 < domains.length() {
+            out = out + ","
+        }
+        out = out + "\n"
+        i = i + 1
+    }
+    out = out + "  }"
+    return out
+}
+
+fun boolJson(value: Bool) r: String {
+    if value {
+        return "true"
+    }
+    return "false"
+}
+
+fun uniqueEvalDomains(items: Array<TripletExample>) r: Array<String> {
+    let domains = Array<String>()
+    var i = 0
+    while i < items.length() {
+        let domain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
+        var seen = false
+        var j = 0
+        while j < domains.length() {
+            if domains[j] == domain {
+                seen = true
+            }
+            j = j + 1
+        }
+        if not seen {
+            domains.push(domain)
+        }
+        i = i + 1
+    }
+    return domains
+}
+
+fun findDomainIndex(domains: Array<String>, domain: String) r: Int {
+    var i = 0
+    while i < domains.length() {
+        if domains[i] == domain {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun evalInitializedIntArray(count: Int, value: Int) r: Array<Int> {
+    let out = Array<Int>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}

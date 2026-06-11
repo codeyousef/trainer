@@ -1,0 +1,301 @@
+///
+GPU kernel declarations for the trainer tensor backend.
+These @compute functions are compiled by Seen's GPU path and mirror the scalar
+Tensor methods used by fixture tests. The high-level trainer can route larger
+operations here as Seen's buffer dispatch matures.
+///
+
+@compute(workgroup: 256)
+fun tensorElementwiseAdd(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, count: Int) {
+    let idx = globalInvocationId.x
+    if idx < count {
+        out[idx] = a[idx] + b[idx]
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorElementwiseSub(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, count: Int) {
+    let idx = globalInvocationId.x
+    if idx < count {
+        out[idx] = a[idx] - b[idx]
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorElementwiseMul(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, count: Int) {
+    let idx = globalInvocationId.x
+    if idx < count {
+        out[idx] = a[idx] * b[idx]
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorScale(input: Buffer<Float>, out: Buffer<Float>, factor: Float, count: Int) {
+    let idx = globalInvocationId.x
+    if idx < count {
+        out[idx] = input[idx] * factor
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorGelu(input: Buffer<Float>, out: Buffer<Float>, count: Int) {
+    let idx = globalInvocationId.x
+    if idx < count {
+        let x = input[idx]
+        out[idx] = 0.5 * x * (1.0 + kernelTanhApprox(0.7978845608 * (x + 0.044715 * x * x * x)))
+    }
+}
+
+@compute(workgroup: 16, 16, 1)
+fun tensorMatmul(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, rows: Int, shared: Int, cols: Int) {
+    let col = globalInvocationId.x
+    let row = globalInvocationId.y
+    if row < rows and col < cols {
+        var sum = 0.0
+        var k = 0
+        while k < shared {
+            sum = sum + a[row * shared + k] * b[k * cols + col]
+            k = k + 1
+        }
+        out[row * cols + col] = sum
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorRowSums(input: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int) {
+    let row = globalInvocationId.x
+    if row >= rows {
+        return
+    }
+    var sum = 0.0
+    var col = 0
+    while col < cols {
+        sum = sum + input[row * cols + col]
+        col = col + 1
+    }
+    out[row] = sum
+}
+
+@compute(workgroup: 256)
+fun tensorLayerNormRows(input: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int, epsilon: Float) {
+    let row = globalInvocationId.x
+    if row >= rows {
+        return
+    }
+    var mean = 0.0
+    var col = 0
+    while col < cols {
+        mean = mean + input[row * cols + col]
+        col = col + 1
+    }
+    mean = mean / cols.toFloat()
+    var variance = 0.0
+    col = 0
+    while col < cols {
+        let centered = input[row * cols + col] - mean
+        variance = variance + centered * centered
+        col = col + 1
+    }
+    variance = variance / cols.toFloat()
+    let invStd = 1.0 / kernelSqrt(variance + epsilon)
+    col = 0
+    while col < cols {
+        out[row * cols + col] = (input[row * cols + col] - mean) * invStd
+        col = col + 1
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorSoftmaxRows(input: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int) {
+    let row = globalInvocationId.x
+    if row >= rows {
+        return
+    }
+    var maxValue = input[row * cols]
+    var col = 1
+    while col < cols {
+        let value = input[row * cols + col]
+        if value > maxValue {
+            maxValue = value
+        }
+        col = col + 1
+    }
+    var denom = 0.0
+    col = 0
+    while col < cols {
+        let value = kernelExpApprox(input[row * cols + col] - maxValue)
+        out[row * cols + col] = value
+        denom = denom + value
+        col = col + 1
+    }
+    col = 0
+    while col < cols {
+        out[row * cols + col] = out[row * cols + col] / denom
+        col = col + 1
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorMeanPool(input: Buffer<Float>, mask: Buffer<Int>, out: Buffer<Float>, rows: Int, cols: Int) {
+    let col = globalInvocationId.x
+    if col < cols {
+        var sum = 0.0
+        var count = 0
+        var row = 0
+        while row < rows {
+            if mask[row] == 1 {
+                sum = sum + input[row * cols + col]
+                count = count + 1
+            }
+            row = row + 1
+        }
+        if count > 0 {
+            out[col] = sum / count.toFloat()
+        } else {
+            out[col] = 0.0
+        }
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorCosineRows(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int) {
+    let row = globalInvocationId.x
+    if row >= rows {
+        return
+    }
+    var dot = 0.0
+    var aNorm = 0.0
+    var bNorm = 0.0
+    var col = 0
+    while col < cols {
+        let av = a[row * cols + col]
+        let bv = b[row * cols + col]
+        dot = dot + av * bv
+        aNorm = aNorm + av * av
+        bNorm = bNorm + bv * bv
+        col = col + 1
+    }
+    let denom = kernelSqrt(aNorm) * kernelSqrt(bNorm)
+    if denom > 0.000000001 {
+        out[row] = dot / denom
+    } else {
+        out[row] = 0.0
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorTripletMarginLoss(q: Buffer<Float>, p: Buffer<Float>, n: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int, margin: Float) {
+    let row = globalInvocationId.x
+    if row < rows {
+        var qp = 0.0
+        var qn = 0.0
+        var qNorm = 0.0
+        var pNorm = 0.0
+        var nNorm = 0.0
+        var col = 0
+        while col < cols {
+            let qv = q[row * cols + col]
+            let pv = p[row * cols + col]
+            let nv = n[row * cols + col]
+            qp = qp + qv * pv
+            qn = qn + qv * nv
+            qNorm = qNorm + qv * qv
+            pNorm = pNorm + pv * pv
+            nNorm = nNorm + nv * nv
+            col = col + 1
+        }
+        let simPos = qp / kernelMax(kernelSqrt(qNorm) * kernelSqrt(pNorm), 0.000000001)
+        let simNeg = qn / kernelMax(kernelSqrt(qNorm) * kernelSqrt(nNorm), 0.000000001)
+        out[row] = kernelMax(simNeg - simPos + margin, 0.0)
+    }
+}
+
+@compute(workgroup: 1)
+fun tensorTopKInnerProduct(query: Buffer<Float>, candidates: Buffer<Float>, indices: Buffer<Int>, scores: Buffer<Float>, rows: Int, cols: Int, k: Int) {
+    var rank = 0
+    while rank < k {
+        indices[rank] = -1
+        scores[rank] = -999999.0
+        rank = rank + 1
+    }
+    var row = 0
+    while row < rows {
+        var score = 0.0
+        var col = 0
+        while col < cols {
+            score = score + query[col] * candidates[row * cols + col]
+            col = col + 1
+        }
+        rank = 0
+        while rank < k {
+            if indices[rank] < 0 or score > scores[rank] {
+                var shift = k - 1
+                while shift > rank {
+                    scores[shift] = scores[shift - 1]
+                    indices[shift] = indices[shift - 1]
+                    shift = shift - 1
+                }
+                scores[rank] = score
+                indices[rank] = row
+                rank = k
+            }
+            rank = rank + 1
+        }
+        row = row + 1
+    }
+}
+
+fun trainerTensorKernelDeclarationCount() r: Int {
+    return 13
+}
+
+fun kernelMax(a: Float, b: Float) r: Float {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fun kernelSqrt(value: Float) r: Float {
+    if value <= 0.0 {
+        return 0.0
+    }
+    var x = value
+    var i = 0
+    while i < 8 {
+        x = 0.5 * (x + value / x)
+        i = i + 1
+    }
+    return x
+}
+
+fun kernelExpApprox(x: Float) r: Float {
+    if x < -20.0 {
+        return 0.0
+    }
+    if x > 20.0 {
+        return 485165195.0
+    }
+    var term = 1.0
+    var sum = 1.0
+    var i = 1
+    while i <= 12 {
+        term = term * x / i.toFloat()
+        sum = sum + term
+        i = i + 1
+    }
+    if sum < 0.0 {
+        return 0.0
+    }
+    return sum
+}
+
+fun kernelTanhApprox(x: Float) r: Float {
+    if x > 3.0 {
+        return 1.0
+    }
+    if x < -3.0 {
+        return -1.0
+    }
+    return x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
+}

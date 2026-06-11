@@ -1,0 +1,370 @@
+import adapter.{adapterClamp, adapterContains, adapterPowFloat, adapterSqrtApprox}
+import dense_lora.{denseBoolText, denseCopyArrayInto, denseCountArray, denseParseArray, denseParseIntValue, denseZeros}
+import io.file.{exists, readText}
+import io_utils.{writeAtomicText}
+
+class MiniLMEmbeddingDeltas {
+    var hiddenSize: Int
+    var wordRows: Int
+    var positionRows: Int
+    var tokenTypeRows: Int
+    var wordRowIds: Array<Int>
+    var wordDelta: Array<Float>
+    var wordM: Array<Float>
+    var wordV: Array<Float>
+    var positionRowIds: Array<Int>
+    var positionDelta: Array<Float>
+    var positionM: Array<Float>
+    var positionV: Array<Float>
+    var tokenTypeRowIds: Array<Int>
+    var tokenTypeDelta: Array<Float>
+    var tokenTypeM: Array<Float>
+    var tokenTypeV: Array<Float>
+    var layerNormWeightDelta: Array<Float>
+    var layerNormBiasDelta: Array<Float>
+    var layerNormWeightM: Array<Float>
+    var layerNormWeightV: Array<Float>
+    var layerNormBiasM: Array<Float>
+    var layerNormBiasV: Array<Float>
+    var stepCount: Int
+    var loaded: Bool
+    var path: String
+
+    static fun identity(hiddenSize: Int, wordRows: Int, positionRows: Int, tokenTypeRows: Int) r: MiniLMEmbeddingDeltas {
+        return MiniLMEmbeddingDeltas{
+            hiddenSize: hiddenSize,
+            wordRows: wordRows,
+            positionRows: positionRows,
+            tokenTypeRows: tokenTypeRows,
+            wordRowIds: Array<Int>(),
+            wordDelta: Array<Float>(),
+            wordM: Array<Float>(),
+            wordV: Array<Float>(),
+            positionRowIds: Array<Int>(),
+            positionDelta: Array<Float>(),
+            positionM: Array<Float>(),
+            positionV: Array<Float>(),
+            tokenTypeRowIds: Array<Int>(),
+            tokenTypeDelta: Array<Float>(),
+            tokenTypeM: Array<Float>(),
+            tokenTypeV: Array<Float>(),
+            layerNormWeightDelta: denseZeros(hiddenSize),
+            layerNormBiasDelta: denseZeros(hiddenSize),
+            layerNormWeightM: denseZeros(hiddenSize),
+            layerNormWeightV: denseZeros(hiddenSize),
+            layerNormBiasM: denseZeros(hiddenSize),
+            layerNormBiasV: denseZeros(hiddenSize),
+            stepCount: 0,
+            loaded: false,
+            path: ""
+        }
+    }
+
+    static fun load(path: String, hiddenSize: Int, wordRows: Int, positionRows: Int, tokenTypeRows: Int) r: MiniLMEmbeddingDeltas {
+        let deltas = MiniLMEmbeddingDeltas.identity(hiddenSize, wordRows, positionRows, tokenTypeRows)
+        deltas.path = path
+        if not exists(path) {
+            return deltas
+        }
+        let text = readText(path)
+        if not adapterContains(text, "\"format\": \"seen-minilm-embedding-deltas-v1\"") {
+            return deltas
+        }
+        let fileHidden = denseParseIntValue(text, "hidden_size", hiddenSize)
+        if fileHidden != hiddenSize {
+            return deltas
+        }
+        deltas.wordRowIds = embeddingParseRowIds(text, "word_row_ids", wordRows)
+        deltas.wordDelta = embeddingParseTableValues(text, "word_delta", deltas.wordRowIds.length() * hiddenSize)
+        deltas.wordM = denseZeros(deltas.wordDelta.length())
+        deltas.wordV = denseZeros(deltas.wordDelta.length())
+        deltas.positionRowIds = embeddingParseRowIds(text, "position_row_ids", positionRows)
+        deltas.positionDelta = embeddingParseTableValues(text, "position_delta", deltas.positionRowIds.length() * hiddenSize)
+        deltas.positionM = denseZeros(deltas.positionDelta.length())
+        deltas.positionV = denseZeros(deltas.positionDelta.length())
+        deltas.tokenTypeRowIds = embeddingParseRowIds(text, "token_type_row_ids", tokenTypeRows)
+        deltas.tokenTypeDelta = embeddingParseTableValues(text, "token_type_delta", deltas.tokenTypeRowIds.length() * hiddenSize)
+        deltas.tokenTypeM = denseZeros(deltas.tokenTypeDelta.length())
+        deltas.tokenTypeV = denseZeros(deltas.tokenTypeDelta.length())
+        if denseCountArray(text, "layernorm_weight_delta", hiddenSize) == hiddenSize {
+            denseCopyArrayInto(text, "layernorm_weight_delta", hiddenSize, deltas.layerNormWeightDelta)
+        }
+        if denseCountArray(text, "layernorm_bias_delta", hiddenSize) == hiddenSize {
+            denseCopyArrayInto(text, "layernorm_bias_delta", hiddenSize, deltas.layerNormBiasDelta)
+        }
+        deltas.loaded = true
+        return deltas
+    }
+
+    fun wordDeltaAt(row: Int, dim: Int) r: Float {
+        return embeddingDeltaAt(this.wordRowIds, this.wordDelta, row, dim, this.hiddenSize)
+    }
+
+    fun positionDeltaAt(row: Int, dim: Int) r: Float {
+        return embeddingDeltaAt(this.positionRowIds, this.positionDelta, row, dim, this.hiddenSize)
+    }
+
+    fun tokenTypeDeltaAt(row: Int, dim: Int) r: Float {
+        return embeddingDeltaAt(this.tokenTypeRowIds, this.tokenTypeDelta, row, dim, this.hiddenSize)
+    }
+
+    fun effectiveLayerNormWeight(base: Array<Float>) r: Array<Float> {
+        let out = Array<Float>()
+        var i = 0
+        while i < this.hiddenSize {
+            var value = 1.0
+            if i < base.length() {
+                value = base[i]
+            }
+            if i < this.layerNormWeightDelta.length() {
+                value = value + this.layerNormWeightDelta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        return out
+    }
+
+    fun effectiveLayerNormBias(base: Array<Float>) r: Array<Float> {
+        let out = Array<Float>()
+        var i = 0
+        while i < this.hiddenSize {
+            var value = 0.0
+            if i < base.length() {
+                value = base[i]
+            }
+            if i < this.layerNormBiasDelta.length() {
+                value = value + this.layerNormBiasDelta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        return out
+    }
+
+    fun applyGradients(wordGradRows: Array<Int>, wordGrad: Array<Float>, positionGradRows: Array<Int>, positionGrad: Array<Float>, tokenTypeGradRows: Array<Int>, tokenTypeGrad: Array<Float>, gradLayerNormWeight: Array<Float>, gradLayerNormBias: Array<Float>, lr: Float, weightDecay: Float, gradClip: Float) r: Bool {
+        if wordGrad.length() != wordGradRows.length() * this.hiddenSize {
+            return false
+        }
+        if positionGrad.length() != positionGradRows.length() * this.hiddenSize {
+            return false
+        }
+        if tokenTypeGrad.length() != tokenTypeGradRows.length() * this.hiddenSize {
+            return false
+        }
+        if gradLayerNormWeight.length() != this.hiddenSize or gradLayerNormBias.length() != this.hiddenSize {
+            return false
+        }
+        var norm = embeddingGradNorm(wordGrad)
+        norm = norm + embeddingGradNorm(positionGrad)
+        norm = norm + embeddingGradNorm(tokenTypeGrad)
+        norm = norm + embeddingGradNorm(gradLayerNormWeight)
+        norm = norm + embeddingGradNorm(gradLayerNormBias)
+        norm = adapterSqrtApprox(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        this.stepCount = this.stepCount + 1
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - adapterPowFloat(beta1, this.stepCount)
+        let beta2Correction = 1.0 - adapterPowFloat(beta2, this.stepCount)
+        embeddingApplyTableGradients(this.wordRowIds, this.wordDelta, this.wordM, this.wordV, this.wordRows, this.hiddenSize, wordGradRows, wordGrad, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyTableGradients(this.positionRowIds, this.positionDelta, this.positionM, this.positionV, this.positionRows, this.hiddenSize, positionGradRows, positionGrad, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyTableGradients(this.tokenTypeRowIds, this.tokenTypeDelta, this.tokenTypeM, this.tokenTypeV, this.tokenTypeRows, this.hiddenSize, tokenTypeGradRows, tokenTypeGrad, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyVectorGradients(this.layerNormWeightDelta, this.layerNormWeightM, this.layerNormWeightV, gradLayerNormWeight, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyVectorGradients(this.layerNormBiasDelta, this.layerNormBiasM, this.layerNormBiasV, gradLayerNormBias, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        this.loaded = true
+        return true
+    }
+
+    fun save(path: String) r: Bool {
+        this.path = path
+        this.loaded = true
+        return writeAtomicText(path, this.toJson())
+    }
+
+    fun toJson() r: String {
+        var out = "{\n"
+            + "  \"format\": \"seen-minilm-embedding-deltas-v1\",\n"
+            + "  \"hidden_size\": " + this.hiddenSize.toString() + ",\n"
+            + "  \"word_rows\": " + this.wordRows.toString() + ",\n"
+            + "  \"position_rows\": " + this.positionRows.toString() + ",\n"
+            + "  \"token_type_rows\": " + this.tokenTypeRows.toString() + ",\n"
+            + "  \"word_row_ids\": " + embeddingIntArrayJson(this.wordRowIds) + ",\n"
+            + "  \"word_delta\": " + embeddingFloatArrayJson(this.wordDelta) + ",\n"
+            + "  \"position_row_ids\": " + embeddingIntArrayJson(this.positionRowIds) + ",\n"
+            + "  \"position_delta\": " + embeddingFloatArrayJson(this.positionDelta) + ",\n"
+            + "  \"token_type_row_ids\": " + embeddingIntArrayJson(this.tokenTypeRowIds) + ",\n"
+            + "  \"token_type_delta\": " + embeddingFloatArrayJson(this.tokenTypeDelta) + ",\n"
+            + "  \"layernorm_weight_delta\": " + embeddingFloatArrayJson(this.layerNormWeightDelta) + ",\n"
+            + "  \"layernorm_bias_delta\": " + embeddingFloatArrayJson(this.layerNormBiasDelta) + "\n"
+            + "}\n"
+        return out
+    }
+
+    fun trainableRows() r: Int {
+        return this.wordRowIds.length() + this.positionRowIds.length() + this.tokenTypeRowIds.length()
+    }
+
+    fun summaryNamed(prefix: String) r: String {
+        var out = prefix + "_hidden=" + this.hiddenSize.toString()
+        out = out + " " + prefix + "_word_rows=" + this.wordRowIds.length().toString()
+        out = out + " " + prefix + "_position_rows=" + this.positionRowIds.length().toString()
+        out = out + " " + prefix + "_token_type_rows=" + this.tokenTypeRowIds.length().toString()
+        out = out + " " + prefix + "_layernorm_params=" + (this.layerNormWeightDelta.length() + this.layerNormBiasDelta.length()).toString()
+        out = out + " " + prefix + "_optimizer=adamw"
+        out = out + " " + prefix + "_step=" + this.stepCount.toString()
+        out = out + " " + prefix + "_path_configured=" + denseBoolText(this.path.length() > 0)
+        return out
+    }
+}
+
+fun miniLMEmbeddingDeltasPath(outputDir: String) r: String {
+    return outputDir + "/minilm_embedding_deltas.json"
+}
+
+fun embeddingParseRowIds(text: String, key: String, maxRows: Int) r: Array<Int> {
+    let raw = denseParseArray(text, key, maxRows)
+    let ids = Array<Int>()
+    var i = 0
+    while i < raw.length() {
+        let id = raw[i].toInt()
+        if id >= 0 and id < maxRows {
+            ids.push(id)
+        }
+        i = i + 1
+    }
+    return ids
+}
+
+fun embeddingParseTableValues(text: String, key: String, count: Int) r: Array<Float> {
+    if count <= 0 {
+        return Array<Float>()
+    }
+    let values = denseZeros(count)
+    if denseCountArray(text, key, count) == count {
+        denseCopyArrayInto(text, key, count, values)
+    }
+    return values
+}
+
+fun embeddingDeltaAt(rowIds: Array<Int>, values: Array<Float>, row: Int, dim: Int, hiddenSize: Int) r: Float {
+    let slot = embeddingFindRowSlot(rowIds, row)
+    if slot < 0 {
+        return 0.0
+    }
+    let idx = slot * hiddenSize + dim
+    if idx < 0 or idx >= values.length() {
+        return 0.0
+    }
+    return values[idx]
+}
+
+fun embeddingFindRowSlot(rowIds: Array<Int>, row: Int) r: Int {
+    var i = 0
+    while i < rowIds.length() {
+        if rowIds[i] == row {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun embeddingEnsureRow(rowIds: Array<Int>, values: Array<Float>, m: Array<Float>, v: Array<Float>, tableRows: Int, hiddenSize: Int, row: Int) r: Int {
+    if row < 0 or row >= tableRows {
+        return -1
+    }
+    let existing = embeddingFindRowSlot(rowIds, row)
+    if existing >= 0 {
+        return existing
+    }
+    rowIds.push(row)
+    var d = 0
+    while d < hiddenSize {
+        values.push(0.0)
+        m.push(0.0)
+        v.push(0.0)
+        d = d + 1
+    }
+    return rowIds.length() - 1
+}
+
+fun embeddingApplyTableGradients(rowIds: Array<Int>, values: Array<Float>, m: Array<Float>, v: Array<Float>, tableRows: Int, hiddenSize: Int, gradRows: Array<Int>, gradValues: Array<Float>, scale: Float, lr: Float, weightDecay: Float, beta1: Float, beta2: Float, beta1Correction: Float, beta2Correction: Float, eps: Float) r: Void {
+    var gSlot = 0
+    while gSlot < gradRows.length() {
+        let row = gradRows[gSlot]
+        let slot = embeddingEnsureRow(rowIds, values, m, v, tableRows, hiddenSize, row)
+        if slot >= 0 {
+            var d = 0
+            while d < hiddenSize {
+                let gradIdx = gSlot * hiddenSize + d
+                let idx = slot * hiddenSize + d
+                let g = gradValues[gradIdx] * scale
+                m[idx] = beta1 * m[idx] + (1.0 - beta1) * g
+                v[idx] = beta2 * v[idx] + (1.0 - beta2) * g * g
+                let mHat = m[idx] / beta1Correction
+                let vHat = v[idx] / beta2Correction
+                var next = values[idx] - lr * weightDecay * values[idx]
+                next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+                values[idx] = adapterClamp(next, -2.0, 2.0)
+                d = d + 1
+            }
+        }
+        gSlot = gSlot + 1
+    }
+}
+
+fun embeddingApplyVectorGradients(values: Array<Float>, m: Array<Float>, v: Array<Float>, gradValues: Array<Float>, scale: Float, lr: Float, weightDecay: Float, beta1: Float, beta2: Float, beta1Correction: Float, beta2Correction: Float, eps: Float) r: Void {
+    var i = 0
+    while i < values.length() and i < gradValues.length() {
+        let g = gradValues[i] * scale
+        m[i] = beta1 * m[i] + (1.0 - beta1) * g
+        v[i] = beta2 * v[i] + (1.0 - beta2) * g * g
+        let mHat = m[i] / beta1Correction
+        let vHat = v[i] / beta2Correction
+        var next = values[i] - lr * weightDecay * values[i]
+        next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+        values[i] = adapterClamp(next, -2.0, 2.0)
+        i = i + 1
+    }
+}
+
+fun embeddingGradNorm(values: Array<Float>) r: Float {
+    var out = 0.0
+    var i = 0
+    while i < values.length() {
+        out = out + values[i] * values[i]
+        i = i + 1
+    }
+    return out
+}
+
+fun embeddingIntArrayJson(values: Array<Int>) r: String {
+    var out = "["
+    var i = 0
+    while i < values.length() {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + values[i].toString()
+        i = i + 1
+    }
+    return out + "]"
+}
+
+fun embeddingFloatArrayJson(values: Array<Float>) r: String {
+    var out = "["
+    var i = 0
+    while i < values.length() {
+        if i > 0 {
+            out = out + ", "
+        }
+        out = out + values[i].toString()
+        i = i + 1
+    }
+    return out + "]"
+}

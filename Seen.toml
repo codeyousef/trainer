@@ -1,0 +1,20 @@
+[project]
+name = "trainer"
+version = "0.1.0"
+language = "en"
+description = "GPU-first Seen-native Sinai trainer library"
+edition = "2025"
+
+[build]
+entry = "src/main.seen"
+targets = ["native"]
+optimize = "speed"
+
+[dependencies]
+seen_std = { path = "../../Rust/seenlang/seen_std" }
+
+[format]
+line-width = 100
+indent = 4
+trailing-comma = true
+document-types = [".seen", ".md", ".toml"]

@@ -1,0 +1,363 @@
+import io.file.{readText}
+
+class TrainerConfig {
+    var workspacePath: String
+    var baseModelPath: String
+    var trainJsonlPath: String
+    var devJsonlPath: String
+    var testJsonlPath: String
+    var sourceDataPath: String
+    var sourceFormat: String
+    var sourceQueryColumn: String
+    var sourcePositiveColumn: String
+    var sourceDomainColumn: String
+    var sourceSourceColumn: String
+    var outputModelDir: String
+    var minedJsonlPath: String
+    var thresholdsPath: String
+    var evalResultsPath: String
+    var seed: Int
+    var batchSize: Int
+    var epochs: Int
+    var learningRate: Float
+    var weightDecay: Float
+    var margin: Float
+    var gradClip: Float
+    var maxSequenceLength: Int
+    var embeddingDim: Int
+    var topK: Int
+    var thresholdPercentile: Float
+    var qualityMargin: Float
+    var minTextLength: Int
+    var copyBaseArtifacts: Bool
+    var weightLoadCapElements: Int
+    var minilmAdapterLayer: Int
+    var minilmDenseAdapterLayer: Int
+    var backendGpu: Int
+    var backend: String
+
+    static fun defaults() r: TrainerConfig {
+        return TrainerConfig{
+            workspacePath: ".",
+            baseModelPath: "",
+            trainJsonlPath: "",
+            devJsonlPath: "",
+            testJsonlPath: "",
+            sourceDataPath: "",
+            sourceFormat: "auto",
+            sourceQueryColumn: "",
+            sourcePositiveColumn: "",
+            sourceDomainColumn: "domain",
+            sourceSourceColumn: "source",
+            outputModelDir: "out/model",
+            minedJsonlPath: "out/mined_triplets.jsonl",
+            thresholdsPath: "out/model/thresholds.json",
+            evalResultsPath: "out/model/eval_results.json",
+            seed: 42,
+            batchSize: 64,
+            epochs: 3,
+            learningRate: 0.00002,
+            weightDecay: 0.01,
+            margin: 0.2,
+            gradClip: 1.0,
+            maxSequenceLength: 128,
+            embeddingDim: 384,
+            topK: 16,
+            thresholdPercentile: 5.0,
+            qualityMargin: 0.05,
+            minTextLength: 2,
+            copyBaseArtifacts: true,
+            weightLoadCapElements: 0,
+            minilmAdapterLayer: 0,
+            minilmDenseAdapterLayer: -1,
+            backendGpu: 1,
+            backend: "gpu"
+        }
+    }
+
+    fun modelConfigPath() r: String {
+        return this.baseModelPath + "/config.json"
+    }
+
+    fun tokenizerPath() r: String {
+        return this.baseModelPath + "/tokenizer.json"
+    }
+
+    fun modelWeightsPath() r: String {
+        return this.baseModelPath + "/model.safetensors"
+    }
+
+    fun adapterPath() r: String {
+        return this.outputModelDir + "/adapter.json"
+    }
+
+    fun layerAdapterPath() r: String {
+        return this.outputModelDir + "/layer_adapter.json"
+    }
+
+    fun minilmLayerAdapterPath() r: String {
+        return this.outputModelDir + "/minilm_layer_adapter.json"
+    }
+
+    fun minilmDenseAdapterPath() r: String {
+        return this.outputModelDir + "/minilm_dense_adapter.json"
+    }
+
+    fun minilmDenseDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_output_dense_delta.json"
+    }
+
+    fun minilmIntermediateDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_intermediate_dense_delta.json"
+    }
+
+    fun minilmAttentionDenseDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_attention_output_dense_delta.json"
+    }
+
+    fun minilmQueryDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_attention_query_delta.json"
+    }
+
+    fun minilmKeyDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_attention_key_delta.json"
+    }
+
+    fun minilmValueDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_attention_value_delta.json"
+    }
+
+    fun minilmAttentionLayerNormDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_attention_output_layernorm_delta.json"
+    }
+
+    fun minilmLayerNormDeltaPath() r: String {
+        return this.outputModelDir + "/minilm_output_layernorm_delta.json"
+    }
+}
+
+fun readConfig(path: String) r: TrainerConfig {
+    let cfg = TrainerConfig.defaults()
+    let text = readText(path)
+    if text.length() == 0 {
+        println("trainer: config not found or empty: " + path)
+        return cfg
+    }
+
+    cfg.workspacePath = configString(text, "workspace_path", cfg.workspacePath)
+    cfg.baseModelPath = configString(text, "base_model_path", cfg.baseModelPath)
+    cfg.trainJsonlPath = configString(text, "train_jsonl_path", cfg.trainJsonlPath)
+    cfg.devJsonlPath = configString(text, "dev_jsonl_path", cfg.devJsonlPath)
+    cfg.testJsonlPath = configString(text, "test_jsonl_path", cfg.testJsonlPath)
+    cfg.sourceDataPath = configString(text, "source_data_path", cfg.sourceDataPath)
+    cfg.sourceFormat = configString(text, "source_format", cfg.sourceFormat)
+    cfg.sourceQueryColumn = configString(text, "source_query_column", cfg.sourceQueryColumn)
+    cfg.sourcePositiveColumn = configString(text, "source_positive_column", cfg.sourcePositiveColumn)
+    cfg.sourceDomainColumn = configString(text, "source_domain_column", cfg.sourceDomainColumn)
+    cfg.sourceSourceColumn = configString(text, "source_source_column", cfg.sourceSourceColumn)
+    cfg.outputModelDir = configString(text, "output_model_dir", cfg.outputModelDir)
+    cfg.minedJsonlPath = configString(text, "mined_jsonl_path", cfg.minedJsonlPath)
+    cfg.thresholdsPath = configString(text, "thresholds_path", cfg.thresholdsPath)
+    cfg.evalResultsPath = configString(text, "eval_results_path", cfg.evalResultsPath)
+    cfg.seed = configInt(text, "seed", cfg.seed)
+    cfg.batchSize = configInt(text, "batch_size", cfg.batchSize)
+    cfg.epochs = configInt(text, "epochs", cfg.epochs)
+    cfg.learningRate = configFloat(text, "learning_rate", cfg.learningRate)
+    cfg.weightDecay = configFloat(text, "weight_decay", cfg.weightDecay)
+    cfg.margin = configFloat(text, "margin", cfg.margin)
+    cfg.gradClip = configFloat(text, "grad_clip", cfg.gradClip)
+    cfg.maxSequenceLength = configInt(text, "max_sequence_length", cfg.maxSequenceLength)
+    cfg.embeddingDim = configInt(text, "embedding_dim", cfg.embeddingDim)
+    cfg.topK = configInt(text, "top_k", cfg.topK)
+    cfg.thresholdPercentile = configFloat(text, "threshold_percentile", cfg.thresholdPercentile)
+    cfg.qualityMargin = configFloat(text, "quality_margin", cfg.qualityMargin)
+    cfg.minTextLength = configInt(text, "min_text_length", cfg.minTextLength)
+    cfg.copyBaseArtifacts = configBool(text, "copy_base_artifacts", cfg.copyBaseArtifacts)
+    cfg.weightLoadCapElements = configInt(text, "weight_load_cap_elements", cfg.weightLoadCapElements)
+    cfg.minilmAdapterLayer = configInt(text, "minilm_adapter_layer", cfg.minilmAdapterLayer)
+    cfg.minilmDenseAdapterLayer = configInt(text, "minilm_dense_adapter_layer", cfg.minilmDenseAdapterLayer)
+    cfg.backend = configString(text, "backend", cfg.backend)
+    cfg.backendGpu = backendStringIsGpu(cfg.backend)
+    return cfg
+}
+
+fun backendStringIsGpu(name: String) r: Int {
+    if name.length() != 3 {
+        return 0
+    }
+    if name.charAt(0) == 103 and name.charAt(1) == 112 and name.charAt(2) == 117 {
+        return 1
+    }
+    return 0
+}
+
+fun configString(text: String, key: String, fallback: String) r: String {
+    let pos = findKeyColon(text, key)
+    if pos < 0 {
+        return fallback
+    }
+    var i = skipWs(text, pos)
+    if i >= text.length() or text.charAt(i) != 34 {
+        return fallback
+    }
+    i = i + 1
+    var out = ""
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 34 {
+            return out
+        }
+        if ch == 92 {
+            i = i + 1
+            if i < text.length() {
+                let esc = text.charAt(i)
+                if esc == 110 { out = out + "\n" }
+                else if esc == 114 { out = out + "\r" }
+                else if esc == 116 { out = out + "\t" }
+                else { out = out + String.fromCharCode(esc) }
+            }
+        } else {
+            out = out + String.fromCharCode(ch)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun configInt(text: String, key: String, fallback: Int) r: Int {
+    return configFloat(text, key, fallback.toFloat()).toInt()
+}
+
+fun configBool(text: String, key: String, fallback: Bool) r: Bool {
+    let pos = findKeyColon(text, key)
+    if pos < 0 {
+        return fallback
+    }
+    let i = skipWs(text, pos)
+    if i + 4 <= text.length() and matchesAt(text, i, "true") {
+        return true
+    }
+    if i + 5 <= text.length() and matchesAt(text, i, "false") {
+        return false
+    }
+    return fallback
+}
+
+fun configFloat(text: String, key: String, fallback: Float) r: Float {
+    let pos = findKeyColon(text, key)
+    if pos < 0 {
+        return fallback
+    }
+    var i = skipWs(text, pos)
+    let start = i
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if (ch >= 48 and ch <= 57) or ch == 45 or ch == 43 or ch == 46 or ch == 69 or ch == 101 {
+            i = i + 1
+        } else {
+            break
+        }
+    }
+    if i <= start {
+        return fallback
+    }
+    return parseFloatLocal(text.substring(start, i))
+}
+
+fun findKeyColon(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if matchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun matchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun skipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+fun parseFloatLocal(text: String) r: Float {
+    var sign = 1.0
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1.0
+        i = 1
+    }
+    var whole = 0.0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        whole = whole * 10.0 + (text.charAt(i) - 48).toFloat()
+        i = i + 1
+    }
+    var frac = 0.0
+    var scale = 0.1
+    if i < text.length() and text.charAt(i) == 46 {
+        i = i + 1
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            frac = frac + (text.charAt(i) - 48).toFloat() * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+    var value = whole + frac
+    if i < text.length() and (text.charAt(i) == 69 or text.charAt(i) == 101) {
+        i = i + 1
+        var expSign = 1
+        if i < text.length() and text.charAt(i) == 45 {
+            expSign = -1
+            i = i + 1
+        } else if i < text.length() and text.charAt(i) == 43 {
+            i = i + 1
+        }
+        var exp = 0
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            exp = exp * 10 + (text.charAt(i) - 48)
+            i = i + 1
+        }
+        var factor = 1.0
+        var step = 0
+        while step < exp {
+            factor = factor * 10.0
+            step = step + 1
+        }
+        if expSign < 0 {
+            value = value / factor
+        } else {
+            value = value * factor
+        }
+    }
+    return sign * value
+}

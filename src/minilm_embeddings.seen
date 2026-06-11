@@ -1,0 +1,2840 @@
+import io.file.{readBytesRange}
+import adapter.{ProjectionAdapter}
+import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas, denseRankBAt, denseRankBottleneckAt, denseZeros}
+import embedding_delta.{MiniLMEmbeddingDeltas}
+import math.math.{sqrt, exp}
+import math_utils.{gelu}
+import minilm_weights.{mwFindCandidateIndex}
+import safetensors.{SafeTensorInfo, isF32DType, tensorCols, tensorRows}
+
+class MiniLMEmbeddings {
+    var loaded: Bool
+    var hiddenSize: Int
+    var layers: Int
+    var attentionHeads: Int
+    var intermediateSize: Int
+    var layer0Ready: Bool
+    var readyLayers: Int
+    var wordRows: Int
+    var positionRows: Int
+    var tokenTypeRows: Int
+    var weightsPath: String
+    var maxLoadElements: Int
+    var error: String
+
+    static fun empty(hiddenSize: Int, error: String) r: MiniLMEmbeddings {
+        return MiniLMEmbeddings{
+            loaded: false,
+            hiddenSize: hiddenSize,
+            layers: 0,
+            attentionHeads: 0,
+            intermediateSize: 0,
+            layer0Ready: false,
+            readyLayers: 0,
+            wordRows: 0,
+            positionRows: 0,
+            tokenTypeRows: 0,
+            weightsPath: "",
+            maxLoadElements: 0,
+            error: error
+        }
+    }
+
+    static fun load(info: SafeTensorInfo, hiddenSize: Int, layers: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int) r: MiniLMEmbeddings {
+        if maxLoadElements <= 0 {
+            return MiniLMEmbeddings.empty(hiddenSize, "weight loading disabled by cap")
+        }
+        if not info.validHeader {
+            return MiniLMEmbeddings.empty(hiddenSize, "safetensors header is not valid")
+        }
+
+        let word = validateEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements, hiddenSize, true)
+        if word.length() > 0 {
+            return MiniLMEmbeddings.empty(hiddenSize, "word embeddings: " + word)
+        }
+        let position = validateEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements, hiddenSize, true)
+        if position.length() > 0 {
+            return MiniLMEmbeddings.empty(hiddenSize, "position embeddings: " + position)
+        }
+        let tokenType = validateEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements, hiddenSize, true)
+        if tokenType.length() > 0 {
+            return MiniLMEmbeddings.empty(hiddenSize, "token type embeddings: " + tokenType)
+        }
+        let normWeight = validateEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements, hiddenSize, false)
+        if normWeight.length() > 0 {
+            return MiniLMEmbeddings.empty(hiddenSize, "layer norm weight: " + normWeight)
+        }
+        let normBias = validateEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements, hiddenSize, false)
+        if normBias.length() > 0 {
+            return MiniLMEmbeddings.empty(hiddenSize, "layer norm bias: " + normBias)
+        }
+
+        var readyLayers = 0
+        if layers > 0 {
+            readyLayers = countReadyEncoderLayers(info, layers, maxLoadElements, hiddenSize, attentionHeads, intermediateSize)
+        }
+
+        return MiniLMEmbeddings{
+            loaded: true,
+            hiddenSize: hiddenSize,
+            layers: layers,
+            attentionHeads: attentionHeads,
+            intermediateSize: intermediateSize,
+            layer0Ready: readyLayers > 0,
+            readyLayers: readyLayers,
+            wordRows: embeddingTensorRows(info, "embeddings.word_embeddings.weight"),
+            positionRows: embeddingTensorRows(info, "embeddings.position_embeddings.weight"),
+            tokenTypeRows: embeddingTensorRows(info, "embeddings.token_type_embeddings.weight"),
+            weightsPath: info.path,
+            maxLoadElements: maxLoadElements,
+            error: ""
+        }
+    }
+
+    fun encodeMean(tokenIds: Array<Int>, mask: Array<Int>) r: Array<Float> {
+        return this.encodeMeanWithAdapters(tokenIds, mask, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.intermediateSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), -1, ProjectionAdapter.identity(this.hiddenSize), -1)
+    }
+
+    fun encodeMeanWithLayerAdapter(tokenIds: Array<Int>, mask: Array<Int>, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
+        return this.encodeMeanWithAdapters(tokenIds, mask, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.intermediateSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), -1, layerAdapter, adapterLayer)
+    }
+
+    fun encodeMeanWithLayerDeltas(tokenIds: Array<Int>, mask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
+        let info = SafeTensorInfo.inspect(this.weightsPath)
+        if not info.validHeader {
+            return Array<Float>()
+        }
+        let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        if not word.ok {
+            return Array<Float>()
+        }
+        let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", this.maxLoadElements)
+        if not position.ok {
+            return Array<Float>()
+        }
+        let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
+        if not tokenType.ok {
+            return Array<Float>()
+        }
+        let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", this.maxLoadElements)
+        if not normWeight.ok {
+            return Array<Float>()
+        }
+        let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", this.maxLoadElements)
+        if not normBias.ok {
+            return Array<Float>()
+        }
+
+        let sequence = Array<Float>()
+        var tokenCount = 0
+        var i = 0
+        while i < tokenIds.length() and i < mask.length() {
+            if mask[i] == 1 {
+                tokenCount = tokenCount + 1
+                let embedded = encodeTokenWithEmbeddingDeltas(tokenIds[i], i, this.hiddenSize, word, position, tokenType, normWeight, normBias, embeddingDeltas)
+                var d = 0
+                while d < this.hiddenSize {
+                    sequence.push(embedded[d])
+                    d = d + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if tokenCount == 0 {
+            return zerosFloat(this.hiddenSize)
+        }
+
+        var encoded = sequence
+        let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        var layer = 0
+        while layer < this.readyLayers {
+            var layerOut = Array<Float>()
+            if layerDeltas.hasLayer(layer) {
+                layerOut = applyEncoderLayerWithDenseAdapter(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+            } else {
+                layerOut = applyEncoderLayer(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer)
+            }
+            if layerOut.length() == encoded.length() {
+                encoded = layerOut
+                if layer == targetLayer {
+                    encoded = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
+                }
+            } else {
+                layer = this.readyLayers
+            }
+            layer = layer + 1
+        }
+        return meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+    }
+
+    fun encodeMeanWithAdapters(tokenIds: Array<Int>, mask: Array<Int>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, denseAdapterLayer: Int, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
+        let info = SafeTensorInfo.inspect(this.weightsPath)
+        if not info.validHeader {
+            return Array<Float>()
+        }
+        let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        if not word.ok {
+            return Array<Float>()
+        }
+        let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", this.maxLoadElements)
+        if not position.ok {
+            return Array<Float>()
+        }
+        let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
+        if not tokenType.ok {
+            return Array<Float>()
+        }
+        let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", this.maxLoadElements)
+        if not normWeight.ok {
+            return Array<Float>()
+        }
+        let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", this.maxLoadElements)
+        if not normBias.ok {
+            return Array<Float>()
+        }
+
+        let sequence = Array<Float>()
+        var tokenCount = 0
+        var i = 0
+        while i < tokenIds.length() and i < mask.length() {
+            if mask[i] == 1 {
+                tokenCount = tokenCount + 1
+                let embedded = encodeTokenWithTables(tokenIds[i], i, this.hiddenSize, word, position, tokenType, normWeight, normBias)
+                var d = 0
+                while d < this.hiddenSize {
+                    sequence.push(embedded[d])
+                    d = d + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if tokenCount == 0 {
+            return zerosFloat(this.hiddenSize)
+        }
+
+        var encoded = sequence
+        let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        let denseTargetLayer = normalizeMiniLMDenseAdapterLayer(denseAdapterLayer, this.readyLayers)
+        var layer = 0
+        while layer < this.readyLayers {
+            let layerOut = applyEncoderLayerWithDenseAdapter(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, layer == denseTargetLayer)
+            if layerOut.length() == encoded.length() {
+                encoded = layerOut
+                if layer == targetLayer {
+                    encoded = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
+                }
+            } else {
+                layer = this.readyLayers
+            }
+            layer = layer + 1
+        }
+        return meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+    }
+
+    fun encodeLayerMean(tokenIds: Array<Int>, mask: Array<Int>, adapterLayer: Int) r: Array<Float> {
+        let info = SafeTensorInfo.inspect(this.weightsPath)
+        if not info.validHeader {
+            return Array<Float>()
+        }
+        if this.readyLayers <= 0 {
+            return Array<Float>()
+        }
+        let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        if not word.ok {
+            return Array<Float>()
+        }
+        let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", this.maxLoadElements)
+        if not position.ok {
+            return Array<Float>()
+        }
+        let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
+        if not tokenType.ok {
+            return Array<Float>()
+        }
+        let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", this.maxLoadElements)
+        if not normWeight.ok {
+            return Array<Float>()
+        }
+        let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", this.maxLoadElements)
+        if not normBias.ok {
+            return Array<Float>()
+        }
+
+        let sequence = Array<Float>()
+        var tokenCount = 0
+        var i = 0
+        while i < tokenIds.length() and i < mask.length() {
+            if mask[i] == 1 {
+                tokenCount = tokenCount + 1
+                let embedded = encodeTokenWithTables(tokenIds[i], i, this.hiddenSize, word, position, tokenType, normWeight, normBias)
+                var d = 0
+                while d < this.hiddenSize {
+                    sequence.push(embedded[d])
+                    d = d + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if tokenCount == 0 {
+            return zerosFloat(this.hiddenSize)
+        }
+
+        var encoded = sequence
+        let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        var layer = 0
+        while layer < this.readyLayers {
+            let layerOut = applyEncoderLayer(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer)
+            if layerOut.length() == encoded.length() {
+                encoded = layerOut
+                if layer == targetLayer {
+                    return meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+                }
+            } else {
+                return Array<Float>()
+            }
+            layer = layer + 1
+        }
+        return Array<Float>()
+    }
+
+    fun updateDenseAdapterTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, denseAdapterLayer: Int, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+        if this.readyLayers <= 0 {
+            return 0.0
+        }
+        let targetLayer = normalizeMiniLMDenseAdapterLayer(denseAdapterLayer, this.readyLayers)
+        let info = SafeTensorInfo.inspect(this.weightsPath)
+        if not info.validHeader {
+            return 0.0
+        }
+        let qTrace = denseAdapterTrace(info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta)
+        let pTrace = denseAdapterTrace(info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta)
+        let nTrace = denseAdapterTrace(info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta)
+        if not qTrace.ok or not pTrace.ok or not nTrace.ok {
+            return 0.0
+        }
+        let posStats = mePairStats(qTrace.mean, pTrace.mean)
+        let negStats = mePairStats(qTrace.mean, nTrace.mean)
+        if not posStats.valid or not negStats.valid {
+            return 0.0
+        }
+        let loss = meRelu(negStats.cosine - posStats.cosine + margin)
+        if loss <= 0.0 {
+            return 0.0
+        }
+
+        let gradQ = denseMeanTripletGradQ(qTrace.mean, pTrace.mean, nTrace.mean, posStats, negStats)
+        let gradP = denseMeanTripletGradP(qTrace.mean, pTrace.mean, posStats)
+        let gradN = denseMeanTripletGradN(qTrace.mean, nTrace.mean, negStats)
+        let gradA = denseZeros(denseAdapter.rankA.length())
+        let gradB = denseZeros(denseAdapter.rankB.length())
+        let gradDW = denseZeros(denseDelta.weightDelta.length())
+        let gradDB = denseZeros(denseDelta.biasDelta.length())
+        let gradIW = denseZeros(intermediateDelta.weightDelta.length())
+        let gradIB = denseZeros(intermediateDelta.biasDelta.length())
+        let gradADW = denseZeros(attentionDenseDelta.weightDelta.length())
+        let gradADB = denseZeros(attentionDenseDelta.biasDelta.length())
+        let gradQW = denseZeros(queryDelta.weightDelta.length())
+        let gradQB = denseZeros(queryDelta.biasDelta.length())
+        let gradKW = denseZeros(keyDelta.weightDelta.length())
+        let gradKB = denseZeros(keyDelta.biasDelta.length())
+        let gradVW = denseZeros(valueDelta.weightDelta.length())
+        let gradVB = denseZeros(valueDelta.biasDelta.length())
+        let gradALNW = denseZeros(attentionLayerNormDelta.weightDelta.length())
+        let gradALNB = denseZeros(attentionLayerNormDelta.biasDelta.length())
+        let gradLNW = denseZeros(layerNormDelta.weightDelta.length())
+        let gradLNB = denseZeros(layerNormDelta.biasDelta.length())
+        accumulateDenseTraceGradWithTail(info, qTrace, gradQ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements)
+        accumulateDenseTraceGradWithTail(info, pTrace, gradP, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements)
+        accumulateDenseTraceGradWithTail(info, nTrace, gradN, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements)
+        denseAdapter.applyGradients(gradA, gradB, lr, weightDecay, gradClip)
+        denseDelta.applyGradients(gradDW, gradDB, lr, weightDecay, gradClip)
+        intermediateDelta.applyGradients(gradIW, gradIB, lr, weightDecay, gradClip)
+        queryDelta.applyGradients(gradQW, gradQB, lr, weightDecay, gradClip)
+        keyDelta.applyGradients(gradKW, gradKB, lr, weightDecay, gradClip)
+        valueDelta.applyGradients(gradVW, gradVB, lr, weightDecay, gradClip)
+        attentionDenseDelta.applyGradients(gradADW, gradADB, lr, weightDecay, gradClip)
+        attentionLayerNormDelta.applyGradients(gradALNW, gradALNB, lr, weightDecay, gradClip)
+        layerNormDelta.applyGradients(gradLNW, gradLNB, lr, weightDecay, gradClip)
+        return loss
+    }
+
+    fun updateEmbeddingDeltasTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+        if this.readyLayers <= 0 or embeddingDeltas.hiddenSize != this.hiddenSize {
+            return 0.0
+        }
+        let info = SafeTensorInfo.inspect(this.weightsPath)
+        if not info.validHeader {
+            return 0.0
+        }
+        let qTrace = embeddingDeltaTrace(info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas)
+        let pTrace = embeddingDeltaTrace(info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas)
+        let nTrace = embeddingDeltaTrace(info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas)
+        if not qTrace.ok or not pTrace.ok or not nTrace.ok {
+            return 0.0
+        }
+        let posStats = mePairStats(qTrace.mean, pTrace.mean)
+        let negStats = mePairStats(qTrace.mean, nTrace.mean)
+        if not posStats.valid or not negStats.valid {
+            return 0.0
+        }
+        let loss = meRelu(negStats.cosine - posStats.cosine + margin)
+        if loss <= 0.0 {
+            return 0.0
+        }
+        let gradQ = denseMeanTripletGradQ(qTrace.mean, pTrace.mean, nTrace.mean, posStats, negStats)
+        let gradP = denseMeanTripletGradP(qTrace.mean, pTrace.mean, posStats)
+        let gradN = denseMeanTripletGradN(qTrace.mean, nTrace.mean, negStats)
+        let gradWordRows = Array<Int>()
+        let gradWord = Array<Float>()
+        let gradPositionRows = Array<Int>()
+        let gradPosition = Array<Float>()
+        let gradTokenTypeRows = Array<Int>()
+        let gradTokenType = Array<Float>()
+        let gradLnW = denseZeros(this.hiddenSize)
+        let gradLnB = denseZeros(this.hiddenSize)
+        accumulateEmbeddingTraceGrad(info, qTrace, gradQ, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
+        accumulateEmbeddingTraceGrad(info, pTrace, gradP, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
+        accumulateEmbeddingTraceGrad(info, nTrace, gradN, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
+        embeddingDeltas.applyGradients(gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
+        return loss
+    }
+
+    fun updateAllLayerDeltasTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+        if this.readyLayers <= 0 {
+            return 0.0
+        }
+        let info = SafeTensorInfo.inspect(this.weightsPath)
+        if not info.validHeader {
+            return 0.0
+        }
+        let gradDeltas = MiniLMLayerDeltas.identity(layerDeltas.layers, layerDeltas.hiddenSize, layerDeltas.intermediateSize)
+        var layer = this.readyLayers - 1
+        var lossSum = 0.0
+        var count = 0
+        while layer >= 0 {
+            if layerDeltas.hasLayer(layer) {
+                let loss = this.accumulateLayerDeltasTripletGrad(info, qIds, qMask, pIds, pMask, nIds, nMask, layerDeltas, embeddingDeltas, gradDeltas, layer, margin)
+                lossSum = lossSum + loss
+                count = count + 1
+            }
+            layer = layer - 1
+        }
+        applyMiniLMLayerDeltaGradients(layerDeltas, gradDeltas, this.readyLayers, lr, weightDecay, gradClip)
+        let embeddingLoss = this.updateEmbeddingDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, embeddingDeltas, layerDeltas, margin, lr, weightDecay, gradClip)
+        if embeddingLoss > 0.0 {
+            lossSum = lossSum + embeddingLoss
+            count = count + 1
+        }
+        if count <= 0 {
+            return 0.0
+        }
+        return lossSum / count.toFloat()
+    }
+
+    fun accumulateLayerDeltasTripletGrad(info: SafeTensorInfo, qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, gradDeltas: MiniLMLayerDeltas, targetLayer: Int, margin: Float) r: Float {
+        let denseAdapter = DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize)
+        let qTrace = denseAdapterTraceWithLayerDeltas(info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas)
+        let pTrace = denseAdapterTraceWithLayerDeltas(info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas)
+        let nTrace = denseAdapterTraceWithLayerDeltas(info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas)
+        if not qTrace.ok or not pTrace.ok or not nTrace.ok {
+            return 0.0
+        }
+        let posStats = mePairStats(qTrace.mean, pTrace.mean)
+        let negStats = mePairStats(qTrace.mean, nTrace.mean)
+        if not posStats.valid or not negStats.valid {
+            return 0.0
+        }
+        let loss = meRelu(negStats.cosine - posStats.cosine + margin)
+        if loss <= 0.0 {
+            return 0.0
+        }
+
+        let gradQ = denseMeanTripletGradQ(qTrace.mean, pTrace.mean, nTrace.mean, posStats, negStats)
+        let gradP = denseMeanTripletGradP(qTrace.mean, pTrace.mean, posStats)
+        let gradN = denseMeanTripletGradN(qTrace.mean, nTrace.mean, negStats)
+        let gradA = denseZeros(denseAdapter.rankA.length())
+        let gradB = denseZeros(denseAdapter.rankB.length())
+        let gradDW = denseZeros(layerDeltas.outputDeltas[targetLayer].weightDelta.length())
+        let gradDB = denseZeros(layerDeltas.outputDeltas[targetLayer].biasDelta.length())
+        let gradIW = denseZeros(layerDeltas.intermediateDeltas[targetLayer].weightDelta.length())
+        let gradIB = denseZeros(layerDeltas.intermediateDeltas[targetLayer].biasDelta.length())
+        let gradADW = denseZeros(layerDeltas.attentionDenseDeltas[targetLayer].weightDelta.length())
+        let gradADB = denseZeros(layerDeltas.attentionDenseDeltas[targetLayer].biasDelta.length())
+        let gradQW = denseZeros(layerDeltas.queryDeltas[targetLayer].weightDelta.length())
+        let gradQB = denseZeros(layerDeltas.queryDeltas[targetLayer].biasDelta.length())
+        let gradKW = denseZeros(layerDeltas.keyDeltas[targetLayer].weightDelta.length())
+        let gradKB = denseZeros(layerDeltas.keyDeltas[targetLayer].biasDelta.length())
+        let gradVW = denseZeros(layerDeltas.valueDeltas[targetLayer].weightDelta.length())
+        let gradVB = denseZeros(layerDeltas.valueDeltas[targetLayer].biasDelta.length())
+        let gradALNW = denseZeros(layerDeltas.attentionLayerNormDeltas[targetLayer].weightDelta.length())
+        let gradALNB = denseZeros(layerDeltas.attentionLayerNormDeltas[targetLayer].biasDelta.length())
+        let gradLNW = denseZeros(layerDeltas.outputLayerNormDeltas[targetLayer].weightDelta.length())
+        let gradLNB = denseZeros(layerDeltas.outputLayerNormDeltas[targetLayer].biasDelta.length())
+        accumulateDenseTraceGradWithLayerDeltaTail(info, qTrace, gradQ, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements)
+        accumulateDenseTraceGradWithLayerDeltaTail(info, pTrace, gradP, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements)
+        accumulateDenseTraceGradWithLayerDeltaTail(info, nTrace, gradN, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements)
+        addFlatInPlace(gradDeltas.outputDeltas[targetLayer].weightDelta, gradDW)
+        addFlatInPlace(gradDeltas.outputDeltas[targetLayer].biasDelta, gradDB)
+        addFlatInPlace(gradDeltas.intermediateDeltas[targetLayer].weightDelta, gradIW)
+        addFlatInPlace(gradDeltas.intermediateDeltas[targetLayer].biasDelta, gradIB)
+        addFlatInPlace(gradDeltas.queryDeltas[targetLayer].weightDelta, gradQW)
+        addFlatInPlace(gradDeltas.queryDeltas[targetLayer].biasDelta, gradQB)
+        addFlatInPlace(gradDeltas.keyDeltas[targetLayer].weightDelta, gradKW)
+        addFlatInPlace(gradDeltas.keyDeltas[targetLayer].biasDelta, gradKB)
+        addFlatInPlace(gradDeltas.valueDeltas[targetLayer].weightDelta, gradVW)
+        addFlatInPlace(gradDeltas.valueDeltas[targetLayer].biasDelta, gradVB)
+        addFlatInPlace(gradDeltas.attentionDenseDeltas[targetLayer].weightDelta, gradADW)
+        addFlatInPlace(gradDeltas.attentionDenseDeltas[targetLayer].biasDelta, gradADB)
+        addFlatInPlace(gradDeltas.attentionLayerNormDeltas[targetLayer].weightDelta, gradALNW)
+        addFlatInPlace(gradDeltas.attentionLayerNormDeltas[targetLayer].biasDelta, gradALNB)
+        addFlatInPlace(gradDeltas.outputLayerNormDeltas[targetLayer].weightDelta, gradLNW)
+        addFlatInPlace(gradDeltas.outputLayerNormDeltas[targetLayer].biasDelta, gradLNB)
+        return loss
+    }
+
+    fun summary() r: String {
+        var out = "model_embeddings_loaded=" + this.loaded.toString()
+        out = out + " model_layer0_ready=" + this.layer0Ready.toString()
+        out = out + " model_layers_ready=" + this.readyLayers.toString() + "/" + this.layers.toString()
+        out = out + " model_embedding_error=" + this.error
+        return out
+    }
+}
+
+class EmbeddingTensorLoad {
+    var ok: Bool
+    var rows: Int
+    var cols: Int
+    var values: Array<Float>
+    var error: String
+
+    static fun success(rows: Int, cols: Int, values: Array<Float>) r: EmbeddingTensorLoad {
+        return EmbeddingTensorLoad{ ok: true, rows: rows, cols: cols, values: values, error: "" }
+    }
+
+    static fun failure(error: String) r: EmbeddingTensorLoad {
+        return EmbeddingTensorLoad{ ok: false, rows: 0, cols: 0, values: Array<Float>(), error: error }
+    }
+}
+
+class MiniLMEmbeddingTrace {
+    var ok: Bool
+    var seqLen: Int
+    var hiddenSize: Int
+    var rawSequence: Array<Float>
+    var outputSequence: Array<Float>
+    var wordRows: Array<Int>
+    var positionRows: Array<Int>
+    var tokenTypeRows: Array<Int>
+    var mean: Array<Float>
+
+    static fun failure() r: MiniLMEmbeddingTrace {
+        return MiniLMEmbeddingTrace{
+            ok: false,
+            seqLen: 0,
+            hiddenSize: 0,
+            rawSequence: Array<Float>(),
+            outputSequence: Array<Float>(),
+            wordRows: Array<Int>(),
+            positionRows: Array<Int>(),
+            tokenTypeRows: Array<Int>(),
+            mean: Array<Float>()
+        }
+    }
+
+    static fun success(seqLen: Int, hiddenSize: Int, rawSequence: Array<Float>, outputSequence: Array<Float>, wordRows: Array<Int>, positionRows: Array<Int>, tokenTypeRows: Array<Int>, mean: Array<Float>) r: MiniLMEmbeddingTrace {
+        return MiniLMEmbeddingTrace{
+            ok: true,
+            seqLen: seqLen,
+            hiddenSize: hiddenSize,
+            rawSequence: rawSequence,
+            outputSequence: outputSequence,
+            wordRows: wordRows,
+            positionRows: positionRows,
+            tokenTypeRows: tokenTypeRows,
+            mean: mean
+        }
+    }
+}
+
+class MiniLMDenseTrace {
+    var ok: Bool
+    var seqLen: Int
+    var inputDim: Int
+    var hiddenSize: Int
+    var intermediateInput: Array<Float>
+    var intermediatePreActivation: Array<Float>
+    var ffInput: Array<Float>
+    var attentionSequenceInput: Array<Float>
+    var attentionQ: Array<Float>
+    var attentionK: Array<Float>
+    var attentionV: Array<Float>
+    var attentionContext: Array<Float>
+    var attentionOutputDenseWeight: Array<Float>
+    var attentionLayerNormInput: Array<Float>
+    var attentionNormWeight: Array<Float>
+    var intermediateDenseWeight: Array<Float>
+    var layerNormInput: Array<Float>
+    var normWeight: Array<Float>
+    var normBias: Array<Float>
+    var outputDenseWeight: Array<Float>
+    var outputSequence: Array<Float>
+    var mean: Array<Float>
+
+    static fun failure() r: MiniLMDenseTrace {
+        return MiniLMDenseTrace{
+            ok: false,
+            seqLen: 0,
+            inputDim: 0,
+            hiddenSize: 0,
+            intermediateInput: Array<Float>(),
+            intermediatePreActivation: Array<Float>(),
+            ffInput: Array<Float>(),
+            attentionSequenceInput: Array<Float>(),
+            attentionQ: Array<Float>(),
+            attentionK: Array<Float>(),
+            attentionV: Array<Float>(),
+            attentionContext: Array<Float>(),
+            attentionOutputDenseWeight: Array<Float>(),
+            attentionLayerNormInput: Array<Float>(),
+            attentionNormWeight: Array<Float>(),
+            intermediateDenseWeight: Array<Float>(),
+            layerNormInput: Array<Float>(),
+            normWeight: Array<Float>(),
+            normBias: Array<Float>(),
+            outputDenseWeight: Array<Float>(),
+            outputSequence: Array<Float>(),
+            mean: Array<Float>()
+        }
+    }
+
+    static fun success(seqLen: Int, inputDim: Int, hiddenSize: Int, intermediateInput: Array<Float>, intermediatePreActivation: Array<Float>, ffInput: Array<Float>, attentionSequenceInput: Array<Float>, attentionQ: Array<Float>, attentionK: Array<Float>, attentionV: Array<Float>, attentionContext: Array<Float>, attentionOutputDenseWeight: Array<Float>, attentionLayerNormInput: Array<Float>, attentionNormWeight: Array<Float>, intermediateDenseWeight: Array<Float>, layerNormInput: Array<Float>, normWeight: Array<Float>, normBias: Array<Float>, outputDenseWeight: Array<Float>, outputSequence: Array<Float>, mean: Array<Float>) r: MiniLMDenseTrace {
+        return MiniLMDenseTrace{
+            ok: true,
+            seqLen: seqLen,
+            inputDim: inputDim,
+            hiddenSize: hiddenSize,
+            intermediateInput: intermediateInput,
+            intermediatePreActivation: intermediatePreActivation,
+            ffInput: ffInput,
+            attentionSequenceInput: attentionSequenceInput,
+            attentionQ: attentionQ,
+            attentionK: attentionK,
+            attentionV: attentionV,
+            attentionContext: attentionContext,
+            attentionOutputDenseWeight: attentionOutputDenseWeight,
+            attentionLayerNormInput: attentionLayerNormInput,
+            attentionNormWeight: attentionNormWeight,
+            intermediateDenseWeight: intermediateDenseWeight,
+            layerNormInput: layerNormInput,
+            normWeight: normWeight,
+            normBias: normBias,
+            outputDenseWeight: outputDenseWeight,
+            outputSequence: outputSequence,
+            mean: mean
+        }
+    }
+}
+
+class MiniLMPairStats {
+    var valid: Bool
+    var cosine: Float
+    var normA: Float
+    var normB: Float
+
+    static fun invalid() r: MiniLMPairStats {
+        return MiniLMPairStats{ valid: false, cosine: 0.0, normA: 0.0, normB: 0.0 }
+    }
+
+    static fun new(cosine: Float, normA: Float, normB: Float) r: MiniLMPairStats {
+        return MiniLMPairStats{ valid: true, cosine: cosine, normA: normA, normB: normB }
+    }
+}
+
+fun validateEmbeddingTensor(info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int, hiddenSize: Int, requireMatrix: Bool) r: String {
+    let index = mwFindCandidateIndex(info, canonicalName)
+    if index < 0 {
+        return "missing tensor " + canonicalName
+    }
+    let entry = info.entries[index]
+    if not isF32DType(entry.dtype) {
+        return "tensor dtype is not F32"
+    }
+    let elementCount = entry.elementCount()
+    if elementCount > maxLoadElements {
+        return "tensor over load cap"
+    }
+    if elementCount <= 0 {
+        return "tensor has no elements"
+    }
+    if requireMatrix and tensorCols(entry) != hiddenSize {
+        return "embedding width mismatch"
+    }
+    if not requireMatrix and elementCount < hiddenSize {
+        return "layer norm length mismatch"
+    }
+    if entry.byteCount() != elementCount * 4 {
+        return "F32 byte count does not match shape"
+    }
+    return ""
+}
+
+fun countReadyEncoderLayers(info: SafeTensorInfo, layers: Int, maxLoadElements: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int) r: Int {
+    var ready = 0
+    var layer = 0
+    while layer < layers {
+        let validation = validateEncoderLayer(info, layer, maxLoadElements, hiddenSize, attentionHeads, intermediateSize)
+        if validation.length() > 0 {
+            return ready
+        }
+        ready = ready + 1
+        layer = layer + 1
+    }
+    return ready
+}
+
+fun validateEncoderLayer(info: SafeTensorInfo, layer: Int, maxLoadElements: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int) r: String {
+    if attentionHeads <= 0 {
+        return "attention head count must be positive"
+    }
+    if hiddenSize % attentionHeads != 0 {
+        return "hidden size must divide by attention heads"
+    }
+    let prefix = "encoder.layer." + layer.toString() + "."
+    let qWeight = validateMatrixTensor(info, prefix + "attention.self.query.weight", maxLoadElements, hiddenSize, hiddenSize)
+    if qWeight.length() > 0 { return "query weight: " + qWeight }
+    let qBias = validateVectorTensor(info, prefix + "attention.self.query.bias", maxLoadElements, hiddenSize)
+    if qBias.length() > 0 { return "query bias: " + qBias }
+    let kWeight = validateMatrixTensor(info, prefix + "attention.self.key.weight", maxLoadElements, hiddenSize, hiddenSize)
+    if kWeight.length() > 0 { return "key weight: " + kWeight }
+    let kBias = validateVectorTensor(info, prefix + "attention.self.key.bias", maxLoadElements, hiddenSize)
+    if kBias.length() > 0 { return "key bias: " + kBias }
+    let vWeight = validateMatrixTensor(info, prefix + "attention.self.value.weight", maxLoadElements, hiddenSize, hiddenSize)
+    if vWeight.length() > 0 { return "value weight: " + vWeight }
+    let vBias = validateVectorTensor(info, prefix + "attention.self.value.bias", maxLoadElements, hiddenSize)
+    if vBias.length() > 0 { return "value bias: " + vBias }
+    let attnOutWeight = validateMatrixTensor(info, prefix + "attention.output.dense.weight", maxLoadElements, hiddenSize, hiddenSize)
+    if attnOutWeight.length() > 0 { return "attention output weight: " + attnOutWeight }
+    let attnOutBias = validateVectorTensor(info, prefix + "attention.output.dense.bias", maxLoadElements, hiddenSize)
+    if attnOutBias.length() > 0 { return "attention output bias: " + attnOutBias }
+    let attnLnWeight = validateVectorTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements, hiddenSize)
+    if attnLnWeight.length() > 0 { return "attention layer norm weight: " + attnLnWeight }
+    let attnLnBias = validateVectorTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements, hiddenSize)
+    if attnLnBias.length() > 0 { return "attention layer norm bias: " + attnLnBias }
+    let intermediateWeight = validateMatrixTensor(info, prefix + "intermediate.dense.weight", maxLoadElements, intermediateSize, hiddenSize)
+    if intermediateWeight.length() > 0 { return "intermediate weight: " + intermediateWeight }
+    let intermediateBias = validateVectorTensor(info, prefix + "intermediate.dense.bias", maxLoadElements, intermediateSize)
+    if intermediateBias.length() > 0 { return "intermediate bias: " + intermediateBias }
+    let outputWeight = validateMatrixTensor(info, prefix + "output.dense.weight", maxLoadElements, hiddenSize, intermediateSize)
+    if outputWeight.length() > 0 { return "output weight: " + outputWeight }
+    let outputBias = validateVectorTensor(info, prefix + "output.dense.bias", maxLoadElements, hiddenSize)
+    if outputBias.length() > 0 { return "output bias: " + outputBias }
+    let outputLnWeight = validateVectorTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements, hiddenSize)
+    if outputLnWeight.length() > 0 { return "output layer norm weight: " + outputLnWeight }
+    let outputLnBias = validateVectorTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements, hiddenSize)
+    if outputLnBias.length() > 0 { return "output layer norm bias: " + outputLnBias }
+    return ""
+}
+
+fun validateMatrixTensor(info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int, rows: Int, cols: Int) r: String {
+    let index = mwFindCandidateIndex(info, canonicalName)
+    if index < 0 {
+        return "missing tensor " + canonicalName
+    }
+    let entry = info.entries[index]
+    if not isF32DType(entry.dtype) {
+        return "tensor dtype is not F32"
+    }
+    if entry.elementCount() > maxLoadElements {
+        return "tensor over load cap"
+    }
+    if tensorRows(entry) != rows or tensorCols(entry) != cols {
+        return "shape mismatch"
+    }
+    if entry.byteCount() != entry.elementCount() * 4 {
+        return "F32 byte count does not match shape"
+    }
+    return ""
+}
+
+fun validateVectorTensor(info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int, length: Int) r: String {
+    let index = mwFindCandidateIndex(info, canonicalName)
+    if index < 0 {
+        return "missing tensor " + canonicalName
+    }
+    let entry = info.entries[index]
+    if not isF32DType(entry.dtype) {
+        return "tensor dtype is not F32"
+    }
+    if entry.elementCount() > maxLoadElements {
+        return "tensor over load cap"
+    }
+    if entry.elementCount() < length {
+        return "vector length mismatch"
+    }
+    if entry.byteCount() != entry.elementCount() * 4 {
+        return "F32 byte count does not match shape"
+    }
+    return ""
+}
+
+fun embeddingTensorRows(info: SafeTensorInfo, canonicalName: String) r: Int {
+    let index = mwFindCandidateIndex(info, canonicalName)
+    if index < 0 {
+        return 0
+    }
+    return tensorRows(info.entries[index])
+}
+
+fun loadEmbeddingTensor(info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int) r: EmbeddingTensorLoad {
+    let index = mwFindCandidateIndex(info, canonicalName)
+    if index < 0 {
+        return EmbeddingTensorLoad.failure("missing tensor " + canonicalName)
+    }
+    let entry = info.entries[index]
+    let validation = validateEmbeddingTensor(info, canonicalName, maxLoadElements, tensorCols(entry), true)
+    if validation.length() > 0 and canonicalName != "embeddings.LayerNorm.weight" and canonicalName != "embeddings.LayerNorm.bias" {
+        return EmbeddingTensorLoad.failure(validation)
+    }
+    if canonicalName == "embeddings.LayerNorm.weight" or canonicalName == "embeddings.LayerNorm.bias" {
+        let normValidation = validateEmbeddingTensor(info, canonicalName, maxLoadElements, entry.elementCount(), false)
+        if normValidation.length() > 0 {
+            return EmbeddingTensorLoad.failure(normValidation)
+        }
+    }
+
+    let elementCount = entry.elementCount()
+    let base = 8 + info.headerLength + entry.dataStart
+    let bytes = readBytesRange(info.path, base, entry.byteCount())
+    if bytes.length() < entry.byteCount() {
+        return EmbeddingTensorLoad.failure("tensor data is truncated")
+    }
+
+    let values = Array<Float>()
+    var i = 0
+    while i < elementCount {
+        values.push(meReadF32Le(bytes, i * 4))
+        i = i + 1
+    }
+    return EmbeddingTensorLoad.success(tensorRows(entry), tensorCols(entry), values)
+}
+
+fun applyEncoderLayer(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int) r: Array<Float> {
+    return applyEncoderLayerWithDenseAdapter(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, intermediateSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), false)
+}
+
+fun applyEncoderLayerWithDenseAdapter(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool) r: Array<Float> {
+    let prefix = "encoder.layer." + layer.toString() + "."
+    let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
+    let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
+    let kWeight = loadEmbeddingTensor(info, prefix + "attention.self.key.weight", maxLoadElements)
+    let kBias = loadEmbeddingTensor(info, prefix + "attention.self.key.bias", maxLoadElements)
+    let vWeight = loadEmbeddingTensor(info, prefix + "attention.self.value.weight", maxLoadElements)
+    let vBias = loadEmbeddingTensor(info, prefix + "attention.self.value.bias", maxLoadElements)
+    let attnOutWeight = loadEmbeddingTensor(info, prefix + "attention.output.dense.weight", maxLoadElements)
+    let attnOutBias = loadEmbeddingTensor(info, prefix + "attention.output.dense.bias", maxLoadElements)
+    let attnLnWeight = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements)
+    let attnLnBias = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements)
+    let intermediateWeight = loadEmbeddingTensor(info, prefix + "intermediate.dense.weight", maxLoadElements)
+    let intermediateBias = loadEmbeddingTensor(info, prefix + "intermediate.dense.bias", maxLoadElements)
+    let outputWeight = loadEmbeddingTensor(info, prefix + "output.dense.weight", maxLoadElements)
+    let outputBias = loadEmbeddingTensor(info, prefix + "output.dense.bias", maxLoadElements)
+    let outputLnWeight = loadEmbeddingTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements)
+    let outputLnBias = loadEmbeddingTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements)
+    if not qWeight.ok or not qBias.ok or not kWeight.ok or not kBias.ok or not vWeight.ok or not vBias.ok {
+        return Array<Float>()
+    }
+    if not attnOutWeight.ok or not attnOutBias.ok or not attnLnWeight.ok or not attnLnBias.ok {
+        return Array<Float>()
+    }
+    if not intermediateWeight.ok or not intermediateBias.ok or not outputWeight.ok or not outputBias.ok {
+        return Array<Float>()
+    }
+    if not outputLnWeight.ok or not outputLnBias.ok {
+        return Array<Float>()
+    }
+
+    let q = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, queryDelta, applyDenseAdapter)
+    let k = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, keyDelta, applyDenseAdapter)
+    let v = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, valueDelta, applyDenseAdapter)
+    let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
+    if context.length() != sequence.length() {
+        return Array<Float>()
+    }
+
+    let attnDense = projectSequenceWithDenseDelta(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attentionDenseDelta, applyDenseAdapter)
+    let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
+    var attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values)
+    if applyDenseAdapter {
+        let effectiveAttentionWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attentionLayerNormDelta)
+        let effectiveAttentionBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
+        attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias)
+    }
+    let ffIntermediate = feedForwardIntermediateWithDenseDelta(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, applyDenseAdapter)
+    let ffOutput = feedForwardOutputWithDenseAdapter(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, applyDenseAdapter)
+    if applyDenseAdapter {
+        let effectiveWeight = layerNormDelta.effectiveWeight(outputLnWeight.values)
+        let effectiveBias = layerNormDelta.effectiveBias(outputLnBias.values)
+        return residualLayerNormValues(ffOutput, attnNorm, seqLen, hiddenSize, effectiveWeight, effectiveBias)
+    }
+    return residualLayerNorm(ffOutput, attnNorm, seqLen, hiddenSize, outputLnWeight, outputLnBias)
+}
+
+fun normalizeMiniLMLayerAdapterLayer(adapterLayer: Int, readyLayers: Int) r: Int {
+    if readyLayers <= 0 {
+        return -1
+    }
+    if adapterLayer < 0 {
+        return -1
+    }
+    if adapterLayer >= readyLayers {
+        return readyLayers - 1
+    }
+    return adapterLayer
+}
+
+fun normalizeMiniLMDenseAdapterLayer(adapterLayer: Int, readyLayers: Int) r: Int {
+    if readyLayers <= 0 {
+        return -1
+    }
+    if adapterLayer < 0 {
+        return readyLayers - 1
+    }
+    if adapterLayer >= readyLayers {
+        return readyLayers - 1
+    }
+    return adapterLayer
+}
+
+fun applyProjectionAdapterToSequence(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, adapter: ProjectionAdapter) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, hiddenSize)
+        let projected = adapter.apply(input)
+        var d = 0
+        while d < hiddenSize {
+            if d < projected.length() {
+                out.push(projected[d])
+            } else {
+                out.push(flatAt(sequence, row, d, hiddenSize))
+            }
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun projectSequence(sequence: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, inputSize)
+        let projected = linearVector(input, weight, bias)
+        var i = 0
+        while i < projected.length() {
+            out.push(projected[i])
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun projectSequenceWithDenseDelta(sequence: Array<Float>, seqLen: Int, inputSize: Int, outputSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseDelta: DenseDeltaAdapter, applyDelta: Bool) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, inputSize)
+        let projected = linearVector(input, weight, bias)
+        let delta = if applyDelta { denseDelta.apply(input) } else { denseZeros(outputSize) }
+        var i = 0
+        while i < outputSize and i < projected.length() {
+            var value = projected[i]
+            if i < delta.length() {
+                value = value + delta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun linearVector(input: Array<Float>, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
+    let out = Array<Float>()
+    var o = 0
+    while o < weight.rows {
+        var sum = embeddingAt(bias.values, 0, o, bias.cols)
+        var i = 0
+        while i < input.length() and i < weight.cols {
+            sum = sum + input[i] * embeddingAt(weight.values, o, i, weight.cols)
+            i = i + 1
+        }
+        out.push(sum)
+        o = o + 1
+    }
+    return out
+}
+
+fun attentionContext(q: Array<Float>, k: Array<Float>, v: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int) r: Array<Float> {
+    if attentionHeads <= 0 or hiddenSize % attentionHeads != 0 {
+        return Array<Float>()
+    }
+    let headDim = hiddenSize / attentionHeads
+    let out = zerosFloat(seqLen * hiddenSize)
+    let scale = sqrt(headDim.toFloat())
+    var token = 0
+    while token < seqLen {
+        var head = 0
+        while head < attentionHeads {
+            let scores = Array<Float>()
+            var maxScore = -99999999.0
+            var other = 0
+            while other < seqLen {
+                let score = attentionScore(q, k, token, other, head, headDim, hiddenSize) / scale
+                scores.push(score)
+                if score > maxScore {
+                    maxScore = score
+                }
+                other = other + 1
+            }
+
+            var denom = 0.0
+            other = 0
+            while other < scores.length() {
+                denom = denom + exp(scores[other] - maxScore)
+                other = other + 1
+            }
+            var d = 0
+            while d < headDim {
+                var value = 0.0
+                other = 0
+                while other < seqLen {
+                    var weight = 0.0
+                    if denom > 0.000000001 {
+                        weight = exp(scores[other] - maxScore) / denom
+                    }
+                    value = value + weight * flatAt(v, other, head * headDim + d, hiddenSize)
+                    other = other + 1
+                }
+                out[token * hiddenSize + head * headDim + d] = value
+                d = d + 1
+            }
+            head = head + 1
+        }
+        token = token + 1
+    }
+    return out
+}
+
+fun attentionScore(q: Array<Float>, k: Array<Float>, queryRow: Int, keyRow: Int, head: Int, headDim: Int, hiddenSize: Int) r: Float {
+    var sum = 0.0
+    var d = 0
+    while d < headDim {
+        let col = head * headDim + d
+        sum = sum + flatAt(q, queryRow, col, hiddenSize) * flatAt(k, keyRow, col, hiddenSize)
+        d = d + 1
+    }
+    return sum
+}
+
+fun residualLayerNorm(values: Array<Float>, residual: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: EmbeddingTensorLoad, normBias: EmbeddingTensorLoad) r: Array<Float> {
+    return residualLayerNormValues(values, residual, seqLen, hiddenSize, normWeight.values, normBias.values)
+}
+
+fun residualLayerNormValues(values: Array<Float>, residual: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let merged = Array<Float>()
+        var d = 0
+        while d < hiddenSize {
+            merged.push(flatAt(values, row, d, hiddenSize) + flatAt(residual, row, d, hiddenSize))
+            d = d + 1
+        }
+        let normed = embeddingLayerNorm(merged, normWeight, normBias)
+        d = 0
+        while d < hiddenSize {
+            out.push(normed[d])
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun feedForwardIntermediate(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
+    return feedForwardIntermediateWithDenseDelta(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, DenseDeltaAdapter.identity(hiddenSize, intermediateSize), false)
+}
+
+fun feedForwardIntermediateWithDenseDelta(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool) r: Array<Float> {
+    let pre = feedForwardPreActivationWithDenseDelta(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, intermediateDelta, applyDelta)
+    return geluFlat(pre)
+}
+
+fun feedForwardPreActivationWithDenseDelta(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, hiddenSize)
+        let projected = linearVector(input, weight, bias)
+        let delta = if applyDelta { intermediateDelta.apply(input) } else { denseZeros(intermediateSize) }
+        var i = 0
+        while i < intermediateSize and i < projected.length() {
+            var value = projected[i]
+            if i < delta.length() {
+                value = value + delta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun feedForwardOutput(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
+    return feedForwardOutputWithDenseAdapter(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), false)
+}
+
+fun feedForwardOutputWithDenseAdapter(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, applyDenseAdapter: Bool) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, intermediateSize)
+        let projected = linearVector(input, weight, bias)
+        let delta = if applyDenseAdapter { denseAdapter.apply(input) } else { denseZeros(hiddenSize) }
+        let fullDelta = if applyDenseAdapter { denseDelta.apply(input) } else { denseZeros(hiddenSize) }
+        var i = 0
+        while i < hiddenSize and i < projected.length() {
+            var value = projected[i]
+            if i < delta.length() {
+                value = value + delta[i]
+            }
+            if i < fullDelta.length() {
+                value = value + fullDelta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun denseAdapterTrace(info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, targetLayer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter) r: MiniLMDenseTrace {
+    if targetLayer < 0 or targetLayer >= readyLayers {
+        return MiniLMDenseTrace.failure()
+    }
+    let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements)
+    if not word.ok { return MiniLMDenseTrace.failure() }
+    let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
+    if not position.ok { return MiniLMDenseTrace.failure() }
+    let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    if not tokenType.ok { return MiniLMDenseTrace.failure() }
+    let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+    if not normWeight.ok { return MiniLMDenseTrace.failure() }
+    let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements)
+    if not normBias.ok { return MiniLMDenseTrace.failure() }
+
+    let sequence = Array<Float>()
+    var tokenCount = 0
+    var i = 0
+    while i < tokenIds.length() and i < mask.length() {
+        if mask[i] == 1 {
+            tokenCount = tokenCount + 1
+            let embedded = encodeTokenWithTables(tokenIds[i], i, hiddenSize, word, position, tokenType, normWeight, normBias)
+            var d = 0
+            while d < hiddenSize {
+                sequence.push(embedded[d])
+                d = d + 1
+            }
+        }
+        i = i + 1
+    }
+    if tokenCount == 0 {
+        return MiniLMDenseTrace.failure()
+    }
+
+    var encoded = sequence
+    var layer = 0
+    while layer < targetLayer {
+        let layerOut = applyEncoderLayer(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        if layerOut.length() != encoded.length() {
+            return MiniLMDenseTrace.failure()
+        }
+        encoded = layerOut
+        layer = layer + 1
+    }
+    let targetTrace = applyFinalDenseTrace(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta)
+    if not targetTrace.ok {
+        return targetTrace
+    }
+    var tail = targetTrace.outputSequence
+    layer = targetLayer + 1
+    while layer < readyLayers {
+        let layerOut = applyEncoderLayer(info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        if layerOut.length() != tail.length() {
+            return MiniLMDenseTrace.failure()
+        }
+        tail = layerOut
+        layer = layer + 1
+    }
+    let finalMean = meanPoolFlat(tail, tokenCount, hiddenSize)
+    return MiniLMDenseTrace.success(targetTrace.seqLen, targetTrace.inputDim, targetTrace.hiddenSize, targetTrace.intermediateInput, targetTrace.intermediatePreActivation, targetTrace.ffInput, targetTrace.attentionSequenceInput, targetTrace.attentionQ, targetTrace.attentionK, targetTrace.attentionV, targetTrace.attentionContext, targetTrace.attentionOutputDenseWeight, targetTrace.attentionLayerNormInput, targetTrace.attentionNormWeight, targetTrace.intermediateDenseWeight, targetTrace.layerNormInput, targetTrace.normWeight, targetTrace.normBias, targetTrace.outputDenseWeight, targetTrace.outputSequence, finalMean)
+}
+
+fun denseAdapterTraceWithLayerDeltas(info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, targetLayer: Int, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas) r: MiniLMDenseTrace {
+    if targetLayer < 0 or targetLayer >= readyLayers or not layerDeltas.hasLayer(targetLayer) {
+        return MiniLMDenseTrace.failure()
+    }
+    let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements)
+    if not word.ok { return MiniLMDenseTrace.failure() }
+    let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
+    if not position.ok { return MiniLMDenseTrace.failure() }
+    let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    if not tokenType.ok { return MiniLMDenseTrace.failure() }
+    let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+    if not normWeight.ok { return MiniLMDenseTrace.failure() }
+    let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements)
+    if not normBias.ok { return MiniLMDenseTrace.failure() }
+
+    let sequence = Array<Float>()
+    var tokenCount = 0
+    var i = 0
+    while i < tokenIds.length() and i < mask.length() {
+        if mask[i] == 1 {
+            tokenCount = tokenCount + 1
+            let embedded = encodeTokenWithEmbeddingDeltas(tokenIds[i], i, hiddenSize, word, position, tokenType, normWeight, normBias, embeddingDeltas)
+            var d = 0
+            while d < hiddenSize {
+                sequence.push(embedded[d])
+                d = d + 1
+            }
+        }
+        i = i + 1
+    }
+    if tokenCount == 0 {
+        return MiniLMDenseTrace.failure()
+    }
+
+    var encoded = sequence
+    var layer = 0
+    while layer < targetLayer {
+        var layerOut = Array<Float>()
+        if layerDeltas.hasLayer(layer) {
+            layerOut = applyEncoderLayerWithDenseAdapter(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+        } else {
+            layerOut = applyEncoderLayer(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        }
+        if layerOut.length() != encoded.length() {
+            return MiniLMDenseTrace.failure()
+        }
+        encoded = layerOut
+        layer = layer + 1
+    }
+    let targetTrace = applyFinalDenseTrace(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer])
+    if not targetTrace.ok {
+        return targetTrace
+    }
+    var tail = targetTrace.outputSequence
+    layer = targetLayer + 1
+    while layer < readyLayers {
+        var layerOut = Array<Float>()
+        if layerDeltas.hasLayer(layer) {
+            layerOut = applyEncoderLayerWithDenseAdapter(info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+        } else {
+            layerOut = applyEncoderLayer(info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        }
+        if layerOut.length() != tail.length() {
+            return MiniLMDenseTrace.failure()
+        }
+        tail = layerOut
+        layer = layer + 1
+    }
+    let finalMean = meanPoolFlat(tail, tokenCount, hiddenSize)
+    return MiniLMDenseTrace.success(targetTrace.seqLen, targetTrace.inputDim, targetTrace.hiddenSize, targetTrace.intermediateInput, targetTrace.intermediatePreActivation, targetTrace.ffInput, targetTrace.attentionSequenceInput, targetTrace.attentionQ, targetTrace.attentionK, targetTrace.attentionV, targetTrace.attentionContext, targetTrace.attentionOutputDenseWeight, targetTrace.attentionLayerNormInput, targetTrace.attentionNormWeight, targetTrace.intermediateDenseWeight, targetTrace.layerNormInput, targetTrace.normWeight, targetTrace.normBias, targetTrace.outputDenseWeight, targetTrace.outputSequence, finalMean)
+}
+
+fun embeddingDeltaTrace(info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas) r: MiniLMEmbeddingTrace {
+    let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements)
+    if not word.ok { return MiniLMEmbeddingTrace.failure() }
+    let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
+    if not position.ok { return MiniLMEmbeddingTrace.failure() }
+    let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    if not tokenType.ok { return MiniLMEmbeddingTrace.failure() }
+    let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+    if not normWeight.ok { return MiniLMEmbeddingTrace.failure() }
+    let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements)
+    if not normBias.ok { return MiniLMEmbeddingTrace.failure() }
+
+    let rawSequence = Array<Float>()
+    let outputSequence = Array<Float>()
+    let wordRows = Array<Int>()
+    let positionRows = Array<Int>()
+    let tokenTypeRows = Array<Int>()
+    var tokenCount = 0
+    var i = 0
+    while i < tokenIds.length() and i < mask.length() {
+        if mask[i] == 1 {
+            tokenCount = tokenCount + 1
+            let wordRow = positiveMod(tokenIds[i], word.rows)
+            let posRow = positiveMod(i, position.rows)
+            let typeRow = 0
+            wordRows.push(wordRow)
+            positionRows.push(posRow)
+            tokenTypeRows.push(typeRow)
+            let raw = encodeTokenRawWithEmbeddingDeltas(tokenIds[i], i, hiddenSize, word, position, tokenType, embeddingDeltas)
+            let embedded = embeddingLayerNormWithEmbeddingDeltas(raw, normWeight.values, normBias.values, embeddingDeltas)
+            var d = 0
+            while d < hiddenSize {
+                rawSequence.push(raw[d])
+                outputSequence.push(embedded[d])
+                d = d + 1
+            }
+        }
+        i = i + 1
+    }
+    if tokenCount == 0 {
+        return MiniLMEmbeddingTrace.failure()
+    }
+
+    var encoded = outputSequence
+    var layer = 0
+    while layer < readyLayers {
+        var layerOut = Array<Float>()
+        if layerDeltas.hasLayer(layer) {
+            layerOut = applyEncoderLayerWithDenseAdapter(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+        } else {
+            layerOut = applyEncoderLayer(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        }
+        if layerOut.length() != encoded.length() {
+            return MiniLMEmbeddingTrace.failure()
+        }
+        encoded = layerOut
+        layer = layer + 1
+    }
+    return MiniLMEmbeddingTrace.success(tokenCount, hiddenSize, rawSequence, outputSequence, wordRows, positionRows, tokenTypeRows, meanPoolFlat(encoded, tokenCount, hiddenSize))
+}
+
+fun applyFinalDenseTrace(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter) r: MiniLMDenseTrace {
+    let prefix = "encoder.layer." + layer.toString() + "."
+    let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
+    let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
+    let kWeight = loadEmbeddingTensor(info, prefix + "attention.self.key.weight", maxLoadElements)
+    let kBias = loadEmbeddingTensor(info, prefix + "attention.self.key.bias", maxLoadElements)
+    let vWeight = loadEmbeddingTensor(info, prefix + "attention.self.value.weight", maxLoadElements)
+    let vBias = loadEmbeddingTensor(info, prefix + "attention.self.value.bias", maxLoadElements)
+    let attnOutWeight = loadEmbeddingTensor(info, prefix + "attention.output.dense.weight", maxLoadElements)
+    let attnOutBias = loadEmbeddingTensor(info, prefix + "attention.output.dense.bias", maxLoadElements)
+    let attnLnWeight = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements)
+    let attnLnBias = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements)
+    let intermediateWeight = loadEmbeddingTensor(info, prefix + "intermediate.dense.weight", maxLoadElements)
+    let intermediateBias = loadEmbeddingTensor(info, prefix + "intermediate.dense.bias", maxLoadElements)
+    let outputWeight = loadEmbeddingTensor(info, prefix + "output.dense.weight", maxLoadElements)
+    let outputBias = loadEmbeddingTensor(info, prefix + "output.dense.bias", maxLoadElements)
+    let outputLnWeight = loadEmbeddingTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements)
+    let outputLnBias = loadEmbeddingTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements)
+    if not qWeight.ok or not qBias.ok or not kWeight.ok or not kBias.ok or not vWeight.ok or not vBias.ok { return MiniLMDenseTrace.failure() }
+    if not attnOutWeight.ok or not attnOutBias.ok or not attnLnWeight.ok or not attnLnBias.ok { return MiniLMDenseTrace.failure() }
+    if not intermediateWeight.ok or not intermediateBias.ok or not outputWeight.ok or not outputBias.ok { return MiniLMDenseTrace.failure() }
+    if not outputLnWeight.ok or not outputLnBias.ok { return MiniLMDenseTrace.failure() }
+
+    let q = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, queryDelta, true)
+    let k = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, keyDelta, true)
+    let v = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, valueDelta, true)
+    let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
+    if context.length() != sequence.length() {
+        return MiniLMDenseTrace.failure()
+    }
+    let attnDense = projectSequenceWithDenseDelta(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attentionDenseDelta, true)
+    let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
+    let effectiveAttnWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attentionLayerNormDelta)
+    let effectiveAttnBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
+    let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, effectiveAttnWeight, effectiveAttnBias)
+    let interPre = feedForwardPreActivationWithDenseDelta(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, true)
+    let ffIntermediate = geluFlat(interPre)
+    let ffOutput = feedForwardOutputWithDenseAdapter(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, true)
+    let lnInput = addFlatRows(ffOutput, attnNorm, seqLen, hiddenSize)
+    let effectiveWeight = layerNormDelta.effectiveWeight(outputLnWeight.values)
+    let effectiveBias = layerNormDelta.effectiveBias(outputLnBias.values)
+    let output = layerNormRows(lnInput, seqLen, hiddenSize, effectiveWeight, effectiveBias)
+    return MiniLMDenseTrace.success(seqLen, intermediateSize, hiddenSize, attnNorm, interPre, ffIntermediate, sequence, q, k, v, context, attnOutWeight.values, attnLnInput, effectiveAttnWeight, intermediateWeight.values, lnInput, effectiveWeight, effectiveBias, outputWeight.values, output, meanPoolFlat(output, seqLen, hiddenSize))
+}
+
+fun meanPoolFlat(sequence: Array<Float>, seqLen: Int, hiddenSize: Int) r: Array<Float> {
+    let out = zerosFloat(hiddenSize)
+    if seqLen <= 0 {
+        return out
+    }
+    var row = 0
+    while row < seqLen {
+        var d = 0
+        while d < hiddenSize {
+            out[d] = out[d] + flatAt(sequence, row, d, hiddenSize)
+            d = d + 1
+        }
+        row = row + 1
+    }
+    var i = 0
+    while i < hiddenSize {
+        out[i] = out[i] / seqLen.toFloat()
+        i = i + 1
+    }
+    return out
+}
+
+fun addFlatRows(a: Array<Float>, b: Array<Float>, seqLen: Int, hiddenSize: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    let total = seqLen * hiddenSize
+    while i < total {
+        var value = 0.0
+        if i < a.length() {
+            value = value + a[i]
+        }
+        if i < b.length() {
+            value = value + b[i]
+        }
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun layerNormRows(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(values, row, hiddenSize)
+        let normed = embeddingLayerNorm(input, normWeight, normBias)
+        var d = 0
+        while d < hiddenSize {
+            out.push(normed[d])
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun layerNormDeltaEffectiveWeight(base: Array<Float>, delta: LayerNormDeltaAdapter) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < delta.dim {
+        var value = 1.0
+        if i < base.length() {
+            value = base[i]
+        }
+        if i < delta.weightDelta.length() {
+            value = value + delta.weightDelta[i]
+        }
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun layerNormDeltaEffectiveBias(base: Array<Float>, delta: LayerNormDeltaAdapter) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < delta.dim {
+        var value = 0.0
+        if i < base.length() {
+            value = base[i]
+        }
+        if i < delta.biasDelta.length() {
+            value = value + delta.biasDelta[i]
+        }
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun accumulateDenseTraceGradWithTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, maxLoadElements: Int) r: Void {
+    if targetLayer == readyLayers - 1 {
+        accumulateDenseTraceGrad(trace, gradMean, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+        return
+    }
+    if targetLayer < readyLayers - 1 {
+        let gradRows = tailInputGradient(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, trace.inputDim, maxLoadElements, targetLayer + 1, readyLayers, gradMean)
+        if gradRows.length() == trace.seqLen * trace.hiddenSize {
+            accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+        }
+    }
+}
+
+fun accumulateDenseTraceGradWithLayerDeltaTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, layerDeltas: MiniLMLayerDeltas, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int) r: Void {
+    if targetLayer < 0 or targetLayer >= readyLayers or not layerDeltas.hasLayer(targetLayer) {
+        return
+    }
+    if targetLayer == readyLayers - 1 {
+        accumulateDenseTraceGrad(trace, gradMean, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+        return
+    }
+    let gradRows = tailInputGradientWithLayerDeltas(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer + 1, readyLayers, gradMean, layerDeltas)
+    if gradRows.length() == trace.seqLen * trace.hiddenSize {
+        accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+    }
+}
+
+fun accumulateDenseTraceGrad(trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, attentionHeads: Int) r: Void {
+    if not trace.ok or trace.seqLen <= 0 {
+        return
+    }
+    var row = 0
+    while row < trace.seqLen {
+        let lnInput = rowVector(trace.layerNormInput, row, trace.hiddenSize)
+        let gradY = Array<Float>()
+        var d = 0
+        while d < trace.hiddenSize {
+            var value = 0.0
+            if d < gradMean.length() {
+                value = gradMean[d] / trace.seqLen.toFloat()
+            }
+            gradY.push(value)
+            d = d + 1
+        }
+        accumulateLayerNormDeltaGrad(lnInput, gradY, layerNormDelta, gradLNW, gradLNB)
+        let gradZ = layerNormInputGradient(lnInput, trace.normWeight, gradY)
+        let ffInput = rowVector(trace.ffInput, row, trace.inputDim)
+        accumulateDenseLoRAGrad(ffInput, gradZ, denseAdapter, gradA, gradB)
+        accumulateDenseDeltaGrad(ffInput, gradZ, denseDelta, gradDW, gradDB)
+        accumulateIntermediateDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, gradIW, gradIB)
+        accumulateAttentionDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, attentionHeads)
+        row = row + 1
+    }
+}
+
+fun accumulateDenseTraceGradRows(trace: MiniLMDenseTrace, gradRows: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, attentionHeads: Int) r: Void {
+    if not trace.ok or trace.seqLen <= 0 {
+        return
+    }
+    var row = 0
+    while row < trace.seqLen {
+        let lnInput = rowVector(trace.layerNormInput, row, trace.hiddenSize)
+        let gradY = rowVector(gradRows, row, trace.hiddenSize)
+        accumulateLayerNormDeltaGrad(lnInput, gradY, layerNormDelta, gradLNW, gradLNB)
+        let gradZ = layerNormInputGradient(lnInput, trace.normWeight, gradY)
+        let ffInput = rowVector(trace.ffInput, row, trace.inputDim)
+        accumulateDenseLoRAGrad(ffInput, gradZ, denseAdapter, gradA, gradB)
+        accumulateDenseDeltaGrad(ffInput, gradZ, denseDelta, gradDW, gradDB)
+        accumulateIntermediateDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, gradIW, gradIB)
+        accumulateAttentionDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, attentionHeads)
+        row = row + 1
+    }
+}
+
+fun accumulateEmbeddingTraceGrad(info: SafeTensorInfo, trace: MiniLMEmbeddingTrace, gradMean: Array<Float>, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, gradWordRows: Array<Int>, gradWord: Array<Float>, gradPositionRows: Array<Int>, gradPosition: Array<Float>, gradTokenTypeRows: Array<Int>, gradTokenType: Array<Float>, gradLnW: Array<Float>, gradLnB: Array<Float>, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int) r: Void {
+    if not trace.ok or trace.seqLen <= 0 {
+        return
+    }
+    var gradRows = Array<Float>()
+    if readyLayers > 0 {
+        gradRows = tailInputGradientWithLayerDeltas(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, 0, readyLayers, gradMean, layerDeltas)
+    } else {
+        gradRows = meanGradRows(gradMean, trace.seqLen, trace.hiddenSize)
+    }
+    if gradRows.length() != trace.seqLen * trace.hiddenSize {
+        return
+    }
+    let effectiveWeight = embeddingDeltas.effectiveLayerNormWeight(embeddingLoadNormWeight(info, maxLoadElements))
+    var row = 0
+    while row < trace.seqLen {
+        let raw = rowVector(trace.rawSequence, row, trace.hiddenSize)
+        let gradOut = rowVector(gradRows, row, trace.hiddenSize)
+        accumulateEmbeddingLayerNormDeltaGrad(raw, gradOut, gradLnW, gradLnB)
+        let gradRaw = layerNormInputGradient(raw, effectiveWeight, gradOut)
+        if row < trace.wordRows.length() {
+            addEmbeddingSparseGrad(gradWordRows, gradWord, trace.wordRows[row], gradRaw, trace.hiddenSize)
+        }
+        if row < trace.positionRows.length() {
+            addEmbeddingSparseGrad(gradPositionRows, gradPosition, trace.positionRows[row], gradRaw, trace.hiddenSize)
+        }
+        if row < trace.tokenTypeRows.length() {
+            addEmbeddingSparseGrad(gradTokenTypeRows, gradTokenType, trace.tokenTypeRows[row], gradRaw, trace.hiddenSize)
+        }
+        row = row + 1
+    }
+}
+
+fun embeddingLoadNormWeight(info: SafeTensorInfo, maxLoadElements: Int) r: Array<Float> {
+    let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+    if normWeight.ok {
+        return normWeight.values
+    }
+    return Array<Float>()
+}
+
+fun addEmbeddingSparseGrad(rowIds: Array<Int>, values: Array<Float>, row: Int, grad: Array<Float>, hiddenSize: Int) r: Void {
+    var slot = -1
+    var i = 0
+    while i < rowIds.length() {
+        if rowIds[i] == row {
+            slot = i
+        }
+        i = i + 1
+    }
+    if slot < 0 {
+        rowIds.push(row)
+        var d = 0
+        while d < hiddenSize {
+            values.push(0.0)
+            d = d + 1
+        }
+        slot = rowIds.length() - 1
+    }
+    var d = 0
+    while d < hiddenSize and d < grad.length() {
+        values[slot * hiddenSize + d] = values[slot * hiddenSize + d] + grad[d]
+        d = d + 1
+    }
+}
+
+fun accumulateEmbeddingLayerNormDeltaGrad(values: Array<Float>, gradOut: Array<Float>, gradWeight: Array<Float>, gradBias: Array<Float>) r: Void {
+    var mean = 0.0
+    var i = 0
+    while i < values.length() {
+        mean = mean + values[i]
+        i = i + 1
+    }
+    if values.length() > 0 {
+        mean = mean / values.length().toFloat()
+    }
+    var variance = 0.0
+    i = 0
+    while i < values.length() {
+        let centered = values[i] - mean
+        variance = variance + centered * centered
+        i = i + 1
+    }
+    if values.length() > 0 {
+        variance = variance / values.length().toFloat()
+    }
+    let denom = sqrt(variance + 0.000000000001)
+    i = 0
+    while i < values.length() and i < gradOut.length() and i < gradWeight.length() and i < gradBias.length() {
+        let normed = (values[i] - mean) / denom
+        gradWeight[i] = gradWeight[i] + gradOut[i] * normed
+        gradBias[i] = gradBias[i] + gradOut[i]
+        i = i + 1
+    }
+}
+
+fun tailInputGradient(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, readyLayers: Int, gradMean: Array<Float>) r: Array<Float> {
+    if startLayer >= readyLayers {
+        return meanGradRows(gradMean, seqLen, hiddenSize)
+    }
+    var gradRows = meanGradRows(gradMean, seqLen, hiddenSize)
+    var layer = readyLayers - 1
+    while layer >= startLayer {
+        let layerInput = tailLayerInputSequence(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, layer)
+        if layerInput.length() != startSequence.length() {
+            return Array<Float>()
+        }
+        gradRows = transformerLayerInputGradient(info, layerInput, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows)
+        if gradRows.length() != startSequence.length() {
+            return Array<Float>()
+        }
+        layer = layer - 1
+    }
+    return gradRows
+}
+
+fun tailInputGradientWithLayerDeltas(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, readyLayers: Int, gradMean: Array<Float>, layerDeltas: MiniLMLayerDeltas) r: Array<Float> {
+    if startLayer >= readyLayers {
+        return meanGradRows(gradMean, seqLen, hiddenSize)
+    }
+    var gradRows = meanGradRows(gradMean, seqLen, hiddenSize)
+    var layer = readyLayers - 1
+    while layer >= startLayer {
+        let layerInput = tailLayerInputSequenceWithLayerDeltas(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, layer, layerDeltas)
+        if layerInput.length() != startSequence.length() {
+            return Array<Float>()
+        }
+        gradRows = transformerLayerInputGradientWithLayerDeltas(info, layerInput, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, layerDeltas)
+        if gradRows.length() != startSequence.length() {
+            return Array<Float>()
+        }
+        layer = layer - 1
+    }
+    return gradRows
+}
+
+fun tailLayerInputSequence(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, endLayer: Int) r: Array<Float> {
+    var out = startSequence
+    var layer = startLayer
+    while layer < endLayer {
+        let layerOut = applyEncoderLayer(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        if layerOut.length() != out.length() {
+            return Array<Float>()
+        }
+        out = layerOut
+        layer = layer + 1
+    }
+    return out
+}
+
+fun tailLayerInputSequenceWithLayerDeltas(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, endLayer: Int, layerDeltas: MiniLMLayerDeltas) r: Array<Float> {
+    var out = startSequence
+    var layer = startLayer
+    while layer < endLayer {
+        var layerOut = Array<Float>()
+        if layerDeltas.hasLayer(layer) {
+            layerOut = applyEncoderLayerWithDenseAdapter(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+        } else {
+            layerOut = applyEncoderLayer(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        }
+        if layerOut.length() != out.length() {
+            return Array<Float>()
+        }
+        out = layerOut
+        layer = layer + 1
+    }
+    return out
+}
+
+fun transformerLayerInputGradient(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, gradRows: Array<Float>) r: Array<Float> {
+    let prefix = "encoder.layer." + layer.toString() + "."
+    let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
+    let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
+    let kWeight = loadEmbeddingTensor(info, prefix + "attention.self.key.weight", maxLoadElements)
+    let kBias = loadEmbeddingTensor(info, prefix + "attention.self.key.bias", maxLoadElements)
+    let vWeight = loadEmbeddingTensor(info, prefix + "attention.self.value.weight", maxLoadElements)
+    let vBias = loadEmbeddingTensor(info, prefix + "attention.self.value.bias", maxLoadElements)
+    let attnOutWeight = loadEmbeddingTensor(info, prefix + "attention.output.dense.weight", maxLoadElements)
+    let attnOutBias = loadEmbeddingTensor(info, prefix + "attention.output.dense.bias", maxLoadElements)
+    let attnLnWeight = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements)
+    let attnLnBias = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements)
+    let intermediateWeight = loadEmbeddingTensor(info, prefix + "intermediate.dense.weight", maxLoadElements)
+    let intermediateBias = loadEmbeddingTensor(info, prefix + "intermediate.dense.bias", maxLoadElements)
+    let outputWeight = loadEmbeddingTensor(info, prefix + "output.dense.weight", maxLoadElements)
+    let outputBias = loadEmbeddingTensor(info, prefix + "output.dense.bias", maxLoadElements)
+    let outputLnWeight = loadEmbeddingTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements)
+    let outputLnBias = loadEmbeddingTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements)
+    if not qWeight.ok or not qBias.ok or not kWeight.ok or not kBias.ok or not vWeight.ok or not vBias.ok {
+        return Array<Float>()
+    }
+    if not attnOutWeight.ok or not attnOutBias.ok or not attnLnWeight.ok or not attnLnBias.ok {
+        return Array<Float>()
+    }
+    if not intermediateWeight.ok or not intermediateBias.ok or not outputWeight.ok or not outputBias.ok {
+        return Array<Float>()
+    }
+    if not outputLnWeight.ok or not outputLnBias.ok {
+        return Array<Float>()
+    }
+
+    let q = projectSequence(sequence, seqLen, hiddenSize, qWeight, qBias)
+    let k = projectSequence(sequence, seqLen, hiddenSize, kWeight, kBias)
+    let v = projectSequence(sequence, seqLen, hiddenSize, vWeight, vBias)
+    let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
+    if context.length() != sequence.length() {
+        return Array<Float>()
+    }
+    let attnDense = projectSequence(context, seqLen, hiddenSize, attnOutWeight, attnOutBias)
+    let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
+    let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values)
+    let interPre = feedForwardPreActivation(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias)
+    let ffIntermediate = geluFlat(interPre)
+    let ffOutput = feedForwardOutput(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias)
+    let outputLnInput = addFlatRows(ffOutput, attnNorm, seqLen, hiddenSize)
+
+    let gradOutput = gradRows
+    let gradOutputLnInput = layerNormRowsInputGradient(outputLnInput, seqLen, hiddenSize, outputLnWeight.values, gradOutput)
+    let gradFfIntermediate = projectSequenceInputGradient(gradOutputLnInput, seqLen, intermediateSize, outputWeight)
+    let gradInterPre = applyGeluGradient(interPre, gradFfIntermediate)
+    let gradAttnNorm = copyFlat(gradOutputLnInput)
+    let gradAttnFromIntermediate = projectSequenceInputGradient(gradInterPre, seqLen, hiddenSize, intermediateWeight)
+    addFlatInPlace(gradAttnNorm, gradAttnFromIntermediate)
+    let gradAttnLnInput = layerNormRowsInputGradient(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, gradAttnNorm)
+    let gradSequence = copyFlat(gradAttnLnInput)
+    let gradContext = projectSequenceInputGradient(gradAttnLnInput, seqLen, hiddenSize, attnOutWeight)
+    let gradAttentionInput = attentionSequenceInputGradient(q, k, v, gradContext, qWeight, kWeight, vWeight, seqLen, hiddenSize, attentionHeads)
+    addFlatInPlace(gradSequence, gradAttentionInput)
+    return gradSequence
+}
+
+fun transformerLayerInputGradientWithLayerDeltas(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, gradRows: Array<Float>, layerDeltas: MiniLMLayerDeltas) r: Array<Float> {
+    if not layerDeltas.hasLayer(layer) {
+        return transformerLayerInputGradient(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows)
+    }
+    let prefix = "encoder.layer." + layer.toString() + "."
+    let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
+    let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
+    let kWeight = loadEmbeddingTensor(info, prefix + "attention.self.key.weight", maxLoadElements)
+    let kBias = loadEmbeddingTensor(info, prefix + "attention.self.key.bias", maxLoadElements)
+    let vWeight = loadEmbeddingTensor(info, prefix + "attention.self.value.weight", maxLoadElements)
+    let vBias = loadEmbeddingTensor(info, prefix + "attention.self.value.bias", maxLoadElements)
+    let attnOutWeight = loadEmbeddingTensor(info, prefix + "attention.output.dense.weight", maxLoadElements)
+    let attnOutBias = loadEmbeddingTensor(info, prefix + "attention.output.dense.bias", maxLoadElements)
+    let attnLnWeight = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements)
+    let attnLnBias = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements)
+    let intermediateWeight = loadEmbeddingTensor(info, prefix + "intermediate.dense.weight", maxLoadElements)
+    let intermediateBias = loadEmbeddingTensor(info, prefix + "intermediate.dense.bias", maxLoadElements)
+    let outputWeight = loadEmbeddingTensor(info, prefix + "output.dense.weight", maxLoadElements)
+    let outputBias = loadEmbeddingTensor(info, prefix + "output.dense.bias", maxLoadElements)
+    let outputLnWeight = loadEmbeddingTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements)
+    let outputLnBias = loadEmbeddingTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements)
+    if not qWeight.ok or not qBias.ok or not kWeight.ok or not kBias.ok or not vWeight.ok or not vBias.ok {
+        return Array<Float>()
+    }
+    if not attnOutWeight.ok or not attnOutBias.ok or not attnLnWeight.ok or not attnLnBias.ok {
+        return Array<Float>()
+    }
+    if not intermediateWeight.ok or not intermediateBias.ok or not outputWeight.ok or not outputBias.ok {
+        return Array<Float>()
+    }
+    if not outputLnWeight.ok or not outputLnBias.ok {
+        return Array<Float>()
+    }
+
+    let qDelta = layerDeltas.queryDeltas[layer]
+    let kDelta = layerDeltas.keyDeltas[layer]
+    let vDelta = layerDeltas.valueDeltas[layer]
+    let attnDenseDelta = layerDeltas.attentionDenseDeltas[layer]
+    let attnLayerNormDelta = layerDeltas.attentionLayerNormDeltas[layer]
+    let intermediateDelta = layerDeltas.intermediateDeltas[layer]
+    let outputDelta = layerDeltas.outputDeltas[layer]
+    let outputLayerNormDelta = layerDeltas.outputLayerNormDeltas[layer]
+    let q = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, qDelta, true)
+    let k = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, kDelta, true)
+    let v = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, vDelta, true)
+    let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
+    if context.length() != sequence.length() {
+        return Array<Float>()
+    }
+    let attnDense = projectSequenceWithDenseDelta(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attnDenseDelta, true)
+    let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
+    let attnWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attnLayerNormDelta)
+    let attnBias = layerNormDeltaEffectiveBias(attnLnBias.values, attnLayerNormDelta)
+    let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnWeight, attnBias)
+    let interPre = feedForwardPreActivationWithDenseDelta(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, true)
+    let ffIntermediate = geluFlat(interPre)
+    let ffOutput = feedForwardOutputWithDenseAdapter(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), outputDelta, true)
+    let outputLnInput = addFlatRows(ffOutput, attnNorm, seqLen, hiddenSize)
+    let effectiveOutputLnWeight = outputLayerNormDelta.effectiveWeight(outputLnWeight.values)
+
+    let gradOutputLnInput = layerNormRowsInputGradient(outputLnInput, seqLen, hiddenSize, effectiveOutputLnWeight, gradRows)
+    let gradFfIntermediate = projectSequenceInputGradientWithDenseDelta(gradOutputLnInput, seqLen, intermediateSize, outputWeight, outputDelta)
+    let gradInterPre = applyGeluGradient(interPre, gradFfIntermediate)
+    let gradAttnNorm = copyFlat(gradOutputLnInput)
+    let gradAttnFromIntermediate = projectSequenceInputGradientWithDenseDelta(gradInterPre, seqLen, hiddenSize, intermediateWeight, intermediateDelta)
+    addFlatInPlace(gradAttnNorm, gradAttnFromIntermediate)
+    let gradAttnLnInput = layerNormRowsInputGradient(attnLnInput, seqLen, hiddenSize, attnWeight, gradAttnNorm)
+    let gradSequence = copyFlat(gradAttnLnInput)
+    let gradContext = projectSequenceInputGradientWithDenseDelta(gradAttnLnInput, seqLen, hiddenSize, attnOutWeight, attnDenseDelta)
+    let gradAttentionInput = attentionSequenceInputGradientWithDeltas(q, k, v, gradContext, qWeight, kWeight, vWeight, qDelta, kDelta, vDelta, seqLen, hiddenSize, attentionHeads)
+    addFlatInPlace(gradSequence, gradAttentionInput)
+    return gradSequence
+}
+
+fun feedForwardPreActivation(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, hiddenSize)
+        let projected = linearVector(input, weight, bias)
+        var i = 0
+        while i < intermediateSize and i < projected.length() {
+            out.push(projected[i])
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun geluFlat(values: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < values.length() {
+        out.push(gelu(values[i]))
+        i = i + 1
+    }
+    return out
+}
+
+fun meanGradRows(gradMean: Array<Float>, seqLen: Int, hiddenSize: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        var d = 0
+        while d < hiddenSize {
+            var value = 0.0
+            if d < gradMean.length() and seqLen > 0 {
+                value = gradMean[d] / seqLen.toFloat()
+            }
+            out.push(value)
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun layerNormRowsInputGradient(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, gradRows: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(values, row, hiddenSize)
+        let grad = rowVector(gradRows, row, hiddenSize)
+        let gradInput = layerNormInputGradient(input, normWeight, grad)
+        var d = 0
+        while d < hiddenSize {
+            if d < gradInput.length() {
+                out.push(gradInput[d])
+            } else {
+                out.push(0.0)
+            }
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun projectSequenceInputGradient(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad) r: Array<Float> {
+    let out = zerosFloat(seqLen * inputSize)
+    var row = 0
+    while row < seqLen {
+        var i = 0
+        while i < inputSize and i < weight.cols {
+            var sum = 0.0
+            var o = 0
+            while o < weight.rows {
+                sum = sum + flatAt(gradOutput, row, o, weight.rows) * embeddingAt(weight.values, o, i, weight.cols)
+                o = o + 1
+            }
+            out[row * inputSize + i] = sum
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun projectSequenceInputGradientWithDenseDelta(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad, delta: DenseDeltaAdapter) r: Array<Float> {
+    let out = zerosFloat(seqLen * inputSize)
+    var row = 0
+    while row < seqLen {
+        var i = 0
+        while i < inputSize and i < weight.cols {
+            var sum = 0.0
+            var o = 0
+            while o < weight.rows {
+                let deltaIdx = o * inputSize + i
+                var effective = embeddingAt(weight.values, o, i, weight.cols)
+                if deltaIdx >= 0 and deltaIdx < delta.weightDelta.length() {
+                    effective = effective + delta.weightDelta[deltaIdx]
+                }
+                sum = sum + flatAt(gradOutput, row, o, weight.rows) * effective
+                o = o + 1
+            }
+            out[row * inputSize + i] = sum
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun applyGeluGradient(preActivation: Array<Float>, gradOutput: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < preActivation.length() {
+        var grad = 0.0
+        if i < gradOutput.length() {
+            grad = gradOutput[i]
+        }
+        out.push(grad * geluDerivativeApprox(preActivation[i]))
+        i = i + 1
+    }
+    return out
+}
+
+fun geluDerivativeApprox(x: Float) r: Float {
+    let c = 0.7978845608
+    let cubic = x * x * x
+    let inner = c * (x + 0.044715 * cubic)
+    let t = meTanhApprox(inner)
+    let sechSq = 1.0 - t * t
+    let innerGrad = c * (1.0 + 0.134145 * x * x)
+    return 0.5 * (1.0 + t) + 0.5 * x * sechSq * innerGrad
+}
+
+fun attentionSequenceInputGradient(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, seqLen: Int, hiddenSize: Int, attentionHeads: Int) r: Array<Float> {
+    if attentionHeads <= 0 or hiddenSize % attentionHeads != 0 {
+        return Array<Float>()
+    }
+    let headDim = hiddenSize / attentionHeads
+    let scale = sqrt(headDim.toFloat())
+    let gradQ = zerosFloat(seqLen * hiddenSize)
+    let gradK = zerosFloat(seqLen * hiddenSize)
+    let gradV = zerosFloat(seqLen * hiddenSize)
+    var token = 0
+    while token < seqLen {
+        var head = 0
+        while head < attentionHeads {
+            let weights = Array<Float>()
+            var maxScore = -99999999.0
+            var other = 0
+            while other < seqLen {
+                let score = attentionScore(q, k, token, other, head, headDim, hiddenSize) / scale
+                if score > maxScore {
+                    maxScore = score
+                }
+                weights.push(score)
+                other = other + 1
+            }
+            var denom = 0.0
+            other = 0
+            while other < weights.length() {
+                let value = exp(weights[other] - maxScore)
+                weights[other] = value
+                denom = denom + value
+                other = other + 1
+            }
+            if denom > 0.000000001 {
+                other = 0
+                while other < weights.length() {
+                    weights[other] = weights[other] / denom
+                    other = other + 1
+                }
+            }
+
+            let gradWeights = Array<Float>()
+            var weightedGrad = 0.0
+            other = 0
+            while other < seqLen {
+                var gw = 0.0
+                var d = 0
+                while d < headDim {
+                    let col = head * headDim + d
+                    gw = gw + flatAt(gradContext, token, col, hiddenSize) * flatAt(v, other, col, hiddenSize)
+                    gradV[other * hiddenSize + col] = gradV[other * hiddenSize + col] + weights[other] * flatAt(gradContext, token, col, hiddenSize)
+                    d = d + 1
+                }
+                gradWeights.push(gw)
+                weightedGrad = weightedGrad + gw * weights[other]
+                other = other + 1
+            }
+
+            other = 0
+            while other < seqLen {
+                let gradScore = weights[other] * (gradWeights[other] - weightedGrad)
+                var d = 0
+                while d < headDim {
+                    let col = head * headDim + d
+                    gradQ[token * hiddenSize + col] = gradQ[token * hiddenSize + col] + gradScore * flatAt(k, other, col, hiddenSize) / scale
+                    gradK[other * hiddenSize + col] = gradK[other * hiddenSize + col] + gradScore * flatAt(q, token, col, hiddenSize) / scale
+                    d = d + 1
+                }
+                other = other + 1
+            }
+            head = head + 1
+        }
+        token = token + 1
+    }
+
+    let gradSequence = projectSequenceInputGradient(gradQ, seqLen, hiddenSize, qWeight)
+    let gradFromK = projectSequenceInputGradient(gradK, seqLen, hiddenSize, kWeight)
+    let gradFromV = projectSequenceInputGradient(gradV, seqLen, hiddenSize, vWeight)
+    addFlatInPlace(gradSequence, gradFromK)
+    addFlatInPlace(gradSequence, gradFromV)
+    return gradSequence
+}
+
+fun attentionSequenceInputGradientWithDeltas(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, qDelta: DenseDeltaAdapter, kDelta: DenseDeltaAdapter, vDelta: DenseDeltaAdapter, seqLen: Int, hiddenSize: Int, attentionHeads: Int) r: Array<Float> {
+    if attentionHeads <= 0 or hiddenSize % attentionHeads != 0 {
+        return Array<Float>()
+    }
+    let headDim = hiddenSize / attentionHeads
+    let scale = sqrt(headDim.toFloat())
+    let gradQ = zerosFloat(seqLen * hiddenSize)
+    let gradK = zerosFloat(seqLen * hiddenSize)
+    let gradV = zerosFloat(seqLen * hiddenSize)
+    var token = 0
+    while token < seqLen {
+        var head = 0
+        while head < attentionHeads {
+            let weights = Array<Float>()
+            var maxScore = -99999999.0
+            var other = 0
+            while other < seqLen {
+                let score = attentionScore(q, k, token, other, head, headDim, hiddenSize) / scale
+                if score > maxScore {
+                    maxScore = score
+                }
+                weights.push(score)
+                other = other + 1
+            }
+            var denom = 0.0
+            other = 0
+            while other < weights.length() {
+                let value = exp(weights[other] - maxScore)
+                weights[other] = value
+                denom = denom + value
+                other = other + 1
+            }
+            if denom > 0.000000001 {
+                other = 0
+                while other < weights.length() {
+                    weights[other] = weights[other] / denom
+                    other = other + 1
+                }
+            }
+
+            let gradWeights = Array<Float>()
+            var weightedGrad = 0.0
+            other = 0
+            while other < seqLen {
+                var gw = 0.0
+                var d = 0
+                while d < headDim {
+                    let col = head * headDim + d
+                    gw = gw + flatAt(gradContext, token, col, hiddenSize) * flatAt(v, other, col, hiddenSize)
+                    gradV[other * hiddenSize + col] = gradV[other * hiddenSize + col] + weights[other] * flatAt(gradContext, token, col, hiddenSize)
+                    d = d + 1
+                }
+                gradWeights.push(gw)
+                weightedGrad = weightedGrad + gw * weights[other]
+                other = other + 1
+            }
+
+            other = 0
+            while other < seqLen {
+                let gradScore = weights[other] * (gradWeights[other] - weightedGrad)
+                var d = 0
+                while d < headDim {
+                    let col = head * headDim + d
+                    gradQ[token * hiddenSize + col] = gradQ[token * hiddenSize + col] + gradScore * flatAt(k, other, col, hiddenSize) / scale
+                    gradK[other * hiddenSize + col] = gradK[other * hiddenSize + col] + gradScore * flatAt(q, token, col, hiddenSize) / scale
+                    d = d + 1
+                }
+                other = other + 1
+            }
+            head = head + 1
+        }
+        token = token + 1
+    }
+
+    let gradSequence = projectSequenceInputGradientWithDenseDelta(gradQ, seqLen, hiddenSize, qWeight, qDelta)
+    let gradFromK = projectSequenceInputGradientWithDenseDelta(gradK, seqLen, hiddenSize, kWeight, kDelta)
+    let gradFromV = projectSequenceInputGradientWithDenseDelta(gradV, seqLen, hiddenSize, vWeight, vDelta)
+    addFlatInPlace(gradSequence, gradFromK)
+    addFlatInPlace(gradSequence, gradFromV)
+    return gradSequence
+}
+
+fun copyFlat(values: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < values.length() {
+        out.push(values[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun addFlatInPlace(target: Array<Float>, source: Array<Float>) r: Void {
+    var i = 0
+    while i < target.length() and i < source.length() {
+        target[i] = target[i] + source[i]
+        i = i + 1
+    }
+}
+
+fun applyMiniLMLayerDeltaGradients(layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, readyLayers: Int, lr: Float, weightDecay: Float, gradClip: Float) r: Void {
+    var scale = 1.0
+    if gradClip > 0.0 {
+        let norm = miniLMLayerDeltaGradNorm(gradDeltas, readyLayers)
+        if norm > gradClip {
+            scale = gradClip / norm
+        }
+    }
+    if scale != 1.0 {
+        scaleMiniLMLayerDeltaGradients(gradDeltas, readyLayers, scale)
+    }
+    var layer = 0
+    while layer < readyLayers and layer < layerDeltas.layers and layer < gradDeltas.layers {
+        if layerDeltas.hasLayer(layer) and gradDeltas.hasLayer(layer) {
+            layerDeltas.queryDeltas[layer].applyGradients(gradDeltas.queryDeltas[layer].weightDelta, gradDeltas.queryDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.keyDeltas[layer].applyGradients(gradDeltas.keyDeltas[layer].weightDelta, gradDeltas.keyDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.valueDeltas[layer].applyGradients(gradDeltas.valueDeltas[layer].weightDelta, gradDeltas.valueDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.attentionDenseDeltas[layer].applyGradients(gradDeltas.attentionDenseDeltas[layer].weightDelta, gradDeltas.attentionDenseDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.attentionLayerNormDeltas[layer].applyGradients(gradDeltas.attentionLayerNormDeltas[layer].weightDelta, gradDeltas.attentionLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.intermediateDeltas[layer].applyGradients(gradDeltas.intermediateDeltas[layer].weightDelta, gradDeltas.intermediateDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.outputDeltas[layer].applyGradients(gradDeltas.outputDeltas[layer].weightDelta, gradDeltas.outputDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+            layerDeltas.outputLayerNormDeltas[layer].applyGradients(gradDeltas.outputLayerNormDeltas[layer].weightDelta, gradDeltas.outputLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        }
+        layer = layer + 1
+    }
+}
+
+fun miniLMLayerDeltaGradNorm(gradDeltas: MiniLMLayerDeltas, readyLayers: Int) r: Float {
+    var sum = 0.0
+    var layer = 0
+    while layer < readyLayers and layer < gradDeltas.layers {
+        if gradDeltas.hasLayer(layer) {
+            sum = sum + floatArraySquareSum(gradDeltas.queryDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.queryDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.keyDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.keyDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.valueDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.valueDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.attentionDenseDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.attentionDenseDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.attentionLayerNormDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.attentionLayerNormDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.intermediateDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.intermediateDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.outputDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.outputDeltas[layer].biasDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.outputLayerNormDeltas[layer].weightDelta)
+            sum = sum + floatArraySquareSum(gradDeltas.outputLayerNormDeltas[layer].biasDelta)
+        }
+        layer = layer + 1
+    }
+    return sqrt(sum)
+}
+
+fun scaleMiniLMLayerDeltaGradients(gradDeltas: MiniLMLayerDeltas, readyLayers: Int, scale: Float) r: Void {
+    var layer = 0
+    while layer < readyLayers and layer < gradDeltas.layers {
+        if gradDeltas.hasLayer(layer) {
+            scaleFloatArrayInPlace(gradDeltas.queryDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.queryDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.keyDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.keyDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.valueDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.valueDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.attentionDenseDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.attentionDenseDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.attentionLayerNormDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.attentionLayerNormDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.intermediateDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.intermediateDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.outputDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.outputDeltas[layer].biasDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.outputLayerNormDeltas[layer].weightDelta, scale)
+            scaleFloatArrayInPlace(gradDeltas.outputLayerNormDeltas[layer].biasDelta, scale)
+        }
+        layer = layer + 1
+    }
+}
+
+fun floatArraySquareSum(values: Array<Float>) r: Float {
+    var sum = 0.0
+    var i = 0
+    while i < values.length() {
+        sum = sum + values[i] * values[i]
+        i = i + 1
+    }
+    return sum
+}
+
+fun scaleFloatArrayInPlace(values: Array<Float>, scale: Float) r: Void {
+    var i = 0
+    while i < values.length() {
+        values[i] = values[i] * scale
+        i = i + 1
+    }
+}
+
+fun meTanhApprox(x: Float) r: Float {
+    let two = 2.0 * x
+    let e = exp(two)
+    return (e - 1.0) / (e + 1.0)
+}
+
+fun accumulateIntermediateDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, gradIW: Array<Float>, gradIB: Array<Float>) r: Void {
+    if not trace.ok {
+        return
+    }
+    let gradFf = outputDenseInputGradientWithAdapters(gradOutputDense, trace.outputDenseWeight, trace.inputDim, trace.hiddenSize, denseAdapter, denseDelta)
+    let interPre = rowVector(trace.intermediatePreActivation, row, trace.inputDim)
+    let gradInterPre = Array<Float>()
+    var i = 0
+    while i < trace.inputDim {
+        var grad = 0.0
+        if i < gradFf.length() and i < interPre.length() {
+            grad = gradFf[i] * geluDerivativeApprox(interPre[i])
+        }
+        gradInterPre.push(grad)
+        i = i + 1
+    }
+    let interInput = rowVector(trace.intermediateInput, row, trace.hiddenSize)
+    accumulateDenseDeltaGrad(interInput, gradInterPre, intermediateDelta, gradIW, gradIB)
+}
+
+fun accumulateAttentionDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, attentionHeads: Int) r: Void {
+    if not trace.ok {
+        return
+    }
+    let gradAttnNorm = attentionNormGradientFromOutput(trace, row, gradOutputDense, denseAdapter, denseDelta, intermediateDelta)
+    let attnLnInput = rowVector(trace.attentionLayerNormInput, row, trace.hiddenSize)
+    accumulateLayerNormDeltaGrad(attnLnInput, gradAttnNorm, attentionLayerNormDelta, gradALNW, gradALNB)
+    let gradAttnLnInput = layerNormInputGradient(attnLnInput, trace.attentionNormWeight, gradAttnNorm)
+    let contextInput = rowVector(trace.attentionContext, row, trace.hiddenSize)
+    accumulateDenseDeltaGrad(contextInput, gradAttnLnInput, attentionDenseDelta, gradADW, gradADB)
+    let gradContext = denseInputGradientWithDelta(gradAttnLnInput, trace.attentionOutputDenseWeight, trace.hiddenSize, trace.hiddenSize, attentionDenseDelta)
+    accumulateSelfAttentionDeltaGradForRow(trace, row, gradContext, queryDelta, keyDelta, valueDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, attentionHeads)
+}
+
+fun attentionNormGradientFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter) r: Array<Float> {
+    let gradAttnNorm = copyFlat(gradOutputDense)
+    let gradFf = outputDenseInputGradientWithAdapters(gradOutputDense, trace.outputDenseWeight, trace.inputDim, trace.hiddenSize, denseAdapter, denseDelta)
+    let interPre = rowVector(trace.intermediatePreActivation, row, trace.inputDim)
+    let gradInterPre = Array<Float>()
+    var i = 0
+    while i < trace.inputDim {
+        var grad = 0.0
+        if i < gradFf.length() and i < interPre.length() {
+            grad = gradFf[i] * geluDerivativeApprox(interPre[i])
+        }
+        gradInterPre.push(grad)
+        i = i + 1
+    }
+    let gradFromIntermediate = denseInputGradientWithDelta(gradInterPre, trace.intermediateDenseWeight, trace.hiddenSize, trace.inputDim, intermediateDelta)
+    addFlatInPlace(gradAttnNorm, gradFromIntermediate)
+    return gradAttnNorm
+}
+
+fun denseInputGradientWithDelta(gradOut: Array<Float>, baseWeight: Array<Float>, inputDim: Int, outputDim: Int, denseDelta: DenseDeltaAdapter) r: Array<Float> {
+    let out = denseZeros(inputDim)
+    var i = 0
+    while i < inputDim {
+        var value = 0.0
+        var o = 0
+        while o < outputDim and o < gradOut.length() {
+            let idx = o * inputDim + i
+            if idx < baseWeight.length() {
+                value = value + gradOut[o] * baseWeight[idx]
+            }
+            if idx < denseDelta.weightDelta.length() {
+                value = value + gradOut[o] * denseDelta.weightDelta[idx]
+            }
+            o = o + 1
+        }
+        out[i] = value
+        i = i + 1
+    }
+    return out
+}
+
+fun accumulateSelfAttentionDeltaGradForRow(trace: MiniLMDenseTrace, token: Int, gradContextRow: Array<Float>, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, attentionHeads: Int) r: Void {
+    if attentionHeads <= 0 or trace.hiddenSize % attentionHeads != 0 {
+        return
+    }
+    let headDim = trace.hiddenSize / attentionHeads
+    let scale = sqrt(headDim.toFloat())
+    let gradQRow = denseZeros(trace.hiddenSize)
+    let gradKRows = denseZeros(trace.seqLen * trace.hiddenSize)
+    let gradVRows = denseZeros(trace.seqLen * trace.hiddenSize)
+    var head = 0
+    while head < attentionHeads {
+        let weights = Array<Float>()
+        var maxScore = -99999999.0
+        var other = 0
+        while other < trace.seqLen {
+            let score = attentionScore(trace.attentionQ, trace.attentionK, token, other, head, headDim, trace.hiddenSize) / scale
+            if score > maxScore {
+                maxScore = score
+            }
+            weights.push(score)
+            other = other + 1
+        }
+        var denom = 0.0
+        other = 0
+        while other < weights.length() {
+            let value = exp(weights[other] - maxScore)
+            weights[other] = value
+            denom = denom + value
+            other = other + 1
+        }
+        if denom > 0.000000001 {
+            other = 0
+            while other < weights.length() {
+                weights[other] = weights[other] / denom
+                other = other + 1
+            }
+        }
+
+        let gradWeights = Array<Float>()
+        var weightedGrad = 0.0
+        other = 0
+        while other < trace.seqLen {
+            var gw = 0.0
+            var d = 0
+            while d < headDim {
+                let col = head * headDim + d
+                gw = gw + gradContextRow[col] * flatAt(trace.attentionV, other, col, trace.hiddenSize)
+                gradVRows[other * trace.hiddenSize + col] = gradVRows[other * trace.hiddenSize + col] + weights[other] * gradContextRow[col]
+                d = d + 1
+            }
+            gradWeights.push(gw)
+            weightedGrad = weightedGrad + gw * weights[other]
+            other = other + 1
+        }
+
+        other = 0
+        while other < trace.seqLen {
+            let gradScore = weights[other] * (gradWeights[other] - weightedGrad)
+            var d = 0
+            while d < headDim {
+                let col = head * headDim + d
+                gradQRow[col] = gradQRow[col] + gradScore * flatAt(trace.attentionK, other, col, trace.hiddenSize) / scale
+                gradKRows[other * trace.hiddenSize + col] = gradKRows[other * trace.hiddenSize + col] + gradScore * flatAt(trace.attentionQ, token, col, trace.hiddenSize) / scale
+                d = d + 1
+            }
+            other = other + 1
+        }
+        head = head + 1
+    }
+
+    let tokenInput = rowVector(trace.attentionSequenceInput, token, trace.hiddenSize)
+    accumulateDenseDeltaGrad(tokenInput, gradQRow, queryDelta, gradQW, gradQB)
+    var row = 0
+    while row < trace.seqLen {
+        let sourceInput = rowVector(trace.attentionSequenceInput, row, trace.hiddenSize)
+        let gradK = rowVector(gradKRows, row, trace.hiddenSize)
+        let gradV = rowVector(gradVRows, row, trace.hiddenSize)
+        accumulateDenseDeltaGrad(sourceInput, gradK, keyDelta, gradKW, gradKB)
+        accumulateDenseDeltaGrad(sourceInput, gradV, valueDelta, gradVW, gradVB)
+        row = row + 1
+    }
+}
+
+fun outputDenseInputGradientWithAdapters(gradOut: Array<Float>, outputWeight: Array<Float>, inputDim: Int, outputDim: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter) r: Array<Float> {
+    let out = denseZeros(inputDim)
+    var i = 0
+    while i < inputDim {
+        var value = 0.0
+        var o = 0
+        while o < outputDim and o < gradOut.length() {
+            let idx = o * inputDim + i
+            if idx < outputWeight.length() {
+                value = value + gradOut[o] * outputWeight[idx]
+            }
+            if idx < denseDelta.weightDelta.length() {
+                value = value + gradOut[o] * denseDelta.weightDelta[idx]
+            }
+            var rankIndex = 0
+            while rankIndex < denseAdapter.rank {
+                let aIndex = rankIndex * denseAdapter.inputDim + i
+                if aIndex < denseAdapter.rankA.length() {
+                    value = value + gradOut[o] * denseRankBAt(denseAdapter.rankB, o, rankIndex, denseAdapter.rank) * denseAdapter.rankA[aIndex]
+                }
+                rankIndex = rankIndex + 1
+            }
+            o = o + 1
+        }
+        out[i] = value
+        i = i + 1
+    }
+    return out
+}
+
+fun accumulateLayerNormDeltaGrad(values: Array<Float>, gradOut: Array<Float>, layerNormDelta: LayerNormDeltaAdapter, gradWeight: Array<Float>, gradBias: Array<Float>) r: Void {
+    let n = values.length()
+    if n <= 0 or layerNormDelta.dim <= 0 {
+        return
+    }
+    var mean = 0.0
+    var i = 0
+    while i < n {
+        mean = mean + values[i]
+        i = i + 1
+    }
+    mean = mean / n.toFloat()
+    var variance = 0.0
+    i = 0
+    while i < n {
+        let centered = values[i] - mean
+        variance = variance + centered * centered
+        i = i + 1
+    }
+    variance = variance / n.toFloat()
+    let invStd = 1.0 / sqrt(variance + 0.000000000001)
+    i = 0
+    while i < n and i < layerNormDelta.dim {
+        var grad = 0.0
+        if i < gradOut.length() {
+            grad = gradOut[i]
+        }
+        let xhat = (values[i] - mean) * invStd
+        if i < gradWeight.length() {
+            gradWeight[i] = gradWeight[i] + grad * xhat
+        }
+        if i < gradBias.length() {
+            gradBias[i] = gradBias[i] + grad
+        }
+        i = i + 1
+    }
+}
+
+fun accumulateDenseDeltaGrad(input: Array<Float>, gradOut: Array<Float>, denseDelta: DenseDeltaAdapter, gradDW: Array<Float>, gradDB: Array<Float>) r: Void {
+    var o = 0
+    while o < denseDelta.outputDim and o < gradOut.length() {
+        if o < gradDB.length() {
+            gradDB[o] = gradDB[o] + gradOut[o]
+        }
+        var i = 0
+        while i < denseDelta.inputDim and i < input.length() {
+            let idx = o * denseDelta.inputDim + i
+            if idx < gradDW.length() {
+                gradDW[idx] = gradDW[idx] + gradOut[o] * input[i]
+            }
+            i = i + 1
+        }
+        o = o + 1
+    }
+}
+
+fun accumulateDenseLoRAGrad(input: Array<Float>, gradOut: Array<Float>, denseAdapter: DenseLoRAAdapter, gradA: Array<Float>, gradB: Array<Float>) r: Void {
+    var o = 0
+    while o < denseAdapter.outputDim and o < gradOut.length() {
+        var rankIndex = 0
+        while rankIndex < denseAdapter.rank {
+            let bIndex = o * denseAdapter.rank + rankIndex
+            if bIndex < gradB.length() {
+                let bottle = denseRankBottleneckAt(input, denseAdapter.rankA, denseAdapter.rank, denseAdapter.inputDim, rankIndex)
+                gradB[bIndex] = gradB[bIndex] + gradOut[o] * bottle
+            }
+            rankIndex = rankIndex + 1
+        }
+        o = o + 1
+    }
+
+    var rankAIndex = 0
+    while rankAIndex < denseAdapter.rank {
+        var scale = 0.0
+        o = 0
+        while o < denseAdapter.outputDim and o < gradOut.length() {
+            scale = scale + gradOut[o] * denseRankBAt(denseAdapter.rankB, o, rankAIndex, denseAdapter.rank)
+            o = o + 1
+        }
+        var i = 0
+        while i < denseAdapter.inputDim and i < input.length() {
+            let aIndex = rankAIndex * denseAdapter.inputDim + i
+            if aIndex < gradA.length() {
+                gradA[aIndex] = gradA[aIndex] + scale * input[i]
+            }
+            i = i + 1
+        }
+        rankAIndex = rankAIndex + 1
+    }
+}
+
+fun layerNormInputGradient(values: Array<Float>, normWeight: Array<Float>, gradOut: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    let n = values.length()
+    if n <= 0 {
+        return out
+    }
+    var mean = 0.0
+    var i = 0
+    while i < n {
+        mean = mean + values[i]
+        i = i + 1
+    }
+    mean = mean / n.toFloat()
+    var variance = 0.0
+    i = 0
+    while i < n {
+        let centered = values[i] - mean
+        variance = variance + centered * centered
+        i = i + 1
+    }
+    variance = variance / n.toFloat()
+    let invStd = 1.0 / sqrt(variance + 0.000000000001)
+    let xhat = Array<Float>()
+    var meanDy = 0.0
+    var meanDyX = 0.0
+    i = 0
+    while i < n {
+        let x = (values[i] - mean) * invStd
+        xhat.push(x)
+        var dy = 0.0
+        if i < gradOut.length() and i < normWeight.length() {
+            dy = gradOut[i] * normWeight[i]
+        }
+        meanDy = meanDy + dy
+        meanDyX = meanDyX + dy * x
+        i = i + 1
+    }
+    meanDy = meanDy / n.toFloat()
+    meanDyX = meanDyX / n.toFloat()
+    i = 0
+    while i < n {
+        var dy = 0.0
+        if i < gradOut.length() and i < normWeight.length() {
+            dy = gradOut[i] * normWeight[i]
+        }
+        out.push((dy - meanDy - xhat[i] * meanDyX) * invStd)
+        i = i + 1
+    }
+    return out
+}
+
+fun denseMeanTripletGradQ(q: Array<Float>, p: Array<Float>, n: Array<Float>, posStats: MiniLMPairStats, negStats: MiniLMPairStats) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < q.length() {
+        out.push(mePairGradAAt(q, n, negStats, i) - mePairGradAAt(q, p, posStats, i))
+        i = i + 1
+    }
+    return out
+}
+
+fun denseMeanTripletGradP(q: Array<Float>, p: Array<Float>, posStats: MiniLMPairStats) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < p.length() {
+        out.push(0.0 - mePairGradBAt(q, p, posStats, i))
+        i = i + 1
+    }
+    return out
+}
+
+fun denseMeanTripletGradN(q: Array<Float>, n: Array<Float>, negStats: MiniLMPairStats) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < n.length() {
+        out.push(mePairGradBAt(q, n, negStats, i))
+        i = i + 1
+    }
+    return out
+}
+
+fun mePairStats(a: Array<Float>, b: Array<Float>) r: MiniLMPairStats {
+    var dot = 0.0
+    var normASq = 0.0
+    var normBSq = 0.0
+    var i = 0
+    while i < a.length() and i < b.length() {
+        dot = dot + a[i] * b[i]
+        normASq = normASq + a[i] * a[i]
+        normBSq = normBSq + b[i] * b[i]
+        i = i + 1
+    }
+    if normASq <= 0.000000000001 or normBSq <= 0.000000000001 {
+        return MiniLMPairStats.invalid()
+    }
+    let normA = sqrt(normASq)
+    let normB = sqrt(normBSq)
+    if normA <= 0.000000001 or normB <= 0.000000001 {
+        return MiniLMPairStats.invalid()
+    }
+    return MiniLMPairStats.new(dot / (normA * normB), normA, normB)
+}
+
+fun mePairGradAAt(a: Array<Float>, b: Array<Float>, stats: MiniLMPairStats, index: Int) r: Float {
+    if not stats.valid or index < 0 or index >= a.length() or index >= b.length() {
+        return 0.0
+    }
+    let ab = stats.normA * stats.normB
+    let aa = stats.normA * stats.normA
+    if ab <= 0.000000001 or aa <= 0.000000001 {
+        return 0.0
+    }
+    return b[index] / ab - stats.cosine * a[index] / aa
+}
+
+fun mePairGradBAt(a: Array<Float>, b: Array<Float>, stats: MiniLMPairStats, index: Int) r: Float {
+    if not stats.valid or index < 0 or index >= a.length() or index >= b.length() {
+        return 0.0
+    }
+    let ab = stats.normA * stats.normB
+    let bb = stats.normB * stats.normB
+    if ab <= 0.000000001 or bb <= 0.000000001 {
+        return 0.0
+    }
+    return a[index] / ab - stats.cosine * b[index] / bb
+}
+
+fun meRelu(value: Float) r: Float {
+    if value > 0.0 {
+        return value
+    }
+    return 0.0
+}
+
+fun rowVector(sequence: Array<Float>, row: Int, width: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var d = 0
+    while d < width {
+        out.push(flatAt(sequence, row, d, width))
+        d = d + 1
+    }
+    return out
+}
+
+fun flatAt(values: Array<Float>, row: Int, col: Int, cols: Int) r: Float {
+    let index = row * cols + col
+    if index < 0 or index >= values.length() {
+        return 0.0
+    }
+    return values[index]
+}
+
+fun zerosFloat(count: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < count {
+        out.push(0.0)
+        i = i + 1
+    }
+    return out
+}
+
+fun encodeTokenWithTables(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, normWeight: EmbeddingTensorLoad, normBias: EmbeddingTensorLoad) r: Array<Float> {
+    let raw = Array<Float>()
+    let wordRow = positiveMod(tokenId, word.rows)
+    let posRow = positiveMod(positionIndex, position.rows)
+    let typeRow = 0
+    var d = 0
+    while d < hiddenSize {
+        raw.push(embeddingAt(word.values, wordRow, d, word.cols)
+            + embeddingAt(position.values, posRow, d, position.cols)
+            + embeddingAt(tokenType.values, typeRow, d, tokenType.cols))
+        d = d + 1
+    }
+    return embeddingLayerNorm(raw, normWeight.values, normBias.values)
+}
+
+fun encodeTokenWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, normWeight: EmbeddingTensorLoad, normBias: EmbeddingTensorLoad, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {
+    let raw = encodeTokenRawWithEmbeddingDeltas(tokenId, positionIndex, hiddenSize, word, position, tokenType, embeddingDeltas)
+    return embeddingLayerNormWithEmbeddingDeltas(raw, normWeight.values, normBias.values, embeddingDeltas)
+}
+
+fun encodeTokenRawWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {
+    let raw = Array<Float>()
+    let wordRow = positiveMod(tokenId, word.rows)
+    let posRow = positiveMod(positionIndex, position.rows)
+    let typeRow = 0
+    var d = 0
+    while d < hiddenSize {
+        raw.push(embeddingAt(word.values, wordRow, d, word.cols)
+            + embeddingDeltas.wordDeltaAt(wordRow, d)
+            + embeddingAt(position.values, posRow, d, position.cols)
+            + embeddingDeltas.positionDeltaAt(posRow, d)
+            + embeddingAt(tokenType.values, typeRow, d, tokenType.cols)
+            + embeddingDeltas.tokenTypeDeltaAt(typeRow, d))
+        d = d + 1
+    }
+    return raw
+}
+
+fun embeddingLayerNormWithEmbeddingDeltas(values: Array<Float>, normWeight: Array<Float>, normBias: Array<Float>, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {
+    let effectiveWeight = embeddingDeltas.effectiveLayerNormWeight(normWeight)
+    let effectiveBias = embeddingDeltas.effectiveLayerNormBias(normBias)
+    return embeddingLayerNorm(values, effectiveWeight, effectiveBias)
+}
+
+fun embeddingLayerNorm(values: Array<Float>, normWeight: Array<Float>, normBias: Array<Float>) r: Array<Float> {
+    var mean = 0.0
+    var i = 0
+    while i < values.length() {
+        mean = mean + values[i]
+        i = i + 1
+    }
+    if values.length() > 0 {
+        mean = mean / values.length().toFloat()
+    }
+
+    var variance = 0.0
+    i = 0
+    while i < values.length() {
+        let centered = values[i] - mean
+        variance = variance + centered * centered
+        i = i + 1
+    }
+    if values.length() > 0 {
+        variance = variance / values.length().toFloat()
+    }
+    let denom = sqrt(variance + 0.000000000001)
+    let out = Array<Float>()
+    i = 0
+    while i < values.length() {
+        let normed = (values[i] - mean) / denom
+        out.push(normed * normWeight[i] + normBias[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun embeddingAt(values: Array<Float>, row: Int, col: Int, cols: Int) r: Float {
+    let index = row * cols + col
+    if index < 0 or index >= values.length() {
+        return 0.0
+    }
+    return values[index]
+}
+
+fun positiveMod(value: Int, modulus: Int) r: Int {
+    if modulus <= 0 {
+        return 0
+    }
+    var out = value % modulus
+    if out < 0 {
+        out = out + modulus
+    }
+    return out
+}
+
+fun meReadF32Le(bytes: Array<Int>, offset: Int) r: Float {
+    if offset + 3 >= bytes.length() {
+        return 0.0
+    }
+    var bits = bytes[offset]
+        + bytes[offset + 1] * 256
+        + bytes[offset + 2] * 65536
+        + bytes[offset + 3] * 16777216
+    var sign = 1.0
+    if bits >= 2147483648 {
+        sign = -1.0
+        bits = bits - 2147483648
+    }
+    let exponent = bits / 8388608
+    let mantissa = bits % 8388608
+    if exponent == 0 {
+        if mantissa == 0 {
+            return sign * 0.0
+        }
+        return sign * (mantissa.toFloat() / 8388608.0) * mePow2(-126)
+    }
+    if exponent == 255 {
+        if mantissa == 0 {
+            return sign * mePow2(127)
+        }
+        return 0.0
+    }
+    return sign * (1.0 + mantissa.toFloat() / 8388608.0) * mePow2(exponent - 127)
+}
+
+fun mePow2(exponent: Int) r: Float {
+    var value = 1.0
+    if exponent >= 0 {
+        var i = 0
+        while i < exponent {
+            value = value * 2.0
+            i = i + 1
+        }
+        return value
+    }
+    var j = 0
+    while j < 0 - exponent {
+        value = value / 2.0
+        j = j + 1
+    }
+    return value
+}

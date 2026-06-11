@@ -1,0 +1,61 @@
+import calibration.{calibrateThresholds}
+import config.{TrainerConfig}
+import eval.{EvalResult, evalWithCalibration}
+import gpu_backend.{GpuBackend, backendRequiresGpu}
+import miner.{MineResult, mineHardNegatives}
+import model.{ModelBundle}
+import package.{PackageResult, writeModelPackage}
+import training.{TrainResult, trainEncoder}
+
+class Pipeline {
+    var cfg: TrainerConfig
+    var bundle: ModelBundle
+
+    static fun new(cfg: TrainerConfig) r: Pipeline {
+        let bundle = ModelBundle.load(cfg)
+        return Pipeline{ cfg: cfg, bundle: bundle }
+    }
+
+    fun prepareBackend() r: Bool {
+        let required = backendRequiresGpu(this.cfg)
+        let backend = GpuBackend.new(required)
+        let ok = backend.initialize()
+        backend.shutdown()
+        return ok
+    }
+
+    fun mine() r: MineResult {
+        return mineHardNegatives(this.cfg, this.bundle.encoder)
+    }
+
+    fun train() r: TrainResult {
+        return trainEncoder(this.cfg, this.bundle.encoder)
+    }
+
+    fun calibrate() r: Int {
+        let thresholds = calibrateThresholds(this.cfg, this.bundle.encoder)
+        return thresholds.length()
+    }
+
+    fun eval() r: EvalResult {
+        return evalWithCalibration(this.cfg, this.bundle.encoder)
+    }
+
+    fun packageModel() r: PackageResult {
+        return writeModelPackage(this.cfg)
+    }
+
+    fun runAll() r: Int {
+        let mined = this.mine()
+        println("trainer: mined " + mined.count.toString() + " triplets -> " + mined.outputPath)
+        let trained = this.train()
+        println("trainer: trained " + trained.examples.toString() + " examples; final loss " + trained.finalLoss.toString())
+        let thresholds = this.calibrate()
+        println("trainer: calibrated " + thresholds.toString() + " domains")
+        let result = this.eval()
+        println("trainer: eval answer rate " + result.answerRate.toString())
+        let pkg = this.packageModel()
+        println("trainer: package wrote " + pkg.filesWritten.toString() + " files -> " + pkg.outputDir)
+        return 0
+    }
+}

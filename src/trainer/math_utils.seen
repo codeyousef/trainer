@@ -1,0 +1,135 @@
+import math.math.{sqrt, exp, max, min, floor}
+
+fun clampFloat(value: Float, lo: Float, hi: Float) r: Float {
+    if value < lo {
+        return lo
+    }
+    if value > hi {
+        return hi
+    }
+    return value
+}
+
+fun dot(a: Array<Float>, b: Array<Float>) r: Float {
+    var sum = 0.0
+    var i = 0
+    let n = if a.length() < b.length() { a.length() } else { b.length() }
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    return sum
+}
+
+fun l2Norm(values: Array<Float>) r: Float {
+    let d = dot(values, values)
+    if d <= 0.0 {
+        return 0.0
+    }
+    return sqrt(d)
+}
+
+fun normalize(values: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    let n = l2Norm(values)
+    var i = 0
+    while i < values.length() {
+        if n > 0.000000001 {
+            out.push(values[i] / n)
+        } else {
+            out.push(0.0)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun cosine(a: Array<Float>, b: Array<Float>) r: Float {
+    let na = normalize(a)
+    let nb = normalize(b)
+    return dot(na, nb)
+}
+
+fun gelu(x: Float) r: Float {
+    let c = 0.7978845608
+    let inner = c * (x + 0.044715 * x * x * x)
+    return 0.5 * x * (1.0 + tanhApprox(inner))
+}
+
+fun tanhApprox(x: Float) r: Float {
+    let two = 2.0 * x
+    let e = exp(two)
+    return (e - 1.0) / (e + 1.0)
+}
+
+fun relu(x: Float) r: Float {
+    if x > 0.0 {
+        return x
+    }
+    return 0.0
+}
+
+fun percentile(values: Array<Float>, p: Float) r: Float {
+    if values.length() == 0 {
+        return 0.0
+    }
+    let sorted = copyFloats(values)
+    insertionSortFloat(sorted)
+    let maxIndex = sorted.length() - 1
+    let rankFloat = (p / 100.0) * maxIndex.toFloat()
+    var rank = floor(rankFloat).toInt()
+    if rank < 0 {
+        rank = 0
+    }
+    if rank > maxIndex {
+        rank = maxIndex
+    }
+    return sorted[rank]
+}
+
+fun copyFloats(values: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < values.length() {
+        out.push(values[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun insertionSortFloat(values: Array<Float>) r: Void {
+    var i = 1
+    while i < values.length() {
+        let key = values[i]
+        var j = i - 1
+        while j >= 0 and values[j] > key {
+            values[j + 1] = values[j]
+            j = j - 1
+        }
+        values[j + 1] = key
+        i = i + 1
+    }
+}
+
+fun deterministicShuffleIndices(count: Int, seed: Int) r: Array<Int> {
+    let idx = Array<Int>()
+    var i = 0
+    while i < count {
+        idx.push(i)
+        i = i + 1
+    }
+    var state = seed
+    i = count - 1
+    while i > 0 {
+        state = state * 1103515245 + 12345
+        var j = state % (i + 1)
+        if j < 0 {
+            j = 0 - j
+        }
+        let tmp = idx[i]
+        idx[i] = idx[j]
+        idx[j] = tmp
+        i = i - 1
+    }
+    return idx
+}

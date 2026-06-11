@@ -1,0 +1,84 @@
+fun split(text: String, delimiter: String) r: Array<String> {
+    let out = Array<String>()
+    if delimiter.length() == 0 {
+        var ci = 0
+        while ci < text.length() {
+            out.push(String.fromCharCode(text.charAt(ci)))
+            ci = ci + 1
+        }
+        return out
+    }
+    var start = 0
+    var i = 0
+    while i <= text.length() - delimiter.length() {
+        if regionMatches(text, i, delimiter) {
+            out.push(text.substring(start, i))
+            i = i + delimiter.length()
+            start = i
+        } else {
+            i = i + 1
+        }
+    }
+    out.push(text.substring(start, text.length()))
+    return out
+}
+
+fun regionMatches(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.byteAt(offset + i) != needle.byteAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun trim(text: String) r: String {
+    var start = 0
+    var end = text.length() - 1
+    while start < text.length() and isWhitespace(text.charAt(start)) {
+        start = start + 1
+    }
+    while end >= start and isWhitespace(text.charAt(end)) {
+        end = end - 1
+    }
+    if end < start {
+        return ""
+    }
+    return text.substring(start, end + 1)
+}
+
+fun splitWhitespace(text: String, dropEmpty: Bool = true) r: Array<String> {
+    let out = Array<String>()
+    var inToken = false
+    var start = 0
+    var i = 0
+    while i < text.length() {
+        if isWhitespace(text.charAt(i)) {
+            if inToken {
+                out.push(text.substring(start, i))
+                inToken = false
+            } else if not dropEmpty {
+                out.push("")
+            }
+        } else {
+            if not inToken {
+                start = i
+                inToken = true
+            }
+        }
+        i = i + 1
+    }
+    if inToken {
+        out.push(text.substring(start, text.length()))
+    }
+    return out
+}
+
+fun isWhitespace(ch: Int) r: Bool {
+    return ch == 32 or ch == 9 or ch == 10 or ch == 13
+}

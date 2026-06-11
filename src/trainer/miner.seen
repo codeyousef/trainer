@@ -1,0 +1,155 @@
+import config.{TrainerConfig}
+import encoder.{Encoder}
+import io_utils.{writeAtomicText}
+import jsonl.{PairExample, TripletExample, tripletsToJsonl}
+import math_utils.{cosine}
+import source_adapters.{readSourcePairs}
+
+class MineResult {
+    var count: Int
+    var outputPath: String
+
+    static fun new(count: Int, outputPath: String) r: MineResult {
+        return MineResult{ count: count, outputPath: outputPath }
+    }
+}
+
+fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
+    let pairs = readSourcePairs(cfg)
+    let out = Array<TripletExample>()
+    var i = 0
+    while i < pairs.length() {
+        let negIdx = findNegativeIndex(pairs, i, encoder, cfg.topK)
+        var neg = ""
+        if negIdx >= 0 {
+            neg = pairs[negIdx].positiveChunkText
+        }
+        let candidate = TripletExample.new(
+            pairs[i].queryText,
+            pairs[i].positiveChunkText,
+            neg,
+            pairs[i].domain,
+            pairs[i].source
+        )
+        if passesQualityFilter(candidate, encoder, cfg.qualityMargin) {
+            out.push(candidate)
+        }
+        i = i + 1
+    }
+    writeAtomicText(cfg.minedJsonlPath, tripletsToJsonl(out))
+    return MineResult.new(out.length(), cfg.minedJsonlPath)
+}
+
+fun findNegativeIndex(pairs: Array<PairExample>, queryIndex: Int, encoder: Encoder, topK: Int) r: Int {
+    if pairs.length() <= 1 {
+        return -1
+    }
+    let q = encoder.encode(pairs[queryIndex].queryText)
+    let candidateCount = pairs.length() - 1
+    let keep = normalizedTopK(topK, candidateCount)
+    let topIndices = initializedIntArray(keep, -1)
+    let topScores = initializedFloatArray(keep, -999999.0)
+    var fallbackAny = -1
+    var fallbackValid = -1
+    var i = 0
+    while i < pairs.length() {
+        if i != queryIndex {
+            if fallbackAny < 0 {
+                fallbackAny = i
+            }
+            let sameDomain = pairs[i].domain.length() > 0 and pairs[i].domain == pairs[queryIndex].domain
+            let sameSource = pairs[i].source.length() > 0 and pairs[i].source == pairs[queryIndex].source
+            if not sameDomain and not sameSource {
+                if fallbackValid < 0 {
+                    fallbackValid = i
+                }
+            }
+            let p = encoder.encode(pairs[i].positiveChunkText)
+            let score = cosine(q, p)
+            insertTopCandidate(topIndices, topScores, i, score)
+        }
+        i = i + 1
+    }
+
+    var rank = 0
+    while rank < topIndices.length() {
+        let idx = topIndices[rank]
+        if idx >= 0 {
+            let sameDomain = pairs[idx].domain.length() > 0 and pairs[idx].domain == pairs[queryIndex].domain
+            let sameSource = pairs[idx].source.length() > 0 and pairs[idx].source == pairs[queryIndex].source
+            if not sameDomain and not sameSource {
+                return idx
+            }
+        }
+        rank = rank + 1
+    }
+
+    if fallbackValid >= 0 {
+        return fallbackValid
+    }
+    return fallbackAny
+}
+
+fun normalizedTopK(requested: Int, candidates: Int) r: Int {
+    if candidates <= 0 {
+        return 0
+    }
+    var k = requested
+    if k <= 0 {
+        k = 1
+    }
+    if k > candidates {
+        k = candidates
+    }
+    return k
+}
+
+fun initializedIntArray(count: Int, value: Int) r: Array<Int> {
+    let out = Array<Int>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun initializedFloatArray(count: Int, value: Float) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun insertTopCandidate(indices: Array<Int>, scores: Array<Float>, idx: Int, score: Float) r: Void {
+    var pos = 0
+    while pos < scores.length() {
+        if indices[pos] < 0 or score > scores[pos] {
+            var j = scores.length() - 1
+            while j > pos {
+                scores[j] = scores[j - 1]
+                indices[j] = indices[j - 1]
+                j = j - 1
+            }
+            scores[pos] = score
+            indices[pos] = idx
+            return
+        }
+        pos = pos + 1
+    }
+}
+
+fun passesQualityFilter(item: TripletExample, encoder: Encoder, margin: Float) r: Bool {
+    if item.hardNegativeChunkText.length() == 0 {
+        return true
+    }
+    let q = encoder.encode(item.queryText)
+    let p = encoder.encode(item.positiveChunkText)
+    let n = encoder.encode(item.hardNegativeChunkText)
+    let simPos = cosine(q, p)
+    let simNeg = cosine(q, n)
+    return simPos - simNeg >= margin
+}

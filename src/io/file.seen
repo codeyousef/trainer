@@ -1,0 +1,186 @@
+extern fun __FileExists(path: String) r: Bool
+extern fun __DeleteFile(path: String) r: Bool
+extern fun __CreateDirectory(path: String) r: Bool
+extern fun __OpenFile(path: String, mode: String) r: Int
+extern fun __ReadFile(fd: Int) r: String
+extern fun __ReadFileBytes(fd: Int, size: Int) r: Array<Int>
+extern fun __WriteFile(fd: Int, content: String) r: Int
+extern fun __WriteFileBytes(fd: Int, bytes: Array<Int>) r: Int
+extern fun seen_file_seek(fd: Int, offset: Int) r: Bool
+extern fun __CloseFile(fd: Int) r: Int
+extern fun __FileSize(fd: Int) r: Int
+extern fun __FileError(fd: Int) r: String
+
+fun readText(path: String) r: String {
+    let fd = __OpenFile(path, "r")
+    if fd < 0 {
+        return ""
+    }
+    let content = __ReadFile(fd)
+    let _ = __CloseFile(fd)
+    return content
+}
+
+fun writeText(path: String, content: String) r: Bool {
+    let fd = __OpenFile(path, "w")
+    if fd < 0 {
+        return false
+    }
+    let written = __WriteFile(fd, content)
+    let _ = __CloseFile(fd)
+    return written >= 0
+}
+
+fun appendText(path: String, content: String) r: Bool {
+    let fd = __OpenFile(path, "a")
+    if fd < 0 {
+        return false
+    }
+    let written = __WriteFile(fd, content)
+    let _ = __CloseFile(fd)
+    return written >= 0
+}
+
+fun exists(path: String) r: Bool {
+    return __FileExists(path)
+}
+
+fun deleteFile(path: String) r: Bool {
+    return __DeleteFile(path)
+}
+
+fun createDirectory(path: String) r: Bool {
+    return __CreateDirectory(path)
+}
+
+fun size(path: String) r: Int {
+    let fd = __OpenFile(path, "r")
+    if fd < 0 {
+        return -1
+    }
+    let fileSize = __FileSize(fd)
+    let _ = __CloseFile(fd)
+    return fileSize
+}
+
+fun readBytes(path: String) r: Array<Int> {
+    let fd = __OpenFile(path, "rb")
+    if fd < 0 {
+        return Array<Int>()
+    }
+    let fileSize = __FileSize(fd)
+    if fileSize < 0 {
+        let _ = __CloseFile(fd)
+        return Array<Int>()
+    }
+    let bytes = __ReadFileBytes(fd, fileSize)
+    let _ = __CloseFile(fd)
+    return bytes
+}
+
+fun readBytesPrefix(path: String, maxBytes: Int) r: Array<Int> {
+    return readBytesRange(path, 0, maxBytes)
+}
+
+fun readBytesRange(path: String, offset: Int, byteCount: Int) r: Array<Int> {
+    if offset < 0 or byteCount <= 0 {
+        return Array<Int>()
+    }
+    let fd = __OpenFile(path, "rb")
+    if fd < 0 {
+        return Array<Int>()
+    }
+    if not seen_file_seek(fd, offset) {
+        let _ = __CloseFile(fd)
+        return Array<Int>()
+    }
+    let bytes = __ReadFileBytes(fd, byteCount)
+    let _ = __CloseFile(fd)
+    return bytes
+}
+
+fun writeBytes(path: String, bytes: Array<Int>) r: Bool {
+    ensureParentDirectories(path)
+    let fd = __OpenFile(path, "wb")
+    if fd < 0 {
+        return false
+    }
+    let written = __WriteFileBytes(fd, bytes)
+    let _ = __CloseFile(fd)
+    return written >= 0
+}
+
+fun writeBytesAt(path: String, offset: Int, bytes: Array<Int>) r: Bool {
+    if offset < 0 {
+        return false
+    }
+    let fd = __OpenFile(path, "r+b")
+    if fd < 0 {
+        return false
+    }
+    if not seen_file_seek(fd, offset) {
+        let _ = __CloseFile(fd)
+        return false
+    }
+    let written = __WriteFileBytes(fd, bytes)
+    let _ = __CloseFile(fd)
+    return written == bytes.length()
+}
+
+fun copyFileBytes(src: String, dst: String) r: Bool {
+    if not exists(src) {
+        return false
+    }
+    ensureParentDirectories(dst)
+    let inFd = __OpenFile(src, "rb")
+    if inFd < 0 {
+        return false
+    }
+    let outFd = __OpenFile(dst, "wb")
+    if outFd < 0 {
+        let _ = __CloseFile(inFd)
+        return false
+    }
+    let chunkSize = 65536
+    var total = 0
+    var ok = true
+    var done = false
+    while not done {
+        let chunk = __ReadFileBytes(inFd, chunkSize)
+        if chunk.length() == 0 {
+            done = true
+        } else {
+            let written = __WriteFileBytes(outFd, chunk)
+            if written != chunk.length() {
+                ok = false
+                done = true
+            } else {
+                total = total + written
+                if chunk.length() < chunkSize {
+                    done = true
+                }
+            }
+        }
+    }
+    let _ = __CloseFile(inFd)
+    let _ = __CloseFile(outFd)
+    let expected = size(src)
+    if expected >= 0 and total != expected {
+        return false
+    }
+    return ok
+}
+
+fun ensureParentDirectories(path: String) r: Bool {
+    var i = 0
+    while i < path.length() {
+        if path.substring(i, i + 1) == "/" {
+            let parent = path.substring(0, i)
+            if parent.length() > 0 {
+                createDirectory(parent)
+            }
+        }
+        i = i + 1
+    }
+    return true
+}

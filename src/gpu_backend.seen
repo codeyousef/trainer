@@ -1,0 +1,63 @@
+import graphics.gpu.{gpuInit, gpuShutdown, gpuIsAvailable, gpuDeviceType}
+import config.{TrainerConfig}
+
+class GpuBackend {
+    var initialized: Int
+    var available: Int
+    var required: Int
+    var deviceType: Int
+
+    static fun new(required: Int) r: GpuBackend {
+        return GpuBackend{ initialized: 0, available: 0, required: required, deviceType: -1 }
+    }
+
+    fun initialize() r: Bool {
+        if this.required == 0 {
+            return true
+        }
+        if gpuIsAvailable() {
+            this.available = 1
+        }
+        if this.available == 0 {
+            if gpuInit() {
+                this.available = 1
+                this.initialized = 1
+            }
+        }
+        if this.available == 1 {
+            this.deviceType = gpuDeviceType()
+            println("trainer: Vulkan device type " + this.deviceType.toString())
+            if not gpuDeviceTypeIsHardware(this.deviceType) {
+                println("trainer: GPU backend requested but Vulkan selected a non-hardware device type " + this.deviceType.toString())
+                println("trainer: install a hardware Vulkan driver, or set backend to cpu for fixture tests")
+                if this.initialized == 1 {
+                    gpuShutdown()
+                    this.initialized = 0
+                    this.available = 0
+                }
+                return false
+            }
+        }
+        if this.required == 1 and this.available == 0 {
+            println("trainer: GPU backend requested but Vulkan compute is not available")
+            println("trainer: install Vulkan drivers and glslc, or set backend to cpu for fixture tests")
+            return false
+        }
+        return true
+    }
+
+    fun shutdown() r: Void {
+        if this.initialized == 1 {
+            gpuShutdown()
+        }
+        this.initialized = 0
+    }
+}
+
+fun backendRequiresGpu(cfg: TrainerConfig) r: Int {
+    return cfg.backendGpu
+}
+
+fun gpuDeviceTypeIsHardware(deviceType: Int) r: Bool {
+    return deviceType == 1 or deviceType == 2 or deviceType == 3
+}

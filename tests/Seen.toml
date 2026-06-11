@@ -1,0 +1,9 @@
+[project]
+name = "trainer-tests"
+version = "0.1.0"
+language = "en"
+description = "Seen trainer executable tests"
+edition = "2025"
+
+[dependencies]
+seen_std = { path = "../../../Rust/seenlang/seen_std" }

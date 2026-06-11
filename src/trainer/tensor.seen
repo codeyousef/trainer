@@ -1,0 +1,534 @@
+import math.math.{exp, sqrt}
+import math_utils.{normalize, cosine}
+import gpu_tensor_ops.{tensorGpuBackendEnabled, tensorGpuBinary, tensorGpuCosineRows, tensorGpuLayerNormRows, tensorGpuMatmul, tensorGpuMeanPool, tensorGpuRowSums, tensorGpuRowsKernel, tensorGpuScale, tensorGpuTopKInnerProductIndices, tensorGpuUnary}
+
+class TensorShape {
+    var rows: Int
+    var cols: Int
+
+    static fun new(rows: Int, cols: Int) r: TensorShape {
+        return TensorShape{ rows: rows, cols: cols }
+    }
+
+    fun elementCount() r: Int {
+        return this.rows * this.cols
+    }
+}
+
+class Tensor {
+    var shape: TensorShape
+    var values: Array<Float>
+    var backend: String
+
+    static fun zeros(rows: Int, cols: Int, backend: String = "cpu") r: Tensor {
+        let values = Array<Float>()
+        var i = 0
+        while i < rows * cols {
+            values.push(0.0)
+            i = i + 1
+        }
+        return Tensor{ shape: TensorShape.new(rows, cols), values: values, backend: backend }
+    }
+
+    static fun fromArray(rows: Int, cols: Int, values: Array<Float>, backend: String = "cpu") r: Tensor {
+        return Tensor{ shape: TensorShape.new(rows, cols), values: values, backend: backend }
+    }
+
+    fun at(row: Int, col: Int) r: Float {
+        return this.values[row * this.shape.cols + col]
+    }
+
+    fun set(row: Int, col: Int, value: Float) r: Void {
+        this.values[row * this.shape.cols + col] = value
+    }
+
+    fun row(rowIndex: Int) r: Array<Float> {
+        let out = Array<Float>()
+        var c = 0
+        while c < this.shape.cols {
+            out.push(this.at(rowIndex, c))
+            c = c + 1
+        }
+        return out
+    }
+
+    fun matmul(other: Tensor) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuMatmul(this.values, other.values, this.shape.rows, this.shape.cols, other.shape.cols)
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, other.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, other.shape.cols, this.backend)
+        var r = 0
+        while r < this.shape.rows {
+            var c = 0
+            while c < other.shape.cols {
+                var sum = 0.0
+                var k = 0
+                while k < this.shape.cols {
+                    sum = sum + this.at(r, k) * other.at(k, c)
+                    k = k + 1
+                }
+                out.set(r, c, sum)
+                c = c + 1
+            }
+            r = r + 1
+        }
+        return out
+    }
+
+    fun add(other: Tensor) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuBinary(this.values, other.values, this.shape.rows, this.shape.cols, "tensorElementwiseAdd")
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        let n = if this.values.length() < other.values.length() { this.values.length() } else { other.values.length() }
+        var i = 0
+        while i < n {
+            out.values[i] = this.values[i] + other.values[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    fun sub(other: Tensor) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuBinary(this.values, other.values, this.shape.rows, this.shape.cols, "tensorElementwiseSub")
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        let n = if this.values.length() < other.values.length() { this.values.length() } else { other.values.length() }
+        var i = 0
+        while i < n {
+            out.values[i] = this.values[i] - other.values[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    fun mulElementwise(other: Tensor) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuBinary(this.values, other.values, this.shape.rows, this.shape.cols, "tensorElementwiseMul")
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        let n = if this.values.length() < other.values.length() { this.values.length() } else { other.values.length() }
+        var i = 0
+        while i < n {
+            out.values[i] = this.values[i] * other.values[i]
+            i = i + 1
+        }
+        return out
+    }
+
+    fun scale(factor: Float) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuScale(this.values, this.shape.rows, this.shape.cols, factor)
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var i = 0
+        while i < this.values.length() {
+            out.values[i] = this.values[i] * factor
+            i = i + 1
+        }
+        return out
+    }
+
+    fun relu() r: Tensor {
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var i = 0
+        while i < this.values.length() {
+            out.values[i] = tensorReluScalar(this.values[i])
+            i = i + 1
+        }
+        return out
+    }
+
+    fun gelu() r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuUnary(this.values, this.shape.rows, this.shape.cols, "tensorGelu")
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var i = 0
+        while i < this.values.length() {
+            out.values[i] = tensorGeluScalar(this.values[i])
+            i = i + 1
+        }
+        return out
+    }
+
+    fun sumRows() r: Array<Float> {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuRowSums(this.values, this.shape.rows, this.shape.cols)
+            if gpu.ok == 1 {
+                return gpu.values
+            }
+        }
+        let out = Array<Float>()
+        var row = 0
+        while row < this.shape.rows {
+            var sum = 0.0
+            var col = 0
+            while col < this.shape.cols {
+                sum = sum + this.at(row, col)
+                col = col + 1
+            }
+            out.push(sum)
+            row = row + 1
+        }
+        return out
+    }
+
+    fun meanPool(mask: Array<Int>) r: Array<Float> {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuMeanPool(this.values, mask, this.shape.rows, this.shape.cols)
+            if gpu.ok == 1 {
+                return gpu.values
+            }
+        }
+        let out = Array<Float>()
+        var col = 0
+        while col < this.shape.cols {
+            out.push(0.0)
+            col = col + 1
+        }
+        var count = 0
+        var row = 0
+        while row < this.shape.rows {
+            if row < mask.length() and mask[row] == 1 {
+                count = count + 1
+                col = 0
+                while col < this.shape.cols {
+                    out[col] = out[col] + this.at(row, col)
+                    col = col + 1
+                }
+            }
+            row = row + 1
+        }
+        if count > 0 {
+            col = 0
+            while col < out.length() {
+                out[col] = out[col] / count.toFloat()
+                col = col + 1
+            }
+        }
+        return out
+    }
+
+    fun softmaxRows() r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuRowsKernel(this.values, this.shape.rows, this.shape.cols, "tensorSoftmaxRows")
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var row = 0
+        while row < this.shape.rows {
+            var maxValue = this.at(row, 0)
+            var col = 1
+            while col < this.shape.cols {
+                let value = this.at(row, col)
+                if value > maxValue {
+                    maxValue = value
+                }
+                col = col + 1
+            }
+            var denom = 0.0
+            col = 0
+            while col < this.shape.cols {
+                let e = exp(this.at(row, col) - maxValue)
+                out.set(row, col, e)
+                denom = denom + e
+                col = col + 1
+            }
+            if denom > 0.0 {
+                col = 0
+                while col < this.shape.cols {
+                    out.set(row, col, out.at(row, col) / denom)
+                    col = col + 1
+                }
+            }
+            row = row + 1
+        }
+        return out
+    }
+
+    fun layerNormRows(epsilon: Float = 0.00001) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuLayerNormRows(this.values, this.shape.rows, this.shape.cols, epsilon)
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var row = 0
+        while row < this.shape.rows {
+            var mean = 0.0
+            var col = 0
+            while col < this.shape.cols {
+                mean = mean + this.at(row, col)
+                col = col + 1
+            }
+            if this.shape.cols > 0 {
+                mean = mean / this.shape.cols.toFloat()
+            }
+            var variance = 0.0
+            col = 0
+            while col < this.shape.cols {
+                let centered = this.at(row, col) - mean
+                variance = variance + centered * centered
+                col = col + 1
+            }
+            if this.shape.cols > 0 {
+                variance = variance / this.shape.cols.toFloat()
+            }
+            let invStd = 1.0 / sqrt(variance + epsilon)
+            col = 0
+            while col < this.shape.cols {
+                out.set(row, col, (this.at(row, col) - mean) * invStd)
+                col = col + 1
+            }
+            row = row + 1
+        }
+        return out
+    }
+
+    fun dropoutDeterministic(keepProbability: Float, seed: Int) r: Tensor {
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        if keepProbability >= 1.0 {
+            var copyIndex = 0
+            while copyIndex < this.values.length() {
+                out.values[copyIndex] = this.values[copyIndex]
+                copyIndex = copyIndex + 1
+            }
+            return out
+        }
+        if keepProbability <= 0.0 {
+            return out
+        }
+        var state = seed
+        var i = 0
+        while i < this.values.length() {
+            state = state * 1103515245 + 12345
+            var bucket = state % 10000
+            if bucket < 0 {
+                bucket = 0 - bucket
+            }
+            let sample = bucket.toFloat() / 10000.0
+            if sample < keepProbability {
+                out.values[i] = this.values[i] / keepProbability
+            }
+            i = i + 1
+        }
+        return out
+    }
+
+    fun normalizeRows() r: Tensor {
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var r = 0
+        while r < this.shape.rows {
+            let nr = normalize(this.row(r))
+            var c = 0
+            while c < this.shape.cols {
+                out.set(r, c, nr[c])
+                c = c + 1
+            }
+            r = r + 1
+        }
+        return out
+    }
+
+    fun cosineRows(other: Tensor) r: Array<Float> {
+        if tensorGpuBackendEnabled(this.backend) {
+            var rows = this.shape.rows
+            if other.shape.rows < rows {
+                rows = other.shape.rows
+            }
+            let gpu = tensorGpuCosineRows(this.values, other.values, rows, this.shape.cols)
+            if gpu.ok == 1 {
+                return gpu.values
+            }
+        }
+        let out = Array<Float>()
+        let n = if this.shape.rows < other.shape.rows { this.shape.rows } else { other.shape.rows }
+        var r = 0
+        while r < n {
+            out.push(cosine(this.row(r), other.row(r)))
+            r = r + 1
+        }
+        return out
+    }
+
+    fun topKInnerProductIndices(query: Array<Float>, k: Int) r: Array<Int> {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuTopKInnerProductIndices(query, this.values, this.shape.rows, this.shape.cols, k)
+            if gpu.ok == 1 {
+                return gpu.values
+            }
+        }
+        let keep = tensorClampTopK(k, this.shape.rows)
+        let indices = tensorInitializedIntArray(keep, -1)
+        let scores = tensorInitializedFloatArray(keep, -999999.0)
+        var row = 0
+        while row < this.shape.rows {
+            let score = tensorDot(query, this.row(row))
+            tensorInsertTopCandidate(indices, scores, row, score)
+            row = row + 1
+        }
+        return indices
+    }
+}
+
+class Parameter {
+    var value: Array<Float>
+    var grad: Array<Float>
+    var m: Array<Float>
+    var v: Array<Float>
+
+    static fun zeros(count: Int) r: Parameter {
+        let value = Array<Float>()
+        let grad = Array<Float>()
+        let m = Array<Float>()
+        let v = Array<Float>()
+        var i = 0
+        while i < count {
+            value.push(0.0)
+            grad.push(0.0)
+            m.push(0.0)
+            v.push(0.0)
+            i = i + 1
+        }
+        return Parameter{ value: value, grad: grad, m: m, v: v }
+    }
+
+    fun zeroGrad() r: Void {
+        var i = 0
+        while i < this.grad.length() {
+            this.grad[i] = 0.0
+            i = i + 1
+        }
+    }
+}
+
+class GradBuffer {
+    var values: Array<Float>
+
+    static fun zeros(count: Int) r: GradBuffer {
+        let values = Array<Float>()
+        var i = 0
+        while i < count {
+            values.push(0.0)
+            i = i + 1
+        }
+        return GradBuffer{ values: values }
+    }
+}
+
+fun tensorReluScalar(x: Float) r: Float {
+    if x > 0.0 {
+        return x
+    }
+    return 0.0
+}
+
+fun tensorGeluScalar(x: Float) r: Float {
+    return 0.5 * x * (1.0 + tensorTanhApprox(0.7978845608 * (x + 0.044715 * x * x * x)))
+}
+
+fun tensorTanhApprox(x: Float) r: Float {
+    if x > 3.0 {
+        return 1.0
+    }
+    if x < -3.0 {
+        return -1.0
+    }
+    return x * (27.0 + x * x) / (27.0 + 9.0 * x * x)
+}
+
+fun tripletMarginLoss(query: Array<Float>, positive: Array<Float>, negative: Array<Float>, margin: Float) r: Float {
+    let simPositive = cosine(query, positive)
+    let simNegative = cosine(query, negative)
+    let loss = simNegative - simPositive + margin
+    if loss > 0.0 {
+        return loss
+    }
+    return 0.0
+}
+
+fun tensorDot(a: Array<Float>, b: Array<Float>) r: Float {
+    var sum = 0.0
+    let n = if a.length() < b.length() { a.length() } else { b.length() }
+    var i = 0
+    while i < n {
+        sum = sum + a[i] * b[i]
+        i = i + 1
+    }
+    return sum
+}
+
+fun tensorClampTopK(requested: Int, candidates: Int) r: Int {
+    if candidates <= 0 {
+        return 0
+    }
+    var k = requested
+    if k <= 0 {
+        k = 1
+    }
+    if k > candidates {
+        k = candidates
+    }
+    return k
+}
+
+fun tensorInitializedIntArray(count: Int, value: Int) r: Array<Int> {
+    let out = Array<Int>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun tensorInitializedFloatArray(count: Int, value: Float) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun tensorInsertTopCandidate(indices: Array<Int>, scores: Array<Float>, idx: Int, score: Float) r: Void {
+    var pos = 0
+    while pos < scores.length() {
+        if indices[pos] < 0 or score > scores[pos] {
+            var j = scores.length() - 1
+            while j > pos {
+                scores[j] = scores[j - 1]
+                indices[j] = indices[j - 1]
+                j = j - 1
+            }
+            scores[pos] = score
+            indices[pos] = idx
+            return
+        }
+        pos = pos + 1
+    }
+}

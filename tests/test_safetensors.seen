@@ -1,0 +1,151 @@
+import trainer.dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
+import trainer.embedding_delta.{MiniLMEmbeddingDeltas}
+import trainer.safetensors.{SafeTensorInfo, SafeTensorWriteSpec, loadTensorF32, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors, writeSingleTensorF32, writeTensorBundleF32}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun closeEnough(value: Float, expected: Float) r: Bool {
+    let diff = value - expected
+    if diff < 0.0 {
+        return (0.0 - diff) < 0.0001
+    }
+    return diff < 0.0001
+}
+
+fun main() -> Int {
+    let values = Array<Float>()
+    values.push(1.0)
+    values.push(2.0)
+    values.push(3.0)
+    values.push(4.0)
+    let path = "/tmp/seen_trainer_safetensors/roundtrip.safetensors"
+    expect(writeSingleTensorF32(path, "dense.weight", 2, 2, values), "write safetensors")
+    let info = SafeTensorInfo.inspect(path)
+    expect(info.existsFlag, "safetensors exists")
+    expect(info.validHeader, "safetensors valid header")
+    expect(info.tensorCount == 1, "safetensors tensor count")
+    let loaded = loadTensorF32(info, "dense.weight")
+    expect(loaded.ok, "load f32 tensor")
+    expect(loaded.tensor.shape.rows == 2 and loaded.tensor.shape.cols == 2, "loaded shape")
+    expect(loaded.tensor.at(0, 0) == 1.0 and loaded.tensor.at(1, 1) == 4.0, "loaded values")
+
+    let bundlePath = "/tmp/seen_trainer_safetensors/materialize.safetensors"
+    let specs = Array<SafeTensorWriteSpec>()
+    let denseWeight = Array<Float>()
+    denseWeight.push(1.0)
+    denseWeight.push(2.0)
+    denseWeight.push(3.0)
+    denseWeight.push(4.0)
+    specs.push(SafeTensorWriteSpec.new("dense.weight", 2, 2, denseWeight))
+    let denseBias = Array<Float>()
+    denseBias.push(0.5)
+    denseBias.push(-0.5)
+    specs.push(SafeTensorWriteSpec.new("dense.bias", 1, 2, denseBias))
+    let lnWeight = Array<Float>()
+    lnWeight.push(1.0)
+    lnWeight.push(1.0)
+    specs.push(SafeTensorWriteSpec.new("ln.weight", 1, 2, lnWeight))
+    let lnBias = Array<Float>()
+    lnBias.push(0.0)
+    lnBias.push(0.0)
+    specs.push(SafeTensorWriteSpec.new("ln.bias", 1, 2, lnBias))
+    let word = Array<Float>()
+    word.push(0.0)
+    word.push(0.1)
+    word.push(0.2)
+    word.push(0.3)
+    word.push(0.4)
+    word.push(0.5)
+    specs.push(SafeTensorWriteSpec.new("embeddings.word_embeddings.weight", 3, 2, word))
+    let position = Array<Float>()
+    position.push(1.0)
+    position.push(1.1)
+    position.push(1.2)
+    position.push(1.3)
+    specs.push(SafeTensorWriteSpec.new("embeddings.position_embeddings.weight", 2, 2, position))
+    let tokenType = Array<Float>()
+    tokenType.push(2.0)
+    tokenType.push(2.1)
+    specs.push(SafeTensorWriteSpec.new("embeddings.token_type_embeddings.weight", 1, 2, tokenType))
+    let embLnWeight = Array<Float>()
+    embLnWeight.push(1.0)
+    embLnWeight.push(1.0)
+    specs.push(SafeTensorWriteSpec.new("embeddings.LayerNorm.weight", 1, 2, embLnWeight))
+    let embLnBias = Array<Float>()
+    embLnBias.push(0.0)
+    embLnBias.push(0.0)
+    specs.push(SafeTensorWriteSpec.new("embeddings.LayerNorm.bias", 1, 2, embLnBias))
+    expect(writeTensorBundleF32(bundlePath, specs), "write bundled safetensors")
+
+    let denseDelta = DenseDeltaAdapter.identity(2, 2)
+    denseDelta.weightDelta[0] = 0.1
+    denseDelta.weightDelta[1] = 0.2
+    denseDelta.weightDelta[2] = 0.3
+    denseDelta.weightDelta[3] = 0.4
+    denseDelta.biasDelta[0] = 0.5
+    denseDelta.biasDelta[1] = -0.25
+    let denseDeltaPath = "/tmp/seen_trainer_safetensors/dense_delta.json"
+    expect(denseDelta.save(denseDeltaPath), "save dense delta")
+    let denseOut = "/tmp/seen_trainer_safetensors/materialized_dense.safetensors"
+    expect(materializeDenseDeltaSafetensors(SafeTensorInfo.inspect(bundlePath), denseOut, "dense.weight", "dense.bias", denseDeltaPath, 2, 2), "materialize dense delta")
+    let denseInfo = SafeTensorInfo.inspect(denseOut)
+    let denseLoaded = loadTensorF32(denseInfo, "dense.weight")
+    let biasLoaded = loadTensorF32(denseInfo, "dense.bias")
+    expect(denseLoaded.ok and biasLoaded.ok, "load materialized dense tensors")
+    expect(closeEnough(denseLoaded.tensor.at(0, 0), 1.1) and closeEnough(denseLoaded.tensor.at(1, 1), 4.4), "dense delta values materialized")
+    expect(closeEnough(biasLoaded.tensor.at(0, 0), 1.0) and closeEnough(biasLoaded.tensor.at(0, 1), -0.75), "dense bias delta materialized")
+
+    let lnDelta = LayerNormDeltaAdapter.identity(2)
+    lnDelta.weightDelta[0] = 0.25
+    lnDelta.weightDelta[1] = -0.5
+    lnDelta.biasDelta[0] = 0.1
+    lnDelta.biasDelta[1] = 0.2
+    let lnDeltaPath = "/tmp/seen_trainer_safetensors/layernorm_delta.json"
+    expect(lnDelta.save(lnDeltaPath), "save layernorm delta")
+    let lnOut = "/tmp/seen_trainer_safetensors/materialized_ln.safetensors"
+    expect(materializeLayerNormDeltaSafetensors(denseInfo, lnOut, "ln.weight", "ln.bias", lnDeltaPath, 2), "materialize layernorm delta")
+    let lnInfo = SafeTensorInfo.inspect(lnOut)
+    let lnWeightLoaded = loadTensorF32(lnInfo, "ln.weight")
+    let lnBiasLoaded = loadTensorF32(lnInfo, "ln.bias")
+    expect(lnWeightLoaded.ok and lnBiasLoaded.ok, "load materialized layernorm tensors")
+    expect(closeEnough(lnWeightLoaded.tensor.at(0, 0), 1.25) and closeEnough(lnWeightLoaded.tensor.at(0, 1), 0.5), "layernorm weight delta materialized")
+    expect(closeEnough(lnBiasLoaded.tensor.at(0, 0), 0.1) and closeEnough(lnBiasLoaded.tensor.at(0, 1), 0.2), "layernorm bias delta materialized")
+
+    let embeddingDeltas = MiniLMEmbeddingDeltas.identity(2, 3, 2, 1)
+    embeddingDeltas.wordRowIds.push(1)
+    embeddingDeltas.wordDelta.push(0.01)
+    embeddingDeltas.wordDelta.push(0.02)
+    embeddingDeltas.positionRowIds.push(0)
+    embeddingDeltas.positionDelta.push(-0.1)
+    embeddingDeltas.positionDelta.push(-0.2)
+    embeddingDeltas.tokenTypeRowIds.push(0)
+    embeddingDeltas.tokenTypeDelta.push(0.3)
+    embeddingDeltas.tokenTypeDelta.push(0.4)
+    embeddingDeltas.layerNormWeightDelta[0] = 0.5
+    embeddingDeltas.layerNormWeightDelta[1] = -0.25
+    embeddingDeltas.layerNormBiasDelta[0] = 0.05
+    embeddingDeltas.layerNormBiasDelta[1] = -0.05
+    let embeddingDeltaPath = "/tmp/seen_trainer_safetensors/embedding_deltas.json"
+    expect(embeddingDeltas.save(embeddingDeltaPath), "save embedding deltas")
+    let embeddingOut = "/tmp/seen_trainer_safetensors/materialized_embeddings.safetensors"
+    expect(materializeEmbeddingDeltasSafetensors(lnInfo, embeddingOut, embeddingDeltaPath, 2), "materialize embedding deltas")
+    let embeddingInfo = SafeTensorInfo.inspect(embeddingOut)
+    let wordLoaded = loadTensorF32(embeddingInfo, "embeddings.word_embeddings.weight")
+    let positionLoaded = loadTensorF32(embeddingInfo, "embeddings.position_embeddings.weight")
+    let tokenTypeLoaded = loadTensorF32(embeddingInfo, "embeddings.token_type_embeddings.weight")
+    let embLnWeightLoaded = loadTensorF32(embeddingInfo, "embeddings.LayerNorm.weight")
+    let embLnBiasLoaded = loadTensorF32(embeddingInfo, "embeddings.LayerNorm.bias")
+    expect(wordLoaded.ok and positionLoaded.ok and tokenTypeLoaded.ok and embLnWeightLoaded.ok and embLnBiasLoaded.ok, "load materialized embedding tensors")
+    expect(closeEnough(wordLoaded.tensor.at(1, 0), 0.21) and closeEnough(wordLoaded.tensor.at(1, 1), 0.32), "word row delta materialized")
+    expect(closeEnough(positionLoaded.tensor.at(0, 0), 0.9) and closeEnough(positionLoaded.tensor.at(0, 1), 0.9), "position row delta materialized")
+    expect(closeEnough(tokenTypeLoaded.tensor.at(0, 0), 2.3) and closeEnough(tokenTypeLoaded.tensor.at(0, 1), 2.5), "token type row delta materialized")
+    expect(closeEnough(embLnWeightLoaded.tensor.at(0, 0), 1.5) and closeEnough(embLnWeightLoaded.tensor.at(0, 1), 0.75), "embedding layernorm weight delta materialized")
+    expect(closeEnough(embLnBiasLoaded.tensor.at(0, 0), 0.05) and closeEnough(embLnBiasLoaded.tensor.at(0, 1), -0.05), "embedding layernorm bias delta materialized")
+
+    println("PASS test_safetensors")
+    return 0
+}

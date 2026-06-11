@@ -1,0 +1,56 @@
+import trainer.config.{readConfig}
+import trainer.io.file.{exists}
+import trainer.io_utils.{writeAtomicText}
+import trainer.miner.{initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
+import trainer.pipeline.{Pipeline}
+import trainer.training.{batchesPerEpoch, effectiveBatchSize}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun main() -> Int {
+    expect(normalizedTopK(16, 3) == 3, "top k clamps to candidate count")
+    expect(normalizedTopK(0, 3) == 1, "top k defaults to one candidate")
+    let topIdx = initializedIntArray(2, -1)
+    let topScores = initializedFloatArray(2, -999999.0)
+    insertTopCandidate(topIdx, topScores, 10, 0.2)
+    insertTopCandidate(topIdx, topScores, 11, 0.9)
+    insertTopCandidate(topIdx, topScores, 12, 0.4)
+    expect(topIdx[0] == 11, "top k highest candidate first")
+    expect(topIdx[1] == 12, "top k second candidate retained")
+    expect(effectiveBatchSize(64, 3) == 3, "small fixtures clamp effective batch")
+    expect(batchesPerEpoch(130, 64) == 2, "drop final partial batch")
+
+    let dataPath = "/tmp/seen_trainer_test/train.jsonl"
+    let cfgPath = "/tmp/seen_trainer_test/config.json"
+    writeAtomicText(dataPath,
+        "{\"query_text\":\"alpha question\",\"positive_chunk_text\":\"alpha answer\",\"domain\":\"a\",\"source\":\"one\"}\n"
+        + "{\"query_text\":\"beta question\",\"positive_chunk_text\":\"beta answer\",\"domain\":\"b\",\"source\":\"two\"}\n"
+        + "{\"query_text\":\"gamma question\",\"positive_chunk_text\":\"gamma answer\",\"domain\":\"c\",\"source\":\"three\"}\n")
+    writeAtomicText(cfgPath,
+        "{"
+        + "\"train_jsonl_path\":\"" + dataPath + "\","
+        + "\"mined_jsonl_path\":\"/tmp/seen_trainer_test/out/mined.jsonl\","
+        + "\"output_model_dir\":\"/tmp/seen_trainer_test/out/model\","
+        + "\"thresholds_path\":\"/tmp/seen_trainer_test/out/model/thresholds.json\","
+        + "\"eval_results_path\":\"/tmp/seen_trainer_test/out/model/eval_results.json\","
+        + "\"backend\":\"cpu\","
+        + "\"embedding_dim\":16,"
+        + "\"max_sequence_length\":16,"
+        + "\"epochs\":1"
+        + "}")
+
+    let cfg = readConfig(cfgPath)
+    let pipeline = Pipeline.new(cfg)
+    let code = pipeline.runAll()
+    expect(code == 0, "runAll should succeed")
+    expect(exists("/tmp/seen_trainer_test/out/mined.jsonl"), "mined output")
+    expect(exists("/tmp/seen_trainer_test/out/model/thresholds.json"), "thresholds output")
+    expect(exists("/tmp/seen_trainer_test/out/model/eval_results.json"), "eval output")
+    expect(exists("/tmp/seen_trainer_test/out/model/modules.json"), "package modules")
+    println("PASS test_pipeline")
+    return 0
+}

@@ -1,0 +1,903 @@
+import io.file.{exists, readText}
+import io_utils.{writeAtomicText}
+
+class ProjectionAdapter {
+    var dim: Int
+    var values: Array<Float>
+    var mixValues: Array<Float>
+    var rank: Int
+    var rankA: Array<Float>
+    var rankB: Array<Float>
+    var diagM: Array<Float>
+    var diagV: Array<Float>
+    var mixM: Array<Float>
+    var mixV: Array<Float>
+    var rankAM: Array<Float>
+    var rankAV: Array<Float>
+    var rankBM: Array<Float>
+    var rankBV: Array<Float>
+    var stepCount: Int
+    var loaded: Bool
+    var path: String
+
+    static fun identity(dim: Int) r: ProjectionAdapter {
+        let values = Array<Float>()
+        let mixValues = Array<Float>()
+        let rank = adapterDefaultRank(dim)
+        let rankA = adapterLowRankAValues(dim, rank)
+        let rankB = zerosAdapterValues(dim * rank)
+        let diagM = Array<Float>()
+        let diagV = Array<Float>()
+        let mixM = Array<Float>()
+        let mixV = Array<Float>()
+        let rankAM = zerosAdapterValues(dim * rank)
+        let rankAV = zerosAdapterValues(dim * rank)
+        let rankBM = zerosAdapterValues(dim * rank)
+        let rankBV = zerosAdapterValues(dim * rank)
+        var i = 0
+        while i < dim {
+            values.push(1.0)
+            mixValues.push(0.0)
+            diagM.push(0.0)
+            diagV.push(0.0)
+            mixM.push(0.0)
+            mixV.push(0.0)
+            i = i + 1
+        }
+        return ProjectionAdapter{
+            dim: dim,
+            values: values,
+            mixValues: mixValues,
+            rank: rank,
+            rankA: rankA,
+            rankB: rankB,
+            diagM: diagM,
+            diagV: diagV,
+            mixM: mixM,
+            mixV: mixV,
+            rankAM: rankAM,
+            rankAV: rankAV,
+            rankBM: rankBM,
+            rankBV: rankBV,
+            stepCount: 0,
+            loaded: false,
+            path: ""
+        }
+    }
+
+    static fun load(path: String, dim: Int) r: ProjectionAdapter {
+        let adapter = ProjectionAdapter.identity(dim)
+        adapter.path = path
+        if not exists(path) {
+            return adapter
+        }
+        let text = readText(path)
+        let supportsRank = adapterSupportsTrainableRank(text)
+        let values = parseAdapterArray(text, "values", dim)
+        if values.length() != dim {
+            return adapter
+        }
+        var i = 0
+        while i < dim {
+            adapter.values[i] = values[i]
+            i = i + 1
+        }
+        var mixValues = parseAdapterArray(text, "mix_values", dim)
+        if mixValues.length() != dim {
+            mixValues = zerosAdapterValues(dim)
+        }
+        i = 0
+        while i < dim {
+            adapter.mixValues[i] = mixValues[i]
+            i = i + 1
+        }
+        let rank = adapterNormalizeRank(parseAdapterInt(text, "rank", adapterDefaultRank(dim)), dim)
+        if rank != adapter.rank {
+            adapter.rank = rank
+            adapter.rankA = adapterLowRankAValues(dim, rank)
+            adapter.rankB = zerosAdapterValues(dim * rank)
+            adapter.rankAM = zerosAdapterValues(dim * rank)
+            adapter.rankAV = zerosAdapterValues(dim * rank)
+            adapter.rankBM = zerosAdapterValues(dim * rank)
+            adapter.rankBV = zerosAdapterValues(dim * rank)
+        }
+        if supportsRank {
+            let parsedRankA = parseAdapterArray(text, "rank_a", dim * rank)
+            if parsedRankA.length() == dim * rank {
+                i = 0
+                while i < parsedRankA.length() and i < adapter.rankA.length() {
+                    adapter.rankA[i] = parsedRankA[i]
+                    i = i + 1
+                }
+            }
+            let parsedRankB = parseAdapterArray(text, "rank_b", dim * rank)
+            if parsedRankB.length() == dim * rank {
+                i = 0
+                while i < parsedRankB.length() and i < adapter.rankB.length() {
+                    adapter.rankB[i] = parsedRankB[i]
+                    i = i + 1
+                }
+            }
+        }
+        adapter.loaded = true
+        return adapter
+    }
+
+    fun apply(input: Array<Float>) r: Array<Float> {
+        let out = Array<Float>()
+        var i = 0
+        while i < input.length() {
+            var value = input[i]
+            if i < this.values.length() {
+                value = input[i] * this.values[i]
+            }
+            if i < this.mixValues.length() and input.length() > 0 {
+                value = value + this.mixValues[i] * input[adapterNextIndex(i, input.length())]
+            }
+            value = value + adapterLowRankContribution(input, this.rankA, this.rankB, this.rank, this.dim, i)
+            out.push(value)
+            i = i + 1
+        }
+        return out
+    }
+
+    fun updateTriplet(q: Array<Float>, p: Array<Float>, n: Array<Float>, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+        if n.length() == 0 {
+            return 0.0
+        }
+        let posStats = adapterPairStats(q, p, this.values, this.mixValues, this.rankA, this.rankB, this.rank)
+        let negStats = adapterPairStats(q, n, this.values, this.mixValues, this.rankA, this.rankB, this.rank)
+        if not posStats.valid or not negStats.valid {
+            return 0.0
+        }
+        let loss = adapterRelu(negStats.cosine - posStats.cosine + margin)
+        if loss <= 0.0 {
+            return 0.0
+        }
+
+        let gradDiag = Array<Float>()
+        let gradMix = Array<Float>()
+        var norm = 0.0
+        var i = 0
+        while i < this.values.length() {
+            var g = 0.0
+            if i < q.length() and i < p.length() and i < n.length() {
+                let negGrad = adapterPairDiagGradientAt(q, n, this.values, this.mixValues, this.rankA, this.rankB, this.rank, negStats, i)
+                let posGrad = adapterPairDiagGradientAt(q, p, this.values, this.mixValues, this.rankA, this.rankB, this.rank, posStats, i)
+                g = negGrad - posGrad
+            }
+            gradDiag.push(g)
+            norm = norm + g * g
+            i = i + 1
+        }
+        i = 0
+        while i < this.mixValues.length() {
+            var gm = 0.0
+            if i < q.length() and i < p.length() and i < n.length() {
+                let negMixGrad = adapterPairMixGradientAt(q, n, this.values, this.mixValues, this.rankA, this.rankB, this.rank, negStats, i)
+                let posMixGrad = adapterPairMixGradientAt(q, p, this.values, this.mixValues, this.rankA, this.rankB, this.rank, posStats, i)
+                gm = negMixGrad - posMixGrad
+            }
+            gradMix.push(gm)
+            norm = norm + gm * gm
+            i = i + 1
+        }
+        let gradRankA = Array<Float>()
+        var rankIndex = 0
+        while rankIndex < this.rank {
+            let negSums = adapterPairRankASums(q, n, this.values, this.mixValues, this.rankA, this.rankB, this.rank, negStats, rankIndex)
+            let posSums = adapterPairRankASums(q, p, this.values, this.mixValues, this.rankA, this.rankB, this.rank, posStats, rankIndex)
+            var inputIndex = 0
+            while inputIndex < this.dim {
+                var ga = 0.0
+                if inputIndex < q.length() and inputIndex < p.length() and inputIndex < n.length() {
+                    ga = negSums.leftScale * q[inputIndex] + negSums.rightScale * n[inputIndex]
+                    ga = ga - posSums.leftScale * q[inputIndex] - posSums.rightScale * p[inputIndex]
+                }
+                gradRankA.push(ga)
+                norm = norm + ga * ga
+                inputIndex = inputIndex + 1
+            }
+            rankIndex = rankIndex + 1
+        }
+        let gradRankB = Array<Float>()
+        i = 0
+        while i < this.dim {
+            rankIndex = 0
+            while rankIndex < this.rank {
+                var gb = 0.0
+                if i < q.length() and i < p.length() and i < n.length() {
+                    let negBGrad = adapterPairRankBGradientAt(q, n, this.values, this.mixValues, this.rankA, this.rankB, this.rank, negStats, i, rankIndex)
+                    let posBGrad = adapterPairRankBGradientAt(q, p, this.values, this.mixValues, this.rankA, this.rankB, this.rank, posStats, i, rankIndex)
+                    gb = negBGrad - posBGrad
+                }
+                gradRankB.push(gb)
+                norm = norm + gb * gb
+                rankIndex = rankIndex + 1
+            }
+            i = i + 1
+        }
+        norm = adapterSqrtApprox(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        this.stepCount = this.stepCount + 1
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - adapterPowFloat(beta1, this.stepCount)
+        let beta2Correction = 1.0 - adapterPowFloat(beta2, this.stepCount)
+        i = 0
+        while i < this.values.length() {
+            let g = gradDiag[i] * scale
+            this.diagM[i] = beta1 * this.diagM[i] + (1.0 - beta1) * g
+            this.diagV[i] = beta2 * this.diagV[i] + (1.0 - beta2) * g * g
+            let mHat = this.diagM[i] / beta1Correction
+            let vHat = this.diagV[i] / beta2Correction
+            var next = this.values[i] - lr * weightDecay * this.values[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.values[i] = adapterClamp(next, 0.01, 10.0)
+            i = i + 1
+        }
+        i = 0
+        while i < this.mixValues.length() {
+            let g = gradMix[i] * scale
+            this.mixM[i] = beta1 * this.mixM[i] + (1.0 - beta1) * g
+            this.mixV[i] = beta2 * this.mixV[i] + (1.0 - beta2) * g * g
+            let mHat = this.mixM[i] / beta1Correction
+            let vHat = this.mixV[i] / beta2Correction
+            var next = this.mixValues[i] - lr * weightDecay * this.mixValues[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.mixValues[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        i = 0
+        while i < this.rankA.length() {
+            let g = gradRankA[i] * scale
+            this.rankAM[i] = beta1 * this.rankAM[i] + (1.0 - beta1) * g
+            this.rankAV[i] = beta2 * this.rankAV[i] + (1.0 - beta2) * g * g
+            let mHat = this.rankAM[i] / beta1Correction
+            let vHat = this.rankAV[i] / beta2Correction
+            var next = this.rankA[i] - lr * weightDecay * this.rankA[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.rankA[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        i = 0
+        while i < this.rankB.length() {
+            let g = gradRankB[i] * scale
+            this.rankBM[i] = beta1 * this.rankBM[i] + (1.0 - beta1) * g
+            this.rankBV[i] = beta2 * this.rankBV[i] + (1.0 - beta2) * g * g
+            let mHat = this.rankBM[i] / beta1Correction
+            let vHat = this.rankBV[i] / beta2Correction
+            var next = this.rankB[i] - lr * weightDecay * this.rankB[i]
+            next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+            this.rankB[i] = adapterClamp(next, -2.0, 2.0)
+            i = i + 1
+        }
+        return loss
+    }
+
+    fun save(path: String) r: Bool {
+        this.path = path
+        this.loaded = true
+        return writeAtomicText(path, this.toJson())
+    }
+
+    fun toJson() r: String {
+        var out = "{\n"
+            + "  \"format\": \"seen-trainable-low-rank-projection-adapter-v2\",\n"
+            + "  \"dim\": " + this.dim.toString() + ",\n"
+            + "  \"rank\": " + this.rank.toString() + ",\n"
+            + "  \"values\": ["
+        var i = 0
+        while i < this.values.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.values[i].toString()
+            i = i + 1
+        }
+        out = out + "],\n"
+            + "  \"mix_values\": ["
+        i = 0
+        while i < this.mixValues.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.mixValues[i].toString()
+            i = i + 1
+        }
+        out = out + "],\n"
+            + "  \"rank_a\": ["
+        i = 0
+        while i < this.rankA.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.rankA[i].toString()
+            i = i + 1
+        }
+        out = out + "],\n"
+            + "  \"rank_b\": ["
+        i = 0
+        while i < this.rankB.length() {
+            if i > 0 {
+                out = out + ", "
+            }
+            out = out + this.rankB[i].toString()
+            i = i + 1
+        }
+        out = out + "]\n}\n"
+        return out
+    }
+
+    fun summary() r: String {
+        let out = this.summaryNamed("adapter")
+        return out
+    }
+
+    fun summaryNamed(prefix: String) r: String {
+        var out = prefix
+        out = out + "_dim="
+        out = out + this.dim.toString()
+        out = out + " "
+        out = out + prefix
+        out = out + "_mix_dim="
+        out = out + this.mixValues.length().toString()
+        out = out + " "
+        out = out + prefix
+        out = out + "_rank="
+        out = out + this.rank.toString()
+        out = out + " "
+        out = out + prefix
+        out = out + "_optimizer=adamw"
+        out = out + " "
+        out = out + prefix
+        out = out + "_step="
+        out = out + this.stepCount.toString()
+        out = out + " "
+        out = out + prefix
+        out = out + "_path_configured="
+        out = out + adapterBoolText(this.path.length() > 0)
+        return out
+    }
+}
+
+class AdapterPairStats {
+    var valid: Bool
+    var cosine: Float
+    var normA: Float
+    var normB: Float
+
+    static fun invalid() r: AdapterPairStats {
+        return AdapterPairStats{ valid: false, cosine: 0.0, normA: 0.0, normB: 0.0 }
+    }
+
+    static fun new(cosine: Float, normA: Float, normB: Float) r: AdapterPairStats {
+        return AdapterPairStats{ valid: true, cosine: cosine, normA: normA, normB: normB }
+    }
+}
+
+class AdapterRankSums {
+    var leftScale: Float
+    var rightScale: Float
+
+    static fun new(leftScale: Float, rightScale: Float) r: AdapterRankSums {
+        return AdapterRankSums{ leftScale: leftScale, rightScale: rightScale }
+    }
+}
+
+fun adapterBoolText(value: Bool) r: String {
+    if value {
+        return "true"
+    }
+    return "false"
+}
+
+fun adapterPairStats(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int) r: AdapterPairStats {
+    var dot = 0.0
+    var normASq = 0.0
+    var normBSq = 0.0
+    var i = 0
+    let n = adapterMin3(a.length(), b.length(), weights.length())
+    while i < n {
+        let wa = adapterTransformAt(a, weights, mixValues, rankA, rankB, rank, i)
+        let wb = adapterTransformAt(b, weights, mixValues, rankA, rankB, rank, i)
+        dot = dot + wa * wb
+        normASq = normASq + wa * wa
+        normBSq = normBSq + wb * wb
+        i = i + 1
+    }
+    if normASq <= 0.000000000001 or normBSq <= 0.000000000001 {
+        return AdapterPairStats.invalid()
+    }
+    let normA = adapterSqrtApprox(normASq)
+    let normB = adapterSqrtApprox(normBSq)
+    if normA <= 0.000000001 or normB <= 0.000000001 {
+        return AdapterPairStats.invalid()
+    }
+    return AdapterPairStats.new(dot / (normA * normB), normA, normB)
+}
+
+fun adapterPairDiagGradientAt(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, stats: AdapterPairStats, index: Int) r: Float {
+    if index < 0 or index >= a.length() or index >= b.length() or index >= weights.length() {
+        return 0.0
+    }
+    let gradA = adapterPairOutputGradientAAt(a, b, weights, mixValues, rankA, rankB, rank, stats, index)
+    let gradB = adapterPairOutputGradientBAt(a, b, weights, mixValues, rankA, rankB, rank, stats, index)
+    return gradA * a[index] + gradB * b[index]
+}
+
+fun adapterPairMixGradientAt(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, stats: AdapterPairStats, index: Int) r: Float {
+    if index < 0 or index >= a.length() or index >= b.length() or index >= mixValues.length() {
+        return 0.0
+    }
+    let next = adapterNextIndex(index, a.length())
+    let bNext = adapterNextIndex(index, b.length())
+    let gradA = adapterPairOutputGradientAAt(a, b, weights, mixValues, rankA, rankB, rank, stats, index)
+    let gradB = adapterPairOutputGradientBAt(a, b, weights, mixValues, rankA, rankB, rank, stats, index)
+    return gradA * a[next] + gradB * b[bNext]
+}
+
+fun adapterPairRankBGradientAt(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, stats: AdapterPairStats, outputIndex: Int, rankIndex: Int) r: Float {
+    if rank <= 0 or outputIndex < 0 or outputIndex >= weights.length() or rankIndex < 0 or rankIndex >= rank {
+        return 0.0
+    }
+    let gradA = adapterPairOutputGradientAAt(a, b, weights, mixValues, rankA, rankB, rank, stats, outputIndex)
+    let gradB = adapterPairOutputGradientBAt(a, b, weights, mixValues, rankA, rankB, rank, stats, outputIndex)
+    let bottleA = adapterLowRankBottleneckAt(a, rankA, rank, weights.length(), rankIndex)
+    let bottleB = adapterLowRankBottleneckAt(b, rankA, rank, weights.length(), rankIndex)
+    return gradA * bottleA + gradB * bottleB
+}
+
+fun adapterPairRankASums(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, stats: AdapterPairStats, rankIndex: Int) r: AdapterRankSums {
+    if rank <= 0 or rankIndex < 0 or rankIndex >= rank {
+        return AdapterRankSums.new(0.0, 0.0)
+    }
+    var leftScale = 0.0
+    var rightScale = 0.0
+    var outputIndex = 0
+    let n = adapterMin3(a.length(), b.length(), weights.length())
+    while outputIndex < n {
+        let bWeight = adapterLowRankBAt(rankB, outputIndex, rankIndex, rank)
+        if bWeight != 0.0 {
+            let gradA = adapterPairOutputGradientAAt(a, b, weights, mixValues, rankA, rankB, rank, stats, outputIndex)
+            let gradB = adapterPairOutputGradientBAt(a, b, weights, mixValues, rankA, rankB, rank, stats, outputIndex)
+            leftScale = leftScale + gradA * bWeight
+            rightScale = rightScale + gradB * bWeight
+        }
+        outputIndex = outputIndex + 1
+    }
+    return AdapterRankSums.new(leftScale, rightScale)
+}
+
+fun adapterPairOutputGradientAAt(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, stats: AdapterPairStats, index: Int) r: Float {
+    if not stats.valid {
+        return 0.0
+    }
+    let ai = adapterTransformAt(a, weights, mixValues, rankA, rankB, rank, index)
+    let bi = adapterTransformAt(b, weights, mixValues, rankA, rankB, rank, index)
+    let ab = stats.normA * stats.normB
+    let aa = stats.normA * stats.normA
+    if ab <= 0.000000001 or aa <= 0.000000001 {
+        return 0.0
+    }
+    return bi / ab - stats.cosine * ai / aa
+}
+
+fun adapterPairOutputGradientBAt(a: Array<Float>, b: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, stats: AdapterPairStats, index: Int) r: Float {
+    if not stats.valid {
+        return 0.0
+    }
+    let ai = adapterTransformAt(a, weights, mixValues, rankA, rankB, rank, index)
+    let bi = adapterTransformAt(b, weights, mixValues, rankA, rankB, rank, index)
+    let ab = stats.normA * stats.normB
+    let bb = stats.normB * stats.normB
+    if ab <= 0.000000001 or bb <= 0.000000001 {
+        return 0.0
+    }
+    return ai / ab - stats.cosine * bi / bb
+}
+
+fun adapterTransformAt(input: Array<Float>, weights: Array<Float>, mixValues: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, index: Int) r: Float {
+    if index < 0 or index >= input.length() {
+        return 0.0
+    }
+    var value = input[index]
+    if index < weights.length() {
+        value = input[index] * weights[index]
+    }
+    if index < mixValues.length() and input.length() > 0 {
+        value = value + mixValues[index] * input[adapterNextIndex(index, input.length())]
+    }
+    value = value + adapterLowRankContribution(input, rankA, rankB, rank, weights.length(), index)
+    return value
+}
+
+fun adapterNextIndex(index: Int, length: Int) r: Int {
+    if length <= 0 {
+        return 0
+    }
+    let next = index + 1
+    if next >= length {
+        return 0
+    }
+    return next
+}
+
+fun adapterMin3(a: Int, b: Int, c: Int) r: Int {
+    var out = a
+    if b < out {
+        out = b
+    }
+    if c < out {
+        out = c
+    }
+    return out
+}
+
+fun adapterDefaultRank(dim: Int) r: Int {
+    if dim <= 0 {
+        return 0
+    }
+    if dim < 8 {
+        return 2
+    }
+    return 4
+}
+
+fun adapterNormalizeRank(rank: Int, dim: Int) r: Int {
+    if rank < 0 {
+        return adapterDefaultRank(dim)
+    }
+    if dim <= 0 {
+        return 0
+    }
+    if rank > dim {
+        return dim
+    }
+    return rank
+}
+
+fun adapterLowRankAValues(dim: Int, rank: Int) r: Array<Float> {
+    let values = Array<Float>()
+    var rIndex = 0
+    while rIndex < rank {
+        var d = 0
+        while d < dim {
+            values.push(adapterLowRankSeed(rIndex, d))
+            d = d + 1
+        }
+        rIndex = rIndex + 1
+    }
+    return values
+}
+
+fun adapterLowRankSeed(rankIndex: Int, dimIndex: Int) r: Float {
+    var state = (rankIndex + 1) * 131 + (dimIndex + 1) * 977 + 17
+    state = state * 1103515245 + 12345
+    var bucket = state % 2001
+    if bucket < 0 {
+        bucket = 0 - bucket
+    }
+    return ((bucket.toFloat() / 1000.0) - 1.0) * 0.01
+}
+
+fun adapterLowRankContribution(input: Array<Float>, rankA: Array<Float>, rankB: Array<Float>, rank: Int, dim: Int, outputIndex: Int) r: Float {
+    if rank <= 0 or outputIndex < 0 or outputIndex >= dim {
+        return 0.0
+    }
+    var value = 0.0
+    var rankIndex = 0
+    while rankIndex < rank {
+        let up = adapterLowRankBAt(rankB, outputIndex, rankIndex, rank)
+        if up != 0.0 {
+            let bottle = adapterLowRankBottleneckAt(input, rankA, rank, dim, rankIndex)
+            value = value + up * bottle
+        }
+        rankIndex = rankIndex + 1
+    }
+    return value
+}
+
+fun adapterLowRankBottleneckAt(input: Array<Float>, rankA: Array<Float>, rank: Int, dim: Int, rankIndex: Int) r: Float {
+    if rank <= 0 or rankIndex < 0 or rankIndex >= rank {
+        return 0.0
+    }
+    var value = 0.0
+    var d = 0
+    while d < dim and d < input.length() {
+        let idx = rankIndex * dim + d
+        if idx < rankA.length() {
+            value = value + rankA[idx] * input[d]
+        }
+        d = d + 1
+    }
+    return value
+}
+
+fun adapterLowRankBAt(rankB: Array<Float>, outputIndex: Int, rankIndex: Int, rank: Int) r: Float {
+    if rank <= 0 or outputIndex < 0 or rankIndex < 0 or rankIndex >= rank {
+        return 0.0
+    }
+    let idx = outputIndex * rank + rankIndex
+    if idx < 0 or idx >= rankB.length() {
+        return 0.0
+    }
+    return rankB[idx]
+}
+
+fun parseAdapterValues(text: String, dim: Int) r: Array<Float> {
+    return parseAdapterArray(text, "values", dim)
+}
+
+fun parseAdapterArray(text: String, key: String, dim: Int) r: Array<Float> {
+    let values = Array<Float>()
+    let start = adapterFindArrayStart(text, key)
+    if start < 0 {
+        return values
+    }
+    var i = start
+    while i < text.length() and values.length() < dim {
+        i = adapterSkipWs(text, i)
+        if i >= text.length() or text.charAt(i) == 93 {
+            return values
+        }
+        let numberStart = i
+        while i < text.length() {
+            let ch = text.charAt(i)
+            if (ch >= 48 and ch <= 57) or ch == 45 or ch == 43 or ch == 46 or ch == 101 or ch == 69 {
+                i = i + 1
+            } else {
+                break
+            }
+        }
+        if i > numberStart {
+            values.push(adapterParseFloat(text.substring(numberStart, i)))
+        }
+        i = adapterSkipWs(text, i)
+        if i < text.length() and text.charAt(i) == 44 {
+            i = i + 1
+        }
+    }
+    return values
+}
+
+fun parseAdapterInt(text: String, key: String, fallback: Int) r: Int {
+    let start = adapterFindValueStart(text, key)
+    if start < 0 {
+        return fallback
+    }
+    var i = adapterSkipWs(text, start)
+    let numberStart = i
+    if i < text.length() and text.charAt(i) == 45 {
+        i = i + 1
+    }
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        i = i + 1
+    }
+    if i <= numberStart {
+        return fallback
+    }
+    return adapterParseInt(text.substring(numberStart, i))
+}
+
+fun adapterFindValuesStart(text: String) r: Int {
+    return adapterFindArrayStart(text, "values")
+}
+
+fun adapterSupportsTrainableRank(text: String) r: Bool {
+    return adapterContains(text, "\"format\": \"seen-trainable-low-rank-projection-adapter-v2\"")
+}
+
+fun adapterContains(text: String, needle: String) r: Bool {
+    if needle.length() == 0 {
+        return true
+    }
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if adapterMatchesAt(text, i, needle) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fun adapterFindValueStart(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if adapterMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun adapterFindArrayStart(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if adapterMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 91 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun zerosAdapterValues(dim: Int) r: Array<Float> {
+    let values = Array<Float>()
+    var i = 0
+    while i < dim {
+        values.push(0.0)
+        i = i + 1
+    }
+    return values
+}
+
+fun adapterMatchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun adapterSkipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+fun adapterParseFloat(text: String) r: Float {
+    var sign = 1.0
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1.0
+        i = 1
+    } else if text.length() > 0 and text.charAt(0) == 43 {
+        i = 1
+    }
+    var value = 0.0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10.0 + (text.charAt(i) - 48).toFloat()
+        i = i + 1
+    }
+    if i < text.length() and text.charAt(i) == 46 {
+        i = i + 1
+        var place = 0.1
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            value = value + (text.charAt(i) - 48).toFloat() * place
+            place = place * 0.1
+            i = i + 1
+        }
+    }
+    if i < text.length() and (text.charAt(i) == 101 or text.charAt(i) == 69) {
+        i = i + 1
+        var expSign = 1
+        if i < text.length() and text.charAt(i) == 45 {
+            expSign = -1
+            i = i + 1
+        } else if i < text.length() and text.charAt(i) == 43 {
+            i = i + 1
+        }
+        var exponent = 0
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            exponent = exponent * 10 + (text.charAt(i) - 48)
+            i = i + 1
+        }
+        let signedExponent = expSign * exponent
+        if signedExponent <= -6 {
+            return sign * 0.0
+        }
+        value = value * adapterPow10(signedExponent)
+    }
+    return sign * value
+}
+
+fun adapterParseInt(text: String) r: Int {
+    var sign = 1
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1
+        i = 1
+    } else if text.length() > 0 and text.charAt(0) == 43 {
+        i = 1
+    }
+    var value = 0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10 + (text.charAt(i) - 48)
+        i = i + 1
+    }
+    return sign * value
+}
+
+fun adapterPow10(exponent: Int) r: Float {
+    var value = 1.0
+    if exponent >= 0 {
+        var i = 0
+        while i < exponent {
+            value = value * 10.0
+            i = i + 1
+        }
+        return value
+    }
+    var j = 0
+    while j < 0 - exponent {
+        value = value / 10.0
+        j = j + 1
+    }
+    return value
+}
+
+fun adapterPowFloat(base: Float, exponent: Int) r: Float {
+    var value = 1.0
+    var i = 0
+    while i < exponent {
+        value = value * base
+        i = i + 1
+    }
+    return value
+}
+
+fun adapterRelu(value: Float) r: Float {
+    if value > 0.0 {
+        return value
+    }
+    return 0.0
+}
+
+fun adapterClamp(value: Float, lo: Float, hi: Float) r: Float {
+    if value < lo {
+        return lo
+    }
+    if value > hi {
+        return hi
+    }
+    return value
+}
+
+fun adapterSqrtApprox(value: Float) r: Float {
+    if value <= 0.0 {
+        return 0.0
+    }
+    var x = value
+    var i = 0
+    while i < 8 {
+        x = 0.5 * (x + value / x)
+        i = i + 1
+    }
+    return x
+}

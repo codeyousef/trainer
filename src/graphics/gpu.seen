@@ -1,0 +1,20 @@
+extern fun seen_gpu_init() r: Int
+extern fun seen_gpu_shutdown() r: Void
+extern fun seen_gpu_is_available() r: Int
+extern fun seen_gpu_device_type() r: Int
+
+fun gpuInit() r: Bool {
+    return seen_gpu_init() == 1
+}
+
+fun gpuShutdown() r: Void {
+    seen_gpu_shutdown()
+}
+
+fun gpuIsAvailable() r: Bool {
+    return seen_gpu_is_available() == 1
+}
+
+fun gpuDeviceType() r: Int {
+    return seen_gpu_device_type()
+}

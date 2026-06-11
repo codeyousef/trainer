@@ -1,0 +1,177 @@
+import config.{TrainerConfig}
+import io.file.{readText}
+import jsonl.{PairExample, readPairs}
+import str.string.{split, trim}
+
+fun readSourcePairs(cfg: TrainerConfig) r: Array<PairExample> {
+    let path = if cfg.sourceDataPath.length() > 0 { cfg.sourceDataPath } else { cfg.trainJsonlPath }
+    let format = normalizeSourceFormat(cfg.sourceFormat, path)
+    if format == "csv" {
+        return readDelimitedPairs(path, ",", cfg)
+    }
+    if format == "tsv" {
+        return readDelimitedPairs(path, "\t", cfg)
+    }
+    return readPairs(path)
+}
+
+fun normalizeSourceFormat(format: String, path: String) r: String {
+    if format == "jsonl" or format == "csv" or format == "tsv" {
+        return format
+    }
+    if format == "JSONL" { return "jsonl" }
+    if format == "CSV" { return "csv" }
+    if format == "TSV" { return "tsv" }
+    if endsWith(path, ".csv") {
+        return "csv"
+    }
+    if endsWith(path, ".tsv") {
+        return "tsv"
+    }
+    return "jsonl"
+}
+
+fun readDelimitedPairs(path: String, delimiter: String, cfg: TrainerConfig) r: Array<PairExample> {
+    let content = readText(path)
+    let lines = split(content, "\n")
+    let out = Array<PairExample>()
+    let headerIndex = firstNonEmptyLine(lines)
+    if headerIndex < 0 {
+        return out
+    }
+    let headers = splitDelimitedLine(lines[headerIndex], delimiter)
+    let qCol = findQueryColumn(headers, cfg.sourceQueryColumn)
+    let pCol = findPositiveColumn(headers, cfg.sourcePositiveColumn)
+    let dCol = findHeader(headers, cfg.sourceDomainColumn)
+    let sCol = findHeader(headers, cfg.sourceSourceColumn)
+    if qCol < 0 or pCol < 0 {
+        return out
+    }
+
+    var i = headerIndex + 1
+    while i < lines.length() {
+        let rowText = trim(lines[i])
+        if rowText.length() > 0 {
+            let row = splitDelimitedLine(rowText, delimiter)
+            let q = fieldAt(row, qCol)
+            let p = fieldAt(row, pCol)
+            let d = fieldAt(row, dCol)
+            let s = fieldAt(row, sCol)
+            if q.length() >= cfg.minTextLength and p.length() >= cfg.minTextLength {
+                out.push(PairExample.new(q, p, d, s))
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun splitDelimitedLine(line: String, delimiter: String) r: Array<String> {
+    let fields = Array<String>()
+    var field = ""
+    var inQuotes = false
+    var i = 0
+    while i < line.length() {
+        let ch = line.charAt(i)
+        if ch == 34 {
+            if inQuotes and i + 1 < line.length() and line.charAt(i + 1) == 34 {
+                field = field + "\""
+                i = i + 1
+            } else {
+                inQuotes = not inQuotes
+            }
+        } else if not inQuotes and delimiterMatches(line, i, delimiter) {
+            fields.push(trim(field))
+            field = ""
+            i = i + delimiter.length() - 1
+        } else {
+            field = field + String.fromCharCode(ch)
+        }
+        i = i + 1
+    }
+    fields.push(trim(field))
+    return fields
+}
+
+fun delimiterMatches(line: String, offset: Int, delimiter: String) r: Bool {
+    if delimiter.length() == 0 or offset + delimiter.length() > line.length() {
+        return false
+    }
+    var i = 0
+    while i < delimiter.length() {
+        if line.charAt(offset + i) != delimiter.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun firstNonEmptyLine(lines: Array<String>) r: Int {
+    var i = 0
+    while i < lines.length() {
+        if trim(lines[i]).length() > 0 {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun fieldAt(row: Array<String>, index: Int) r: String {
+    if index < 0 or index >= row.length() {
+        return ""
+    }
+    return trim(row[index])
+}
+
+fun findQueryColumn(headers: Array<String>, requested: String) r: Int {
+    var idx = findHeader(headers, requested)
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "query_text")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "query")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "question")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "instruction")
+    if idx >= 0 { return idx }
+    return findHeader(headers, "sentence")
+}
+
+fun findPositiveColumn(headers: Array<String>, requested: String) r: Int {
+    var idx = findHeader(headers, requested)
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "positive_chunk_text")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "positive")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "answer")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "response")
+    if idx >= 0 { return idx }
+    idx = findHeader(headers, "description")
+    if idx >= 0 { return idx }
+    return findHeader(headers, "sentence")
+}
+
+fun findHeader(headers: Array<String>, name: String) r: Int {
+    if name.length() == 0 {
+        return -1
+    }
+    var i = 0
+    while i < headers.length() {
+        if trim(headers[i]) == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun endsWith(text: String, suffix: String) r: Bool {
+    if suffix.length() > text.length() {
+        return false
+    }
+    return text.substring(text.length() - suffix.length(), text.length()) == suffix
+}

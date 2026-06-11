@@ -1,0 +1,246 @@
+import config.{TrainerConfig}
+import dense_lora.{miniLMLayerAttentionDenseDeltaPath, miniLMLayerAttentionLayerNormDeltaPath, miniLMLayerIntermediateDeltaPath, miniLMLayerKeyDeltaPath, miniLMLayerOutputDeltaPath, miniLMLayerOutputLayerNormDeltaPath, miniLMLayerQueryDeltaPath, miniLMLayerValueDeltaPath}
+import embedding_delta.{miniLMEmbeddingDeltasPath}
+import io.file.{copyFileBytes, ensureParentDirectories, exists}
+import json.builder.{escapeJsonString}
+import safetensors.{SafeTensorInfo, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors}
+import str.string.{StringBuilder}
+
+class BaseWeightUpdateResult {
+    var outputPath: String
+    var copied: Bool
+    var embeddingMaterialized: Bool
+    var allLayerSurfaces: Int
+    var legacySurfaces: Int
+    var totalSurfaces: Int
+
+    static fun new(outputPath: String, copied: Bool, embeddingMaterialized: Bool, allLayerSurfaces: Int, legacySurfaces: Int) r: BaseWeightUpdateResult {
+        let embeddingCount = if embeddingMaterialized { 1 } else { 0 }
+        return BaseWeightUpdateResult{
+            outputPath: outputPath,
+            copied: copied,
+            embeddingMaterialized: embeddingMaterialized,
+            allLayerSurfaces: allLayerSurfaces,
+            legacySurfaces: legacySurfaces,
+            totalSurfaces: embeddingCount + allLayerSurfaces + legacySurfaces
+        }
+    }
+
+    fun anyMaterialized() r: Bool {
+        return this.embeddingMaterialized or this.allLayerSurfaces > 0 or this.legacySurfaces > 0
+    }
+}
+
+fun directBaseWeightsPath(cfg: TrainerConfig) r: String {
+    return cfg.outputModelDir + "/seen_trained_base_model.safetensors"
+}
+
+fun directBaseUpdateManifestPath(cfg: TrainerConfig) r: String {
+    return cfg.outputModelDir + "/seen_base_weight_update_manifest.json"
+}
+
+fun expectedMiniLMEncoderLayerSurfaces(layers: Int) r: Int {
+    if layers <= 0 {
+        return 0
+    }
+    return layers * 8
+}
+
+fun baseUpdateCoversFullMiniLMEncoder(result: BaseWeightUpdateResult, layers: Int) r: Bool {
+    let expected = expectedMiniLMEncoderLayerSurfaces(layers)
+    return result.copied and result.embeddingMaterialized and expected > 0 and result.allLayerSurfaces >= expected
+}
+
+fun writeDirectBaseWeightUpdateArtifact(cfg: TrainerConfig, layers: Int, hiddenSize: Int, intermediateSize: Int) r: BaseWeightUpdateResult {
+    let outPath = directBaseWeightsPath(cfg)
+    let source = cfg.modelWeightsPath()
+    if not exists(source) {
+        let missing = BaseWeightUpdateResult.new(outPath, false, false, 0, 0)
+        writeDirectBaseWeightUpdateManifest(cfg, missing, layers, hiddenSize, intermediateSize, "source model.safetensors missing")
+        return missing
+    }
+    if not copyFileBytes(source, outPath) {
+        let failed = BaseWeightUpdateResult.new(outPath, false, false, 0, 0)
+        writeDirectBaseWeightUpdateManifest(cfg, failed, layers, hiddenSize, intermediateSize, "copy failed")
+        return failed
+    }
+    let embeddingMaterialized = materializeEmbeddingDeltasToPath(cfg, outPath, hiddenSize)
+    let allLayerSurfaces = materializeAllLayerDeltasToPath(cfg, outPath, layers, hiddenSize, intermediateSize)
+    var legacySurfaces = 0
+    if allLayerSurfaces <= 0 {
+        legacySurfaces = materializeLegacyTargetDeltasToPath(cfg, outPath, layers, hiddenSize, intermediateSize)
+    }
+    let result = BaseWeightUpdateResult.new(outPath, true, embeddingMaterialized, allLayerSurfaces, legacySurfaces)
+    writeDirectBaseWeightUpdateManifest(cfg, result, layers, hiddenSize, intermediateSize, "")
+    return result
+}
+
+fun materializeEmbeddingDeltasToPath(cfg: TrainerConfig, weightsPath: String, hiddenSize: Int) r: Bool {
+    if not exists(weightsPath) {
+        return false
+    }
+    let deltaPath = miniLMEmbeddingDeltasPath(cfg.outputModelDir)
+    if not exists(deltaPath) {
+        return false
+    }
+    let info = SafeTensorInfo.inspect(weightsPath)
+    return materializeEmbeddingDeltasSafetensors(info, weightsPath, deltaPath, hiddenSize)
+}
+
+fun materializeAllLayerDeltasToPath(cfg: TrainerConfig, weightsPath: String, layers: Int, hiddenSize: Int, intermediateSize: Int) r: Int {
+    if not exists(weightsPath) {
+        return 0
+    }
+    let info = SafeTensorInfo.inspect(weightsPath)
+    if not info.validHeader {
+        return 0
+    }
+    var materialized = 0
+    var layer = 0
+    while layer < layers {
+        let prefix = "encoder.layer." + layer.toString() + "."
+        if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.self.query.weight", prefix + "attention.self.query.bias", miniLMLayerQueryDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.self.key.weight", prefix + "attention.self.key.bias", miniLMLayerKeyDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.self.value.weight", prefix + "attention.self.value.bias", miniLMLayerValueDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.output.dense.weight", prefix + "attention.output.dense.bias", miniLMLayerAttentionDenseDeltaPath(cfg.outputModelDir, layer), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeLayerNormDeltaSafetensors(info, weightsPath, prefix + "attention.output.LayerNorm.weight", prefix + "attention.output.LayerNorm.bias", miniLMLayerAttentionLayerNormDeltaPath(cfg.outputModelDir, layer), hiddenSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "intermediate.dense.weight", prefix + "intermediate.dense.bias", miniLMLayerIntermediateDeltaPath(cfg.outputModelDir, layer), hiddenSize, intermediateSize) { materialized = materialized + 1 }
+        if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "output.dense.weight", prefix + "output.dense.bias", miniLMLayerOutputDeltaPath(cfg.outputModelDir, layer), intermediateSize, hiddenSize) { materialized = materialized + 1 }
+        if materializeLayerNormDeltaSafetensors(info, weightsPath, prefix + "output.LayerNorm.weight", prefix + "output.LayerNorm.bias", miniLMLayerOutputLayerNormDeltaPath(cfg.outputModelDir, layer), hiddenSize) { materialized = materialized + 1 }
+        layer = layer + 1
+    }
+    return materialized
+}
+
+fun materializeLegacyTargetDeltasToPath(cfg: TrainerConfig, weightsPath: String, layers: Int, hiddenSize: Int, intermediateSize: Int) r: Int {
+    if not exists(weightsPath) {
+        return 0
+    }
+    let layer = baseUpdateTargetLayer(cfg.minilmDenseAdapterLayer, layers)
+    if layer < 0 {
+        return 0
+    }
+    let info = SafeTensorInfo.inspect(weightsPath)
+    if not info.validHeader {
+        return 0
+    }
+    let prefix = "encoder.layer." + layer.toString() + "."
+    var materialized = 0
+    if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.self.query.weight", prefix + "attention.self.query.bias", cfg.minilmQueryDeltaPath(), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+    if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.self.key.weight", prefix + "attention.self.key.bias", cfg.minilmKeyDeltaPath(), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+    if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.self.value.weight", prefix + "attention.self.value.bias", cfg.minilmValueDeltaPath(), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+    if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "attention.output.dense.weight", prefix + "attention.output.dense.bias", cfg.minilmAttentionDenseDeltaPath(), hiddenSize, hiddenSize) { materialized = materialized + 1 }
+    if materializeLayerNormDeltaSafetensors(info, weightsPath, prefix + "attention.output.LayerNorm.weight", prefix + "attention.output.LayerNorm.bias", cfg.minilmAttentionLayerNormDeltaPath(), hiddenSize) { materialized = materialized + 1 }
+    if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "intermediate.dense.weight", prefix + "intermediate.dense.bias", cfg.minilmIntermediateDeltaPath(), hiddenSize, intermediateSize) { materialized = materialized + 1 }
+    if materializeDenseDeltaSafetensors(info, weightsPath, prefix + "output.dense.weight", prefix + "output.dense.bias", cfg.minilmDenseDeltaPath(), intermediateSize, hiddenSize) { materialized = materialized + 1 }
+    if materializeLayerNormDeltaSafetensors(info, weightsPath, prefix + "output.LayerNorm.weight", prefix + "output.LayerNorm.bias", cfg.minilmLayerNormDeltaPath(), hiddenSize) { materialized = materialized + 1 }
+    return materialized
+}
+
+fun writeDirectBaseWeightUpdateManifest(cfg: TrainerConfig, result: BaseWeightUpdateResult, layers: Int, hiddenSize: Int, intermediateSize: Int, error: String) r: Bool {
+    let path = directBaseUpdateManifestPath(cfg)
+    ensureParentDirectories(path)
+    let builder = directBaseWeightUpdateManifestBuilder(cfg, result, layers, hiddenSize, intermediateSize, error)
+    return builder.writeToFile(path)
+}
+
+fun directBaseWeightUpdateManifestJson(cfg: TrainerConfig, result: BaseWeightUpdateResult, layers: Int, hiddenSize: Int, intermediateSize: Int, error: String) r: String {
+    let builder = directBaseWeightUpdateManifestBuilder(cfg, result, layers, hiddenSize, intermediateSize, error)
+    return builder.toString()
+}
+
+fun directBaseWeightUpdateManifestBuilder(cfg: TrainerConfig, result: BaseWeightUpdateResult, layers: Int, hiddenSize: Int, intermediateSize: Int, error: String) r: StringBuilder {
+    let anyMaterialized = result.anyMaterialized()
+    let fullEncoderUpdate = baseUpdateCoversFullMiniLMEncoder(result, layers)
+    let copiedText = baseUpdateBoolText(result.copied)
+    let anyText = baseUpdateBoolText(anyMaterialized)
+    let fullEncoderText = baseUpdateBoolText(fullEncoderUpdate)
+    let embeddingText = baseUpdateBoolText(result.embeddingMaterialized)
+    let layersText = layers.toString()
+    let hiddenText = hiddenSize.toString()
+    let intermediateText = intermediateSize.toString()
+    let expectedLayerSurfaceText = expectedMiniLMEncoderLayerSurfaces(layers).toString()
+    let allLayerText = result.allLayerSurfaces.toString()
+    let legacyText = result.legacySurfaces.toString()
+    let totalText = result.totalSurfaces.toString()
+    let sourcePath = escapeJsonString(cfg.modelWeightsPath())
+    let outputPath = escapeJsonString(result.outputPath)
+    let errorText = escapeJsonString(error)
+
+    let builder = StringBuilder.new()
+    builder.append("{\n")
+    builder.append("  \"format\": \"seen-direct-base-weight-update-v1\",\n")
+    builder.append("  \"source_safetensors_path\": ")
+    builder.append(sourcePath)
+    builder.append(",\n")
+    builder.append("  \"output_safetensors_path\": ")
+    builder.append(outputPath)
+    builder.append(",\n")
+    builder.append("  \"copied_base_safetensors\": ")
+    builder.append(copiedText)
+    builder.append(",\n")
+    builder.append("  \"direct_safetensors_base_weight_update\": ")
+    builder.append(anyText)
+    builder.append(",\n")
+    builder.append("  \"update_mode\": \"flush_seen_trained_delta_gradients_into_safetensors_base_weights\",\n")
+    builder.append("  \"base_weight_parameterization\": \"delta_accumulators_materialized_into_safetensors_base_weights\",\n")
+    builder.append("  \"full_base_model_weight_backprop\": ")
+    builder.append(fullEncoderText)
+    builder.append(",\n")
+    builder.append("  \"full_minilm_encoder_surface_backprop\": ")
+    builder.append(fullEncoderText)
+    builder.append(",\n")
+    builder.append("  \"base_weight_update_scope\": \"sparse_embeddings_embedding_layernorm_and_all_ready_minilm_layer_surfaces\",\n")
+    builder.append("  \"layers\": ")
+    builder.append(layersText)
+    builder.append(",\n")
+    builder.append("  \"hidden_size\": ")
+    builder.append(hiddenText)
+    builder.append(",\n")
+    builder.append("  \"intermediate_size\": ")
+    builder.append(intermediateText)
+    builder.append(",\n")
+    builder.append("  \"embedding_delta_materialized\": ")
+    builder.append(embeddingText)
+    builder.append(",\n")
+    builder.append("  \"expected_all_layer_surface_count\": ")
+    builder.append(expectedLayerSurfaceText)
+    builder.append(",\n")
+    builder.append("  \"all_layer_surface_count\": ")
+    builder.append(allLayerText)
+    builder.append(",\n")
+    builder.append("  \"legacy_target_surface_count\": ")
+    builder.append(legacyText)
+    builder.append(",\n")
+    builder.append("  \"total_materialized_surface_count\": ")
+    builder.append(totalText)
+    builder.append(",\n")
+    builder.append("  \"artifact_can_be_loaded_without_seen_delta_sidecars\": ")
+    builder.append(anyText)
+    builder.append(",\n")
+    builder.append("  \"error\": ")
+    builder.append(errorText)
+    builder.append("\n")
+    builder.append("}\n")
+    return builder
+}
+
+fun baseUpdateBoolText(value: Bool) r: String {
+    if value {
+        return "true"
+    }
+    return "false"
+}
+
+fun baseUpdateTargetLayer(configured: Int, layers: Int) r: Int {
+    if layers <= 0 {
+        return -1
+    }
+    if configured < 0 {
+        return layers - 1
+    }
+    if configured >= layers {
+        return layers - 1
+    }
+    return configured
+}

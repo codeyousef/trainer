@@ -1,0 +1,83 @@
+import trainer.math_utils.{cosine}
+import trainer.optimizer.{AdamW, clipGlobalNorm}
+import trainer.tensor.{Parameter, Tensor, tripletMarginLoss}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun main() -> Int {
+    let aVals = Array<Float>()
+    aVals.push(1.0)
+    aVals.push(2.0)
+    aVals.push(3.0)
+    aVals.push(4.0)
+    let bVals = Array<Float>()
+    bVals.push(5.0)
+    bVals.push(6.0)
+    bVals.push(7.0)
+    bVals.push(8.0)
+    let a = Tensor.fromArray(2, 2, aVals)
+    let b = Tensor.fromArray(2, 2, bVals)
+    let c = a.matmul(b)
+    expect(c.at(0, 0) == 19.0, "matmul 00")
+    expect(c.at(0, 1) == 22.0, "matmul 01")
+    expect(c.at(1, 0) == 43.0, "matmul 10")
+    expect(c.at(1, 1) == 50.0, "matmul 11")
+    let added = a.add(b)
+    expect(added.at(0, 0) == 6.0 and added.at(1, 1) == 12.0, "elementwise add")
+    let diff = b.sub(a)
+    expect(diff.at(0, 0) == 4.0 and diff.at(1, 1) == 4.0, "elementwise sub")
+    let product = a.mulElementwise(b)
+    expect(product.at(0, 1) == 12.0 and product.at(1, 0) == 21.0, "elementwise mul")
+    let scaled = a.scale(0.5)
+    expect(scaled.at(0, 0) == 0.5 and scaled.at(1, 1) == 2.0, "tensor scale")
+    let sums = a.sumRows()
+    expect(sums[0] == 3.0 and sums[1] == 7.0, "row reduction")
+    let mask = Array<Int>()
+    mask.push(1)
+    mask.push(0)
+    let pooled = a.meanPool(mask)
+    expect(pooled[0] == 1.0 and pooled[1] == 2.0, "masked mean pooling")
+    let softmax = a.softmaxRows()
+    let row0SoftmaxSum = softmax.at(0, 0) + softmax.at(0, 1)
+    expect(row0SoftmaxSum > 0.999 and row0SoftmaxSum < 1.001, "softmax row sum")
+    expect(softmax.at(0, 1) > softmax.at(0, 0), "softmax order")
+    let normalized = a.layerNormRows()
+    expect(normalized.at(0, 0) < -0.99 and normalized.at(0, 1) > 0.99, "layer norm row")
+    let kept = a.dropoutDeterministic(1.0, 42)
+    expect(kept.at(1, 1) == 4.0, "dropout keep all")
+    let sim = cosine(a.row(0), a.row(0))
+    expect(sim > 0.999, "cosine self")
+    let q = Array<Float>()
+    q.push(1.0)
+    q.push(0.0)
+    let p = Array<Float>()
+    p.push(1.0)
+    p.push(0.0)
+    let n = Array<Float>()
+    n.push(0.0)
+    n.push(1.0)
+    expect(tripletMarginLoss(q, p, n, 0.2) == 0.0, "triplet loss easy")
+    let hardLoss = tripletMarginLoss(q, n, p, 0.2)
+    expect(hardLoss > 1.19 and hardLoss < 1.21, "triplet loss hard")
+    let top = a.topKInnerProductIndices(q, 2)
+    expect(top[0] == 1 and top[1] == 0, "top-k inner product")
+    let param = Parameter.zeros(1)
+    param.value[0] = 1.0
+    param.grad[0] = 0.1
+    let adam = AdamW.new(0.01, 0.1)
+    adam.step(param)
+    expect(param.value[0] > 0.9889 and param.value[0] < 0.9891, "adamw first step")
+    let clipParam = Parameter.zeros(2)
+    clipParam.grad[0] = 3.0
+    clipParam.grad[1] = 4.0
+    let norm = clipGlobalNorm(clipParam, 1.0)
+    expect(norm > 4.999 and norm < 5.001, "clip norm return")
+    expect(clipParam.grad[0] > 0.599 and clipParam.grad[0] < 0.601, "clip grad x")
+    expect(clipParam.grad[1] > 0.799 and clipParam.grad[1] < 0.801, "clip grad y")
+    println("PASS test_tensor")
+    return 0
+}

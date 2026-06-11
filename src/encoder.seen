@@ -1,0 +1,256 @@
+import math_utils.{normalize}
+import adapter.{ProjectionAdapter}
+import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas}
+import embedding_delta.{MiniLMEmbeddingDeltas}
+import minilm_embeddings.{MiniLMEmbeddings}
+import tokenizer.{Tokenizer, stableTokenId}
+
+class Encoder {
+    var tokenizer: Tokenizer
+    var embeddingDim: Int
+    var pooling: String
+    var modelEmbeddings: MiniLMEmbeddings
+    var minilmDenseAdapter: DenseLoRAAdapter
+    var minilmDenseDelta: DenseDeltaAdapter
+    var minilmIntermediateDelta: DenseDeltaAdapter
+    var minilmQueryDelta: DenseDeltaAdapter
+    var minilmKeyDelta: DenseDeltaAdapter
+    var minilmValueDelta: DenseDeltaAdapter
+    var minilmAttentionDenseDelta: DenseDeltaAdapter
+    var minilmAttentionLayerNormDelta: LayerNormDeltaAdapter
+    var minilmLayerNormDelta: LayerNormDeltaAdapter
+    var minilmLayerDeltas: MiniLMLayerDeltas
+    var minilmEmbeddingDeltas: MiniLMEmbeddingDeltas
+    var minilmDenseAdapterLayer: Int
+    var minilmLayerAdapter: ProjectionAdapter
+    var minilmAdapterLayer: Int
+    var layerAdapter: ProjectionAdapter
+    var adapter: ProjectionAdapter
+
+    static fun new(tokenizer: Tokenizer, embeddingDim: Int) r: Encoder {
+        return Encoder{
+            tokenizer: tokenizer,
+            embeddingDim: embeddingDim,
+            pooling: "mean",
+            modelEmbeddings: MiniLMEmbeddings.empty(embeddingDim, "not configured"),
+            minilmDenseAdapter: DenseLoRAAdapter.identity(0, embeddingDim),
+            minilmDenseDelta: DenseDeltaAdapter.identity(0, embeddingDim),
+            minilmIntermediateDelta: DenseDeltaAdapter.identity(embeddingDim, 0),
+            minilmQueryDelta: DenseDeltaAdapter.identity(embeddingDim, embeddingDim),
+            minilmKeyDelta: DenseDeltaAdapter.identity(embeddingDim, embeddingDim),
+            minilmValueDelta: DenseDeltaAdapter.identity(embeddingDim, embeddingDim),
+            minilmAttentionDenseDelta: DenseDeltaAdapter.identity(embeddingDim, embeddingDim),
+            minilmAttentionLayerNormDelta: LayerNormDeltaAdapter.identity(embeddingDim),
+            minilmLayerNormDelta: LayerNormDeltaAdapter.identity(embeddingDim),
+            minilmLayerDeltas: MiniLMLayerDeltas.identity(0, embeddingDim, 0),
+            minilmEmbeddingDeltas: MiniLMEmbeddingDeltas.identity(embeddingDim, 0, 0, 0),
+            minilmDenseAdapterLayer: -1,
+            minilmLayerAdapter: ProjectionAdapter.identity(embeddingDim),
+            minilmAdapterLayer: 0,
+            layerAdapter: ProjectionAdapter.identity(embeddingDim),
+            adapter: ProjectionAdapter.identity(embeddingDim)
+        }
+    }
+
+    static fun withMiniLMEmbeddings(tokenizer: Tokenizer, embeddingDim: Int, embeddings: MiniLMEmbeddings) r: Encoder {
+        return Encoder.withMiniLMEmbeddingsAndAdapter(tokenizer, embeddingDim, embeddings, DenseLoRAAdapter.identity(embeddings.intermediateSize, embeddingDim), DenseDeltaAdapter.identity(embeddings.intermediateSize, embeddingDim), DenseDeltaAdapter.identity(embeddingDim, embeddings.intermediateSize), DenseDeltaAdapter.identity(embeddingDim, embeddingDim), DenseDeltaAdapter.identity(embeddingDim, embeddingDim), DenseDeltaAdapter.identity(embeddingDim, embeddingDim), DenseDeltaAdapter.identity(embeddingDim, embeddingDim), LayerNormDeltaAdapter.identity(embeddingDim), LayerNormDeltaAdapter.identity(embeddingDim), MiniLMLayerDeltas.identity(embeddings.readyLayers, embeddingDim, embeddings.intermediateSize), MiniLMEmbeddingDeltas.identity(embeddingDim, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows), -1, ProjectionAdapter.identity(embeddingDim), 0, ProjectionAdapter.identity(embeddingDim), ProjectionAdapter.identity(embeddingDim))
+    }
+
+    static fun withMiniLMEmbeddingsAndAdapter(tokenizer: Tokenizer, embeddingDim: Int, embeddings: MiniLMEmbeddings, minilmDenseAdapter: DenseLoRAAdapter, minilmDenseDelta: DenseDeltaAdapter, minilmIntermediateDelta: DenseDeltaAdapter, minilmQueryDelta: DenseDeltaAdapter, minilmKeyDelta: DenseDeltaAdapter, minilmValueDelta: DenseDeltaAdapter, minilmAttentionDenseDelta: DenseDeltaAdapter, minilmAttentionLayerNormDelta: LayerNormDeltaAdapter, minilmLayerNormDelta: LayerNormDeltaAdapter, minilmLayerDeltas: MiniLMLayerDeltas, minilmEmbeddingDeltas: MiniLMEmbeddingDeltas, minilmDenseAdapterLayer: Int, minilmLayerAdapter: ProjectionAdapter, minilmAdapterLayer: Int, layerAdapter: ProjectionAdapter, adapter: ProjectionAdapter) r: Encoder {
+        return Encoder{
+            tokenizer: tokenizer,
+            embeddingDim: embeddingDim,
+            pooling: "mean",
+            modelEmbeddings: embeddings,
+            minilmDenseAdapter: minilmDenseAdapter,
+            minilmDenseDelta: minilmDenseDelta,
+            minilmIntermediateDelta: minilmIntermediateDelta,
+            minilmQueryDelta: minilmQueryDelta,
+            minilmKeyDelta: minilmKeyDelta,
+            minilmValueDelta: minilmValueDelta,
+            minilmAttentionDenseDelta: minilmAttentionDenseDelta,
+            minilmAttentionLayerNormDelta: minilmAttentionLayerNormDelta,
+            minilmLayerNormDelta: minilmLayerNormDelta,
+            minilmLayerDeltas: minilmLayerDeltas,
+            minilmEmbeddingDeltas: minilmEmbeddingDeltas,
+            minilmDenseAdapterLayer: minilmDenseAdapterLayer,
+            minilmLayerAdapter: minilmLayerAdapter,
+            minilmAdapterLayer: minilmAdapterLayer,
+            layerAdapter: layerAdapter,
+            adapter: adapter
+        }
+    }
+
+    fun encode(text: String) r: Array<Float> {
+        return normalize(this.adapter.apply(this.layerAdapter.apply(this.encodeRawMean(text))))
+    }
+
+    fun encodeBase(text: String) r: Array<Float> {
+        return normalize(this.layerAdapter.apply(this.encodeRawMean(text)))
+    }
+
+    fun encodeLayerInput(text: String) r: Array<Float> {
+        return normalize(this.encodeRawMean(text))
+    }
+
+    fun encodeRawMean(text: String) r: Array<Float> {
+        let tokenIds = this.tokenizer.tokenIds(text)
+        let mask = this.tokenizer.attentionMask(text)
+        if this.modelEmbeddings.loaded {
+            var modelMean = Array<Float>()
+            if this.hasMiniLMAllLayerDeltaTarget() {
+                modelMean = this.modelEmbeddings.encodeMeanWithLayerDeltas(tokenIds, mask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, this.minilmLayerAdapter, this.minilmAdapterLayer)
+            } else {
+                modelMean = this.modelEmbeddings.encodeMeanWithAdapters(tokenIds, mask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, this.minilmLayerAdapter, this.minilmAdapterLayer)
+            }
+            if modelMean.length() == this.embeddingDim {
+                return modelMean
+            }
+        }
+
+        let sum = Array<Float>()
+        var d = 0
+        while d < this.embeddingDim {
+            sum.push(0.0)
+            d = d + 1
+        }
+
+        var tokenCount = 0
+        var i = 0
+        while i < tokenIds.length() {
+            if mask[i] == 1 {
+                tokenCount = tokenCount + 1
+                d = 0
+                while d < this.embeddingDim {
+                    sum[d] = sum[d] + tokenFeature(tokenIds[i], d)
+                    d = d + 1
+                }
+            }
+            i = i + 1
+        }
+
+        if tokenCount > 0 {
+            d = 0
+            while d < this.embeddingDim {
+                sum[d] = sum[d] / tokenCount.toFloat()
+                d = d + 1
+            }
+        }
+        return sum
+    }
+
+    fun encodeMiniLMLayerInput(text: String) r: Array<Float> {
+        if not this.hasMiniLMLayerAdapterTarget() {
+            return Array<Float>()
+        }
+        let tokenIds = this.tokenizer.tokenIds(text)
+        let mask = this.tokenizer.attentionMask(text)
+        let layerMean = this.modelEmbeddings.encodeLayerMean(tokenIds, mask, this.minilmAdapterLayer)
+        if layerMean.length() == this.embeddingDim {
+            return normalize(layerMean)
+        }
+        return Array<Float>()
+    }
+
+    fun updateMiniLMDenseAdapterTriplet(queryText: String, positiveText: String, negativeText: String, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+        if not this.hasMiniLMDenseAdapterTarget() {
+            return 0.0
+        }
+        let qIds = this.tokenizer.tokenIds(queryText)
+        let qMask = this.tokenizer.attentionMask(queryText)
+        let pIds = this.tokenizer.tokenIds(positiveText)
+        let pMask = this.tokenizer.attentionMask(positiveText)
+        let nIds = this.tokenizer.tokenIds(negativeText)
+        let nMask = this.tokenizer.attentionMask(negativeText)
+        if this.hasMiniLMAllLayerDeltaTarget() {
+            return this.modelEmbeddings.updateAllLayerDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, margin, lr, weightDecay, gradClip)
+        }
+        return this.modelEmbeddings.updateDenseAdapterTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, margin, lr, weightDecay, gradClip)
+    }
+
+    fun hasMiniLMAllLayerDeltaTarget() r: Bool {
+        return this.modelEmbeddings.loaded and this.modelEmbeddings.readyLayers > 0 and this.minilmLayerDeltas.layers >= this.modelEmbeddings.readyLayers and this.minilmLayerDeltas.hiddenSize == this.embeddingDim and this.minilmLayerDeltas.intermediateSize == this.modelEmbeddings.intermediateSize
+    }
+
+    fun hasMiniLMEmbeddingDeltaTarget() r: Bool {
+        return this.modelEmbeddings.loaded and this.minilmEmbeddingDeltas.hiddenSize == this.embeddingDim and this.minilmEmbeddingDeltas.wordRows == this.modelEmbeddings.wordRows and this.minilmEmbeddingDeltas.positionRows == this.modelEmbeddings.positionRows and this.minilmEmbeddingDeltas.tokenTypeRows == this.modelEmbeddings.tokenTypeRows
+    }
+
+    fun hasMiniLMDenseAdapterTarget() r: Bool {
+        return this.modelEmbeddings.loaded and this.modelEmbeddings.readyLayers > 0 and this.minilmDenseAdapter.inputDim == this.modelEmbeddings.intermediateSize and this.minilmDenseAdapter.outputDim == this.embeddingDim and this.minilmDenseDelta.inputDim == this.modelEmbeddings.intermediateSize and this.minilmDenseDelta.outputDim == this.embeddingDim and this.minilmIntermediateDelta.inputDim == this.embeddingDim and this.minilmIntermediateDelta.outputDim == this.modelEmbeddings.intermediateSize and this.minilmQueryDelta.inputDim == this.embeddingDim and this.minilmQueryDelta.outputDim == this.embeddingDim and this.minilmKeyDelta.inputDim == this.embeddingDim and this.minilmKeyDelta.outputDim == this.embeddingDim and this.minilmValueDelta.inputDim == this.embeddingDim and this.minilmValueDelta.outputDim == this.embeddingDim and this.minilmAttentionDenseDelta.inputDim == this.embeddingDim and this.minilmAttentionDenseDelta.outputDim == this.embeddingDim and this.minilmAttentionLayerNormDelta.dim == this.embeddingDim and this.minilmLayerNormDelta.dim == this.embeddingDim
+    }
+
+    fun hasMiniLMLayerAdapterTarget() r: Bool {
+        return this.modelEmbeddings.loaded and this.modelEmbeddings.readyLayers > 0
+    }
+
+    fun modelEmbeddingSummary() r: String {
+        let embeddingsSummary = this.modelEmbeddings.summary()
+        var out = embeddingsSummary
+        out = out + " minilm_dense_adapter_layer="
+        out = out + this.minilmDenseAdapterLayer.toString()
+        out = out + " minilm_dense_adapter_target_ready="
+        out = out + this.hasMiniLMDenseAdapterTarget().toString()
+        out = out + " minilm_all_layer_delta_target_ready="
+        out = out + this.hasMiniLMAllLayerDeltaTarget().toString()
+        let allLayerSummary = this.minilmLayerDeltas.summaryNamed("minilm_all_layer_deltas")
+        out = out + " "
+        out = out + allLayerSummary
+        out = out + " minilm_embedding_delta_target_ready="
+        out = out + this.hasMiniLMEmbeddingDeltaTarget().toString()
+        let embeddingDeltaSummary = this.minilmEmbeddingDeltas.summaryNamed("minilm_embedding_deltas")
+        out = out + " "
+        out = out + embeddingDeltaSummary
+        let denseSummary = this.minilmDenseAdapter.summaryNamed("minilm_dense_adapter")
+        out = out + " "
+        out = out + denseSummary
+        let denseDeltaSummary = this.minilmDenseDelta.summaryNamed("minilm_dense_delta")
+        out = out + " "
+        out = out + denseDeltaSummary
+        let intermediateDeltaSummary = this.minilmIntermediateDelta.summaryNamed("minilm_intermediate_delta")
+        out = out + " "
+        out = out + intermediateDeltaSummary
+        let queryDeltaSummary = this.minilmQueryDelta.summaryNamed("minilm_query_delta")
+        out = out + " "
+        out = out + queryDeltaSummary
+        let keyDeltaSummary = this.minilmKeyDelta.summaryNamed("minilm_key_delta")
+        out = out + " "
+        out = out + keyDeltaSummary
+        let valueDeltaSummary = this.minilmValueDelta.summaryNamed("minilm_value_delta")
+        out = out + " "
+        out = out + valueDeltaSummary
+        let attentionDenseDeltaSummary = this.minilmAttentionDenseDelta.summaryNamed("minilm_attention_dense_delta")
+        out = out + " "
+        out = out + attentionDenseDeltaSummary
+        let attentionLayerNormDeltaSummary = this.minilmAttentionLayerNormDelta.summaryNamed("minilm_attention_layernorm_delta")
+        out = out + " "
+        out = out + attentionLayerNormDeltaSummary
+        let layerNormDeltaSummary = this.minilmLayerNormDelta.summaryNamed("minilm_layernorm_delta")
+        out = out + " "
+        out = out + layerNormDeltaSummary
+        out = out + " minilm_adapter_layer="
+        out = out + this.minilmAdapterLayer.toString()
+        out = out + " minilm_adapter_target_ready="
+        out = out + this.hasMiniLMLayerAdapterTarget().toString()
+        let minilmLayerSummary = this.minilmLayerAdapter.summaryNamed("minilm_layer_adapter")
+        out = out + " "
+        out = out + minilmLayerSummary
+        let layerSummary = this.layerAdapter.summaryNamed("layer_adapter")
+        out = out + " "
+        out = out + layerSummary
+        let adapterSummary = this.adapter.summary()
+        out = out + " "
+        out = out + adapterSummary
+        return out
+    }
+}
+
+fun tokenFeature(tokenId: Int, dim: Int) r: Float {
+    var state = tokenId + dim * 1009 + 17
+    state = state * 1103515245 + 12345
+    var bucket = state % 2001
+    if bucket < 0 {
+        bucket = 0 - bucket
+    }
+    return (bucket.toFloat() / 1000.0) - 1.0
+}

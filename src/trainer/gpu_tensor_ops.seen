@@ -1,0 +1,627 @@
+import trainer.graphics.gpu.{gpuInit, gpuIsAvailable}
+
+extern fun seen_gpu_init() r: Int
+extern fun seen_gpu_is_available() r: Int
+extern fun seen_gpu_buffer_create(size: Int, usage: Int) r: Int
+extern fun seen_gpu_buffer_destroy(handle: Int) r: Void
+extern fun seen_gpu_buffer_write_float_array(handle: Int, data: Array<Float>, count: Int) r: Int
+extern fun seen_gpu_buffer_read_float_array(handle: Int, data: Array<Float>, count: Int) r: Int
+extern fun seen_gpu_buffer_write_int_array(handle: Int, data: Array<Int>, count: Int) r: Int
+extern fun seen_gpu_buffer_read_int_array(handle: Int, data: Array<Int>, count: Int) r: Int
+extern fun seen_gpu_buffer_write_f32_scalar(handle: Int, value: Float) r: Int
+extern fun seen_gpu_buffer_write_i32_scalar(handle: Int, value: Int) r: Int
+extern fun seen_gpu_shader_load(path: String) r: Int
+extern fun seen_gpu_pipeline_create(shader: Int, bindingCount: Int) r: Int
+extern fun seen_gpu_pipeline_destroy(handle: Int) r: Void
+extern fun seen_gpu_dispatch_handles(pipeline: Int, gx: Int, gy: Int, gz: Int, h0: Int, h1: Int, h2: Int, h3: Int, h4: Int, h5: Int, h6: Int, h7: Int, count: Int) r: Int
+extern fun seen_gpu_device_wait_idle() r: Int
+
+var g_tensorGpuInitialized: Int = 0
+
+class TensorGpuFloatResult {
+    var ok: Int
+    var values: Array<Float>
+
+    static fun failure() r: TensorGpuFloatResult {
+        return TensorGpuFloatResult{ ok: 0, values: Array<Float>() }
+    }
+
+    static fun success(values: Array<Float>) r: TensorGpuFloatResult {
+        return TensorGpuFloatResult{ ok: 1, values: values }
+    }
+}
+
+class TensorGpuIntResult {
+    var ok: Int
+    var values: Array<Int>
+
+    static fun failure() r: TensorGpuIntResult {
+        return TensorGpuIntResult{ ok: 0, values: Array<Int>() }
+    }
+
+    static fun success(values: Array<Int>) r: TensorGpuIntResult {
+        return TensorGpuIntResult{ ok: 1, values: values }
+    }
+}
+
+fun tensorGpuBackendEnabled(name: String) r: Bool {
+    if name.length() != 3 {
+        return false
+    }
+    return name.charAt(0) == 103 and name.charAt(1) == 112 and name.charAt(2) == 117
+}
+
+fun tensorGpuEnsureInitialized() r: Bool {
+    if g_tensorGpuInitialized == 1 {
+        return true
+    }
+    if gpuIsAvailable() {
+        g_tensorGpuInitialized = 1
+        return true
+    }
+    if gpuInit() {
+        g_tensorGpuInitialized = 1
+        return true
+    }
+    return false
+}
+
+fun tensorGpuShaderPath(name: String) r: String {
+    return "target/trainer.shaders/" + name + ".comp.spv"
+}
+
+fun tensorGpuDivCeil(value: Int, divisor: Int) r: Int {
+    if value <= 0 {
+        return 0
+    }
+    return (value + divisor - 1) / divisor
+}
+
+fun tensorGpuFloatArray(count: Int, value: Float) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun tensorGpuIntArray(count: Int, value: Int) r: Array<Int> {
+    let out = Array<Int>()
+    var i = 0
+    while i < count {
+        out.push(value)
+        i = i + 1
+    }
+    return out
+}
+
+fun tensorGpuDestroyBuffer(handle: Int) r: Void {
+    if handle != 0 {
+        seen_gpu_buffer_destroy(handle)
+    }
+}
+
+fun tensorGpuFloatBuffer(values: Array<Float>) r: Int {
+    if not tensorGpuEnsureInitialized() {
+        return 0
+    }
+    let handle = seen_gpu_buffer_create(values.length() * 4, 0)
+    if handle == 0 {
+        return 0
+    }
+    if seen_gpu_buffer_write_float_array(handle, values, values.length()) != 1 {
+        tensorGpuDestroyBuffer(handle)
+        return 0
+    }
+    return handle
+}
+
+fun tensorGpuIntBuffer(values: Array<Int>) r: Int {
+    if not tensorGpuEnsureInitialized() {
+        return 0
+    }
+    let handle = seen_gpu_buffer_create(values.length() * 4, 0)
+    if handle == 0 {
+        return 0
+    }
+    if seen_gpu_buffer_write_int_array(handle, values, values.length()) != 1 {
+        tensorGpuDestroyBuffer(handle)
+        return 0
+    }
+    return handle
+}
+
+fun tensorGpuIntScalar(value: Int) r: Int {
+    if not tensorGpuEnsureInitialized() {
+        return 0
+    }
+    let handle = seen_gpu_buffer_create(4, 0)
+    if handle == 0 {
+        return 0
+    }
+    if seen_gpu_buffer_write_i32_scalar(handle, value) != 1 {
+        tensorGpuDestroyBuffer(handle)
+        return 0
+    }
+    return handle
+}
+
+fun tensorGpuFloatScalar(value: Float) r: Int {
+    if not tensorGpuEnsureInitialized() {
+        return 0
+    }
+    let handle = seen_gpu_buffer_create(4, 0)
+    if handle == 0 {
+        return 0
+    }
+    if seen_gpu_buffer_write_f32_scalar(handle, value) != 1 {
+        tensorGpuDestroyBuffer(handle)
+        return 0
+    }
+    return handle
+}
+
+fun tensorGpuRun(kernel: String, bindingCount: Int, gx: Int, gy: Int, gz: Int,
+    handles: Array<Int>) r: Bool {
+
+    if not tensorGpuEnsureInitialized() {
+        return false
+    }
+    if handles.length() != bindingCount or handles.length() > 8 {
+        return false
+    }
+    let shader = seen_gpu_shader_load(tensorGpuShaderPath(kernel))
+    if shader == 0 {
+        return false
+    }
+    let pipeline = seen_gpu_pipeline_create(shader, bindingCount)
+    if pipeline == 0 {
+        return false
+    }
+    var h0 = 0
+    var h1 = 0
+    var h2 = 0
+    var h3 = 0
+    var h4 = 0
+    var h5 = 0
+    var h6 = 0
+    var h7 = 0
+    if handles.length() > 0 { h0 = handles[0] }
+    if handles.length() > 1 { h1 = handles[1] }
+    if handles.length() > 2 { h2 = handles[2] }
+    if handles.length() > 3 { h3 = handles[3] }
+    if handles.length() > 4 { h4 = handles[4] }
+    if handles.length() > 5 { h5 = handles[5] }
+    if handles.length() > 6 { h6 = handles[6] }
+    if handles.length() > 7 { h7 = handles[7] }
+    let result = seen_gpu_dispatch_handles(pipeline, gx, gy, gz,
+        h0, h1, h2, h3, h4, h5, h6, h7, bindingCount)
+    if result == 1 {
+        let _ = seen_gpu_device_wait_idle()
+    }
+    seen_gpu_pipeline_destroy(pipeline)
+    return result == 1
+}
+
+fun tensorGpuBinary(a: Array<Float>, b: Array<Float>, rows: Int, cols: Int,
+    kernel: String) r: TensorGpuFloatResult {
+
+    let outCount = rows * cols
+    var count = a.length()
+    if b.length() < count { count = b.length() }
+    if outCount < count { count = outCount }
+    if count <= 0 {
+        return TensorGpuFloatResult.failure()
+    }
+
+    let outValues = tensorGpuFloatArray(outCount, 0.0)
+    let aBuf = tensorGpuFloatBuffer(a)
+    let bBuf = tensorGpuFloatBuffer(b)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let countBuf = tensorGpuIntScalar(count)
+    if aBuf == 0 or bBuf == 0 or outBuf == 0 or countBuf == 0 {
+        tensorGpuDestroyBuffer(aBuf)
+        tensorGpuDestroyBuffer(bBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(countBuf)
+        return TensorGpuFloatResult.failure()
+    }
+
+    let handles = Array<Int>()
+    handles.push(aBuf)
+    handles.push(bBuf)
+    handles.push(outBuf)
+    handles.push(countBuf)
+    let ok = tensorGpuRun(kernel, 4, tensorGpuDivCeil(count, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(aBuf)
+    tensorGpuDestroyBuffer(bBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(countBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuScale(values: Array<Float>, rows: Int, cols: Int,
+    factor: Float) r: TensorGpuFloatResult {
+
+    let outCount = rows * cols
+    var count = values.length()
+    if outCount < count { count = outCount }
+    if count <= 0 {
+        return TensorGpuFloatResult.failure()
+    }
+
+    let outValues = tensorGpuFloatArray(outCount, 0.0)
+    let inBuf = tensorGpuFloatBuffer(values)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let factorBuf = tensorGpuFloatScalar(factor)
+    let countBuf = tensorGpuIntScalar(count)
+    if inBuf == 0 or outBuf == 0 or factorBuf == 0 or countBuf == 0 {
+        tensorGpuDestroyBuffer(inBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(factorBuf)
+        tensorGpuDestroyBuffer(countBuf)
+        return TensorGpuFloatResult.failure()
+    }
+
+    let handles = Array<Int>()
+    handles.push(inBuf)
+    handles.push(outBuf)
+    handles.push(factorBuf)
+    handles.push(countBuf)
+    let ok = tensorGpuRun("tensorScale", 4, tensorGpuDivCeil(count, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(inBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(factorBuf)
+    tensorGpuDestroyBuffer(countBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuUnary(values: Array<Float>, rows: Int, cols: Int,
+    kernel: String) r: TensorGpuFloatResult {
+
+    let outCount = rows * cols
+    var count = values.length()
+    if outCount < count { count = outCount }
+    if count <= 0 {
+        return TensorGpuFloatResult.failure()
+    }
+
+    let outValues = tensorGpuFloatArray(outCount, 0.0)
+    let inBuf = tensorGpuFloatBuffer(values)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let countBuf = tensorGpuIntScalar(count)
+    if inBuf == 0 or outBuf == 0 or countBuf == 0 {
+        tensorGpuDestroyBuffer(inBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(countBuf)
+        return TensorGpuFloatResult.failure()
+    }
+
+    let handles = Array<Int>()
+    handles.push(inBuf)
+    handles.push(outBuf)
+    handles.push(countBuf)
+    let ok = tensorGpuRun(kernel, 3, tensorGpuDivCeil(count, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(inBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(countBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuMatmul(a: Array<Float>, b: Array<Float>, rows: Int, shared: Int,
+    cols: Int) r: TensorGpuFloatResult {
+
+    if rows <= 0 or shared <= 0 or cols <= 0 {
+        return TensorGpuFloatResult.failure()
+    }
+    if a.length() < rows * shared or b.length() < shared * cols {
+        return TensorGpuFloatResult.failure()
+    }
+
+    let outValues = tensorGpuFloatArray(rows * cols, 0.0)
+    let aBuf = tensorGpuFloatBuffer(a)
+    let bBuf = tensorGpuFloatBuffer(b)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let sharedBuf = tensorGpuIntScalar(shared)
+    let colsBuf = tensorGpuIntScalar(cols)
+    if aBuf == 0 or bBuf == 0 or outBuf == 0 or rowsBuf == 0 or sharedBuf == 0 or colsBuf == 0 {
+        tensorGpuDestroyBuffer(aBuf)
+        tensorGpuDestroyBuffer(bBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(sharedBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        return TensorGpuFloatResult.failure()
+    }
+
+    let handles = Array<Int>()
+    handles.push(aBuf)
+    handles.push(bBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(sharedBuf)
+    handles.push(colsBuf)
+    let ok = tensorGpuRun("tensorMatmul", 6, tensorGpuDivCeil(cols, 16), tensorGpuDivCeil(rows, 16), 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(aBuf)
+    tensorGpuDestroyBuffer(bBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(sharedBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuRowsKernel(values: Array<Float>, rows: Int, cols: Int,
+    kernel: String) r: TensorGpuFloatResult {
+
+    if rows <= 0 or cols <= 0 or values.length() < rows * cols {
+        return TensorGpuFloatResult.failure()
+    }
+    let outValues = tensorGpuFloatArray(rows * cols, 0.0)
+    let inBuf = tensorGpuFloatBuffer(values)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let colsBuf = tensorGpuIntScalar(cols)
+    if inBuf == 0 or outBuf == 0 or rowsBuf == 0 or colsBuf == 0 {
+        tensorGpuDestroyBuffer(inBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        return TensorGpuFloatResult.failure()
+    }
+
+    let handles = Array<Int>()
+    handles.push(inBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(colsBuf)
+    let ok = tensorGpuRun(kernel, 4, tensorGpuDivCeil(rows, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(inBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuRowSums(values: Array<Float>, rows: Int, cols: Int) r: TensorGpuFloatResult {
+    if rows <= 0 or cols <= 0 or values.length() < rows * cols {
+        return TensorGpuFloatResult.failure()
+    }
+    let outValues = tensorGpuFloatArray(rows, 0.0)
+    let inBuf = tensorGpuFloatBuffer(values)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let colsBuf = tensorGpuIntScalar(cols)
+    if inBuf == 0 or outBuf == 0 or rowsBuf == 0 or colsBuf == 0 {
+        tensorGpuDestroyBuffer(inBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        return TensorGpuFloatResult.failure()
+    }
+    let handles = Array<Int>()
+    handles.push(inBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(colsBuf)
+    let ok = tensorGpuRun("tensorRowSums", 4, tensorGpuDivCeil(rows, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(inBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuLayerNormRows(values: Array<Float>, rows: Int, cols: Int,
+    epsilon: Float) r: TensorGpuFloatResult {
+
+    if rows <= 0 or cols <= 0 or values.length() < rows * cols {
+        return TensorGpuFloatResult.failure()
+    }
+    let outValues = tensorGpuFloatArray(rows * cols, 0.0)
+    let inBuf = tensorGpuFloatBuffer(values)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let colsBuf = tensorGpuIntScalar(cols)
+    let epsilonBuf = tensorGpuFloatScalar(epsilon)
+    if inBuf == 0 or outBuf == 0 or rowsBuf == 0 or colsBuf == 0 or epsilonBuf == 0 {
+        tensorGpuDestroyBuffer(inBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        tensorGpuDestroyBuffer(epsilonBuf)
+        return TensorGpuFloatResult.failure()
+    }
+    let handles = Array<Int>()
+    handles.push(inBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(colsBuf)
+    handles.push(epsilonBuf)
+    let ok = tensorGpuRun("tensorLayerNormRows", 5, tensorGpuDivCeil(rows, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(inBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    tensorGpuDestroyBuffer(epsilonBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuMeanPool(values: Array<Float>, mask: Array<Int>, rows: Int,
+    cols: Int) r: TensorGpuFloatResult {
+
+    if rows <= 0 or cols <= 0 or values.length() < rows * cols or mask.length() < rows {
+        return TensorGpuFloatResult.failure()
+    }
+    let outValues = tensorGpuFloatArray(cols, 0.0)
+    let inBuf = tensorGpuFloatBuffer(values)
+    let maskBuf = tensorGpuIntBuffer(mask)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let colsBuf = tensorGpuIntScalar(cols)
+    if inBuf == 0 or maskBuf == 0 or outBuf == 0 or rowsBuf == 0 or colsBuf == 0 {
+        tensorGpuDestroyBuffer(inBuf)
+        tensorGpuDestroyBuffer(maskBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        return TensorGpuFloatResult.failure()
+    }
+    let handles = Array<Int>()
+    handles.push(inBuf)
+    handles.push(maskBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(colsBuf)
+    let ok = tensorGpuRun("tensorMeanPool", 5, tensorGpuDivCeil(cols, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(inBuf)
+    tensorGpuDestroyBuffer(maskBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuCosineRows(a: Array<Float>, b: Array<Float>, rows: Int,
+    cols: Int) r: TensorGpuFloatResult {
+
+    if rows <= 0 or cols <= 0 or a.length() < rows * cols or b.length() < rows * cols {
+        return TensorGpuFloatResult.failure()
+    }
+    let outValues = tensorGpuFloatArray(rows, 0.0)
+    let aBuf = tensorGpuFloatBuffer(a)
+    let bBuf = tensorGpuFloatBuffer(b)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let colsBuf = tensorGpuIntScalar(cols)
+    if aBuf == 0 or bBuf == 0 or outBuf == 0 or rowsBuf == 0 or colsBuf == 0 {
+        tensorGpuDestroyBuffer(aBuf)
+        tensorGpuDestroyBuffer(bBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        return TensorGpuFloatResult.failure()
+    }
+    let handles = Array<Int>()
+    handles.push(aBuf)
+    handles.push(bBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(colsBuf)
+    let ok = tensorGpuRun("tensorCosineRows", 5, tensorGpuDivCeil(rows, 256), 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(aBuf)
+    tensorGpuDestroyBuffer(bBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuTopKInnerProductIndices(query: Array<Float>, candidates: Array<Float>,
+    rows: Int, cols: Int, k: Int) r: TensorGpuIntResult {
+
+    if rows <= 0 or cols <= 0 or k <= 0 or query.length() < cols or candidates.length() < rows * cols {
+        return TensorGpuIntResult.failure()
+    }
+    var keep = k
+    if keep > rows { keep = rows }
+    let indices = tensorGpuIntArray(keep, -1)
+    let scores = tensorGpuFloatArray(keep, -999999.0)
+    let queryBuf = tensorGpuFloatBuffer(query)
+    let candidatesBuf = tensorGpuFloatBuffer(candidates)
+    let indicesBuf = tensorGpuIntBuffer(indices)
+    let scoresBuf = tensorGpuFloatBuffer(scores)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let colsBuf = tensorGpuIntScalar(cols)
+    let kBuf = tensorGpuIntScalar(keep)
+    if queryBuf == 0 or candidatesBuf == 0 or indicesBuf == 0 or scoresBuf == 0 or rowsBuf == 0 or colsBuf == 0 or kBuf == 0 {
+        tensorGpuDestroyBuffer(queryBuf)
+        tensorGpuDestroyBuffer(candidatesBuf)
+        tensorGpuDestroyBuffer(indicesBuf)
+        tensorGpuDestroyBuffer(scoresBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        tensorGpuDestroyBuffer(kBuf)
+        return TensorGpuIntResult.failure()
+    }
+    let handles = Array<Int>()
+    handles.push(queryBuf)
+    handles.push(candidatesBuf)
+    handles.push(indicesBuf)
+    handles.push(scoresBuf)
+    handles.push(rowsBuf)
+    handles.push(colsBuf)
+    handles.push(kBuf)
+    let ok = tensorGpuRun("tensorTopKInnerProduct", 7, 1, 1, 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_int_array(indicesBuf, indices, indices.length())
+    }
+    tensorGpuDestroyBuffer(queryBuf)
+    tensorGpuDestroyBuffer(candidatesBuf)
+    tensorGpuDestroyBuffer(indicesBuf)
+    tensorGpuDestroyBuffer(scoresBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    tensorGpuDestroyBuffer(kBuf)
+    if ok {
+        return TensorGpuIntResult.success(indices)
+    }
+    return TensorGpuIntResult.failure()
+}

@@ -1,0 +1,69 @@
+import trainer.io_utils.{writeAtomicText}
+import trainer.jsonl.{parseTripletLine, tripletToJson}
+import trainer.config.{readConfig}
+import trainer.source_adapters.{readSourcePairs}
+import trainer.tokenizer.{Tokenizer}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun main() -> Int {
+    let line = "{\"query_text\":\"q\",\"positive_chunk_text\":\"p\",\"hard_negative_chunk_text\":\"n\",\"domain\":\"d\",\"source\":\"s\"}"
+    let item = parseTripletLine(line)
+    expect(item.queryText == "q", "query parse")
+    expect(item.positiveChunkText == "p", "positive parse")
+    expect(item.hardNegativeChunkText == "n", "negative parse")
+    expect(tripletToJson(item) == line, "triplet json round trip")
+
+    let tokDir = "/tmp/seen_trainer_tokenizer"
+    writeAtomicText(tokDir + "/tokenizer.json",
+        "{\"model\":{\"vocab\":{\"[PAD]\":0,\"[UNK]\":1,\"[CLS]\":2,\"[SEP]\":3,\"[MASK]\":4,\"hello\":5,\"world\":6,\"play\":7,\"##ing\":8}}}")
+    writeAtomicText(tokDir + "/tokenizer_config.json",
+        "{\"do_lower_case\":true,\"cls_token\":\"[CLS]\",\"sep_token\":\"[SEP]\",\"pad_token\":\"[PAD]\",\"unk_token\":\"[UNK]\",\"mask_token\":\"[MASK]\"}")
+    let tokenizer = Tokenizer.load(tokDir + "/tokenizer.json", 5)
+    expect(tokenizer.loaded, "tokenizer loaded")
+    expect(tokenizer.vocabSignal == 9, "tokenizer vocab parsed")
+    let ids = tokenizer.tokenIds("Hello missing world")
+    expect(ids[0] == 2, "cls id")
+    expect(ids[1] == 5, "known lowercased token id")
+    expect(ids[2] == 1, "unknown token id")
+    expect(ids[3] == 6, "known token id")
+    expect(ids[4] == 3, "sep id")
+    let mask = tokenizer.attentionMask("Hello")
+    expect(mask[0] == 1 and mask[1] == 1 and mask[2] == 1, "attention mask content")
+    expect(mask[3] == 0 and mask[4] == 0, "attention mask padding")
+    let pieceIds = tokenizer.tokenIds("playing")
+    expect(pieceIds[1] == 7 and pieceIds[2] == 8, "wordpiece ids")
+    expect(pieceIds[3] == 3 and pieceIds[4] == 0, "wordpiece sep and pad")
+    let batchTexts = Array<String>()
+    batchTexts.push("Hello")
+    batchTexts.push("world")
+    let batch = tokenizer.batchTokenize(batchTexts)
+    expect(batch.rows == 2 and batch.cols == 5, "batch tokenization shape")
+    expect(batch.ids.length() == 10 and batch.masks.length() == 10, "batch tokenization flat buffers")
+
+    let sourceDir = "/tmp/seen_trainer_source_adapter"
+    writeAtomicText(sourceDir + "/pairs.csv",
+        "instruction,response,domain,source\n"
+        + "\"How to reset?\",\"Use the reset policy\",support,kb\n"
+        + "x,y,tiny,tiny\n")
+    writeAtomicText(sourceDir + "/config.json",
+        "{\"source_data_path\":\"" + sourceDir + "/pairs.csv\","
+        + "\"source_format\":\"csv\","
+        + "\"source_query_column\":\"instruction\","
+        + "\"source_positive_column\":\"response\","
+        + "\"min_text_length\":3,"
+        + "\"learning_rate\":2e-5}")
+    let cfg = readConfig(sourceDir + "/config.json")
+    expect(cfg.learningRate > 0.000019 and cfg.learningRate < 0.000021, "scientific config float")
+    let pairs = readSourcePairs(cfg)
+    expect(pairs.length() == 1, "csv source adapter filter")
+    expect(pairs[0].queryText == "How to reset?", "csv query column")
+    expect(pairs[0].positiveChunkText == "Use the reset policy", "csv positive column")
+    expect(pairs[0].domain == "support" and pairs[0].source == "kb", "csv metadata columns")
+    println("PASS test_jsonl")
+    return 0
+}

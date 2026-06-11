@@ -1,0 +1,22 @@
+fun escapeJsonString(input: String) r: String {
+    var out = "\""
+    var i = 0
+    while i < input.length() {
+        let ch = input.charAt(i)
+        if ch == 34 {
+            out = out + "\\\""
+        } else if ch == 92 {
+            out = out + "\\\\"
+        } else if ch == 10 {
+            out = out + "\\n"
+        } else if ch == 13 {
+            out = out + "\\r"
+        } else if ch == 9 {
+            out = out + "\\t"
+        } else {
+            out = out + String.fromCharCode(ch)
+        }
+        i = i + 1
+    }
+    return out + "\""
+}

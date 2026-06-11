@@ -1,0 +1,67 @@
+import trainer.embedding_delta.{MiniLMEmbeddingDeltas, miniLMEmbeddingDeltasPath}
+import trainer.io.file.{exists}
+
+fun expect(condition: Bool, message: String) r: Void {
+    if not condition {
+        abort(message)
+    }
+}
+
+fun main() -> Int {
+    let delta = MiniLMEmbeddingDeltas.identity(4, 32, 8, 2)
+    let wordRows = Array<Int>()
+    wordRows.push(5)
+    let wordGrad = Array<Float>()
+    wordGrad.push(0.1)
+    wordGrad.push(0.0)
+    wordGrad.push(-0.1)
+    wordGrad.push(0.2)
+    let positionRows = Array<Int>()
+    positionRows.push(1)
+    let positionGrad = Array<Float>()
+    positionGrad.push(0.0)
+    positionGrad.push(0.1)
+    positionGrad.push(0.0)
+    positionGrad.push(-0.1)
+    let typeRows = Array<Int>()
+    typeRows.push(0)
+    let typeGrad = Array<Float>()
+    typeGrad.push(0.05)
+    typeGrad.push(0.05)
+    typeGrad.push(0.0)
+    typeGrad.push(0.0)
+    let lnW = Array<Float>()
+    lnW.push(0.01)
+    lnW.push(0.02)
+    lnW.push(0.03)
+    lnW.push(0.04)
+    let lnB = Array<Float>()
+    lnB.push(-0.01)
+    lnB.push(0.0)
+    lnB.push(0.01)
+    lnB.push(0.02)
+    expect(delta.applyGradients(wordRows, wordGrad, positionRows, positionGrad, typeRows, typeGrad, lnW, lnB, 0.01, 0.0, 1.0), "apply gradients")
+    expect(delta.wordRowIds.length() == 1 and delta.wordRowIds[0] == 5, "word row created")
+    expect(delta.positionRowIds.length() == 1 and delta.positionRowIds[0] == 1, "position row created")
+    expect(delta.tokenTypeRowIds.length() == 1 and delta.tokenTypeRowIds[0] == 0, "token type row created")
+    expect(delta.wordDeltaAt(5, 0) < 0.0, "word delta moved opposite grad")
+    expect(delta.positionDeltaAt(1, 1) < 0.0, "position delta moved opposite grad")
+    expect(delta.tokenTypeDeltaAt(0, 0) < 0.0, "token type delta moved opposite grad")
+    let weight = Array<Float>()
+    weight.push(1.0)
+    weight.push(1.0)
+    weight.push(1.0)
+    weight.push(1.0)
+    let effective = delta.effectiveLayerNormWeight(weight)
+    expect(effective[0] < 1.0, "layernorm weight delta applied")
+
+    let path = miniLMEmbeddingDeltasPath("/tmp/seen_trainer_embedding_delta")
+    expect(delta.save(path), "save embedding deltas")
+    expect(exists(path), "embedding delta file exists")
+    let loaded = MiniLMEmbeddingDeltas.load(path, 4, 32, 8, 2)
+    expect(loaded.loaded, "embedding deltas load")
+    expect(loaded.wordRowIds.length() == 1 and loaded.wordRowIds[0] == 5, "loaded word row")
+    expect(loaded.wordDeltaAt(5, 0) < 0.0, "loaded word delta")
+    println("PASS test_embedding_delta")
+    return 0
+}

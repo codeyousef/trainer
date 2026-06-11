@@ -1,0 +1,183 @@
+import config.{TrainerConfig}
+import encoder.{Encoder}
+import io.file.{exists}
+import io_utils.{writeAtomicText}
+import jsonl.{TripletExample, readTriplets}
+import math_utils.{cosine, percentile, deterministicShuffleIndices}
+
+class DomainThreshold {
+    var domain: String
+    var threshold: Float
+    var count: Int
+
+    static fun new(domain: String, threshold: Float, count: Int) r: DomainThreshold {
+        return DomainThreshold{ domain: domain, threshold: threshold, count: count }
+    }
+}
+
+fun calibrateThresholds(cfg: TrainerConfig, encoder: Encoder) r: Array<DomainThreshold> {
+    let allItems = readCalibrationDataset(cfg)
+    let items = calibrationSplit(allItems, cfg.seed)
+    let domains = uniqueDomains(allItems)
+    let thresholds = Array<DomainThreshold>()
+    var d = 0
+    while d < domains.length() {
+        let scores = Array<Float>()
+        var i = 0
+        while i < items.length() {
+            if items[i].domain == domains[d] {
+                let q = encoder.encode(items[i].queryText)
+                let p = encoder.encode(items[i].positiveChunkText)
+                scores.push(cosine(q, p))
+            }
+            i = i + 1
+        }
+        thresholds.push(DomainThreshold.new(
+            domains[d],
+            percentile(scores, cfg.thresholdPercentile),
+            scores.length()
+        ))
+        d = d + 1
+    }
+    writeAtomicText(cfg.thresholdsPath, thresholdsJson(thresholds))
+    return thresholds
+}
+
+fun readCalibrationDataset(cfg: TrainerConfig) r: Array<TripletExample> {
+    if exists(cfg.minedJsonlPath) {
+        return readTriplets(cfg.minedJsonlPath)
+    }
+    if cfg.trainJsonlPath.length() > 0 and exists(cfg.trainJsonlPath) {
+        return readTriplets(cfg.trainJsonlPath)
+    }
+    if cfg.testJsonlPath.length() > 0 and exists(cfg.testJsonlPath) {
+        return readTriplets(cfg.testJsonlPath)
+    }
+    return Array<TripletExample>()
+}
+
+fun calibrationSplit(items: Array<TripletExample>, seed: Int) r: Array<TripletExample> {
+    let out = Array<TripletExample>()
+    let domains = uniqueDomains(items)
+    var d = 0
+    while d < domains.length() {
+        let group = domainItems(items, domains[d])
+        if group.length() <= 1 {
+            appendTriplets(out, group)
+        } else {
+            let order = deterministicShuffleIndices(group.length(), seed + d)
+            let testCount = domainTestCount(group.length())
+            var i = testCount
+            while i < order.length() {
+                out.push(group[order[i]])
+                i = i + 1
+            }
+        }
+        d = d + 1
+    }
+    return out
+}
+
+fun holdoutSplit(items: Array<TripletExample>, seed: Int) r: Array<TripletExample> {
+    let out = Array<TripletExample>()
+    let domains = uniqueDomains(items)
+    var d = 0
+    while d < domains.length() {
+        let group = domainItems(items, domains[d])
+        if group.length() <= 1 {
+            appendTriplets(out, group)
+        } else {
+            let order = deterministicShuffleIndices(group.length(), seed + d)
+            let testCount = domainTestCount(group.length())
+            var i = 0
+            while i < testCount {
+                out.push(group[order[i]])
+                i = i + 1
+            }
+        }
+        d = d + 1
+    }
+    return out
+}
+
+fun domainTestCount(count: Int) r: Int {
+    if count <= 1 {
+        return count
+    }
+    var testCount = count / 5
+    if testCount < 1 {
+        testCount = 1
+    }
+    if testCount >= count {
+        testCount = count - 1
+    }
+    return testCount
+}
+
+fun domainItems(items: Array<TripletExample>, domain: String) r: Array<TripletExample> {
+    let out = Array<TripletExample>()
+    var i = 0
+    while i < items.length() {
+        let itemDomain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
+        if itemDomain == domain {
+            out.push(items[i])
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun appendTriplets(target: Array<TripletExample>, source: Array<TripletExample>) r: Void {
+    var i = 0
+    while i < source.length() {
+        target.push(source[i])
+        i = i + 1
+    }
+}
+
+fun thresholdFor(thresholds: Array<DomainThreshold>, domain: String) r: Float {
+    var i = 0
+    while i < thresholds.length() {
+        if thresholds[i].domain == domain {
+            return thresholds[i].threshold
+        }
+        i = i + 1
+    }
+    return 0.0
+}
+
+fun uniqueDomains(items: Array<TripletExample>) r: Array<String> {
+    let domains = Array<String>()
+    var i = 0
+    while i < items.length() {
+        let domain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
+        var seen = false
+        var j = 0
+        while j < domains.length() {
+            if domains[j] == domain {
+                seen = true
+            }
+            j = j + 1
+        }
+        if not seen {
+            domains.push(domain)
+        }
+        i = i + 1
+    }
+    return domains
+}
+
+fun thresholdsJson(thresholds: Array<DomainThreshold>) r: String {
+    var out = "{\n"
+    var i = 0
+    while i < thresholds.length() {
+        out = out + "  \"" + thresholds[i].domain + "\": " + thresholds[i].threshold.toString()
+        if i + 1 < thresholds.length() {
+            out = out + ","
+        }
+        out = out + "\n"
+        i = i + 1
+    }
+    out = out + "}\n"
+    return out
+}

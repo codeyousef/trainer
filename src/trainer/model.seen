@@ -1,0 +1,204 @@
+import io.file.{exists, readText}
+import adapter.{ProjectionAdapter}
+import config.{TrainerConfig}
+import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas}
+import embedding_delta.{MiniLMEmbeddingDeltas, miniLMEmbeddingDeltasPath}
+import encoder.{Encoder}
+import minilm_embeddings.{MiniLMEmbeddings}
+import minilm_weights.{MiniLMWeightMap}
+import safetensors.{SafeTensorInfo}
+import tokenizer.{Tokenizer}
+
+class ModelBundle {
+    var tokenizer: Tokenizer
+    var encoder: Encoder
+    var weights: SafeTensorInfo
+    var hiddenSize: Int
+    var layers: Int
+    var attentionHeads: Int
+    var intermediateSize: Int
+    var weightMap: MiniLMWeightMap
+
+    static fun load(cfg: TrainerConfig) r: ModelBundle {
+        let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
+        let tokenizer = Tokenizer.load(cfg.tokenizerPath(), cfg.maxSequenceLength)
+        let weights = SafeTensorInfo.inspect(cfg.modelWeightsPath())
+        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements)
+        var minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
+        var minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
+        var minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)
+        var minilmQueryDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+        var minilmKeyDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+        var minilmValueDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+        var minilmAttentionDenseDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+        var minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
+        var minilmLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
+        var minilmLayerDeltas = MiniLMLayerDeltas.identity(modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+        var minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.identity(modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
+        if embeddings.loaded {
+            minilmDenseAdapter = DenseLoRAAdapter.load(cfg.minilmDenseAdapterPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
+            minilmDenseDelta = DenseDeltaAdapter.load(cfg.minilmDenseDeltaPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
+            minilmIntermediateDelta = DenseDeltaAdapter.load(cfg.minilmIntermediateDeltaPath(), modelMeta.hiddenSize, modelMeta.intermediateSize)
+            minilmQueryDelta = DenseDeltaAdapter.load(cfg.minilmQueryDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmKeyDelta = DenseDeltaAdapter.load(cfg.minilmKeyDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmValueDelta = DenseDeltaAdapter.load(cfg.minilmValueDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmAttentionDenseDelta = DenseDeltaAdapter.load(cfg.minilmAttentionDenseDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmAttentionLayerNormDeltaPath(), modelMeta.hiddenSize)
+            minilmLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmLayerNormDeltaPath(), modelMeta.hiddenSize)
+            minilmLayerDeltas = MiniLMLayerDeltas.load(cfg.outputModelDir, modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+            minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.load(miniLMEmbeddingDeltasPath(cfg.outputModelDir), modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
+        }
+        let minilmLayerAdapter = ProjectionAdapter.load(cfg.minilmLayerAdapterPath(), modelMeta.hiddenSize)
+        let layerAdapter = ProjectionAdapter.load(cfg.layerAdapterPath(), modelMeta.hiddenSize)
+        let adapter = ProjectionAdapter.load(cfg.adapterPath(), modelMeta.hiddenSize)
+        let encoder = Encoder.withMiniLMEmbeddingsAndAdapter(tokenizer, modelMeta.hiddenSize, embeddings, minilmDenseAdapter, minilmDenseDelta, minilmIntermediateDelta, minilmQueryDelta, minilmKeyDelta, minilmValueDelta, minilmAttentionDenseDelta, minilmAttentionLayerNormDelta, minilmLayerNormDelta, minilmLayerDeltas, minilmEmbeddingDeltas, cfg.minilmDenseAdapterLayer, minilmLayerAdapter, cfg.minilmAdapterLayer, layerAdapter, adapter)
+        let weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
+        return ModelBundle{
+            tokenizer: tokenizer,
+            encoder: encoder,
+            weights: weights,
+            hiddenSize: modelMeta.hiddenSize,
+            layers: modelMeta.layers,
+            attentionHeads: modelMeta.attentionHeads,
+            intermediateSize: modelMeta.intermediateSize,
+            weightMap: weightMap
+        }
+    }
+
+    fun summary() r: String {
+        var out = "hidden="
+        out = out + this.hiddenSize.toString()
+        out = out + " layers="
+        out = out + this.layers.toString()
+        out = out + " heads="
+        out = out + this.attentionHeads.toString()
+        out = out + " tokenizer_loaded="
+        out = out + this.tokenizer.loaded.toString()
+        out = out + " tokenizer_config_loaded="
+        out = out + this.tokenizer.tokenizerConfigLoaded.toString()
+        out = out + " vocab_signal="
+        out = out + this.tokenizer.vocabSignal.toString()
+        out = out + " weights_present="
+        out = out + this.weights.existsFlag.toString()
+        out = out + " weights_valid="
+        out = out + this.weights.validHeader.toString()
+        out = out + " tensors="
+        out = out + this.weights.tensorCount.toString()
+        let weightMapSummary = this.weightMap.summary()
+        out = out + " "
+        out = out + weightMapSummary
+        let encoderSummary = this.encoder.modelEmbeddingSummary()
+        out = out + " "
+        out = out + encoderSummary
+        return out
+    }
+}
+
+class BertConfigMeta {
+    var hiddenSize: Int
+    var layers: Int
+    var attentionHeads: Int
+    var intermediateSize: Int
+
+    static fun defaults(hiddenSize: Int) r: BertConfigMeta {
+        return BertConfigMeta{
+            hiddenSize: hiddenSize,
+            layers: 12,
+            attentionHeads: 12,
+            intermediateSize: 1536
+        }
+    }
+}
+
+fun readBertConfig(path: String, fallbackHidden: Int) r: BertConfigMeta {
+    let meta = BertConfigMeta.defaults(fallbackHidden)
+    if not exists(path) {
+        return meta
+    }
+    let text = readText(path)
+    meta.hiddenSize = modelConfigInt(text, "hidden_size", meta.hiddenSize)
+    meta.layers = modelConfigInt(text, "num_hidden_layers", meta.layers)
+    meta.attentionHeads = modelConfigInt(text, "num_attention_heads", meta.attentionHeads)
+    meta.intermediateSize = modelConfigInt(text, "intermediate_size", meta.intermediateSize)
+    return meta
+}
+
+fun modelConfigInt(text: String, key: String, fallback: Int) r: Int {
+    let pos = modelFindKeyColon(text, key)
+    if pos < 0 {
+        return fallback
+    }
+    var i = modelSkipWs(text, pos)
+    let start = i
+    if i < text.length() and text.charAt(i) == 45 {
+        i = i + 1
+    }
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        i = i + 1
+    }
+    if i <= start {
+        return fallback
+    }
+    return modelParseInt(text.substring(start, i))
+}
+
+fun modelFindKeyColon(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if modelMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun modelMatchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun modelSkipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+fun modelParseInt(text: String) r: Int {
+    var sign = 1
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1
+        i = 1
+    }
+    var value = 0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10 + (text.charAt(i) - 48)
+        i = i + 1
+    }
+    return value * sign
+}

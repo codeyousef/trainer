@@ -1,0 +1,221 @@
+import io.file.{readText}
+import json.builder.{escapeJsonString}
+import str.string.{split, trim}
+
+class TripletExample {
+    var queryText: String
+    var positiveChunkText: String
+    var hardNegativeChunkText: String
+    var domain: String
+    var source: String
+
+    static fun new(
+        queryText: String,
+        positiveChunkText: String,
+        hardNegativeChunkText: String,
+        domain: String,
+        source: String
+    ) r: TripletExample {
+        return TripletExample{
+            queryText: queryText,
+            positiveChunkText: positiveChunkText,
+            hardNegativeChunkText: hardNegativeChunkText,
+            domain: domain,
+            source: source
+        }
+    }
+}
+
+class PairExample {
+    var queryText: String
+    var positiveChunkText: String
+    var domain: String
+    var source: String
+
+    static fun new(queryText: String, positiveChunkText: String, domain: String, source: String) r: PairExample {
+        return PairExample{
+            queryText: queryText,
+            positiveChunkText: positiveChunkText,
+            domain: domain,
+            source: source
+        }
+    }
+}
+
+fun tripletToJson(example: TripletExample) r: String {
+    return "{"
+        + "\"query_text\":" + escapeJsonString(example.queryText) + ","
+        + "\"positive_chunk_text\":" + escapeJsonString(example.positiveChunkText) + ","
+        + "\"hard_negative_chunk_text\":" + escapeJsonString(example.hardNegativeChunkText) + ","
+        + "\"domain\":" + escapeJsonString(example.domain) + ","
+        + "\"source\":" + escapeJsonString(example.source)
+        + "}"
+}
+
+fun parseTripletLine(line: String) r: TripletExample {
+    let q = rowString(line, "query_text")
+    let p = rowString(line, "positive_chunk_text")
+    var n = rowString(line, "hard_negative_chunk_text")
+    if n.length() == 0 {
+        n = rowString(line, "negative_chunk_text")
+    }
+    let d = rowString(line, "domain")
+    let s = rowString(line, "source")
+    return TripletExample.new(q, p, n, d, s)
+}
+
+fun parsePairLine(line: String) r: PairExample {
+    var q = rowString(line, "query_text")
+    if q.length() == 0 {
+        q = rowString(line, "query")
+    }
+    if q.length() == 0 {
+        q = rowString(line, "question")
+    }
+    if q.length() == 0 {
+        q = rowString(line, "instruction")
+    }
+
+    var p = rowString(line, "positive_chunk_text")
+    if p.length() == 0 {
+        p = rowString(line, "positive")
+    }
+    if p.length() == 0 {
+        p = rowString(line, "answer")
+    }
+    if p.length() == 0 {
+        p = rowString(line, "response")
+    }
+    if p.length() == 0 {
+        p = rowString(line, "description")
+    }
+
+    let d = rowString(line, "domain")
+    let s = rowString(line, "source")
+    return PairExample.new(q, p, d, s)
+}
+
+fun readTriplets(path: String) r: Array<TripletExample> {
+    let content = readText(path)
+    let lines = split(content, "\n")
+    let items = Array<TripletExample>()
+    var i = 0
+    while i < lines.length() {
+        let line = trim(lines[i])
+        if line.length() > 0 {
+            let item = parseTripletLine(line)
+            if item.queryText.length() > 0 and item.positiveChunkText.length() > 0 {
+                items.push(item)
+            }
+        }
+        i = i + 1
+    }
+    return items
+}
+
+fun readPairs(path: String) r: Array<PairExample> {
+    let content = readText(path)
+    let lines = split(content, "\n")
+    let items = Array<PairExample>()
+    var i = 0
+    while i < lines.length() {
+        let line = trim(lines[i])
+        if line.length() > 0 {
+            let pair = parsePairLine(line)
+            if pair.queryText.length() > 1 and pair.positiveChunkText.length() > 1 {
+                items.push(pair)
+            }
+        }
+        i = i + 1
+    }
+    return items
+}
+
+fun tripletsToJsonl(items: Array<TripletExample>) r: String {
+    var output = ""
+    var i = 0
+    while i < items.length() {
+        output = output + tripletToJson(items[i]) + "\n"
+        i = i + 1
+    }
+    return output
+}
+
+fun rowString(text: String, key: String) r: String {
+    let pos = rowKeyColon(text, key)
+    if pos < 0 {
+        return ""
+    }
+    var i = rowSkipWs(text, pos)
+    if i >= text.length() or text.charAt(i) != 34 {
+        return ""
+    }
+    i = i + 1
+    var out = ""
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 34 {
+            return out
+        }
+        if ch == 92 {
+            i = i + 1
+            if i < text.length() {
+                let esc = text.charAt(i)
+                if esc == 110 { out = out + "\n" }
+                else if esc == 114 { out = out + "\r" }
+                else if esc == 116 { out = out + "\t" }
+                else { out = out + String.fromCharCode(esc) }
+            }
+        } else {
+            out = out + String.fromCharCode(ch)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun rowKeyColon(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if rowMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun rowMatchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun rowSkipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}

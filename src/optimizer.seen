@@ -1,0 +1,66 @@
+import math.math.{sqrt}
+import tensor.{Parameter}
+
+class AdamW {
+    var learningRate: Float
+    var weightDecay: Float
+    var beta1: Float
+    var beta2: Float
+    var eps: Float
+    var stepCount: Int
+
+    static fun new(learningRate: Float, weightDecay: Float) r: AdamW {
+        return AdamW{
+            learningRate: learningRate,
+            weightDecay: weightDecay,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 0.00000001,
+            stepCount: 0
+        }
+    }
+
+    fun step(param: Parameter) r: Void {
+        this.stepCount = this.stepCount + 1
+        var i = 0
+        while i < param.value.length() {
+            let g = param.grad[i]
+            param.m[i] = this.beta1 * param.m[i] + (1.0 - this.beta1) * g
+            param.v[i] = this.beta2 * param.v[i] + (1.0 - this.beta2) * g * g
+            let mHat = param.m[i] / (1.0 - powInt(this.beta1, this.stepCount))
+            let vHat = param.v[i] / (1.0 - powInt(this.beta2, this.stepCount))
+            param.value[i] = param.value[i] - this.learningRate * this.weightDecay * param.value[i]
+            param.value[i] = param.value[i] - this.learningRate * mHat / (sqrt(vHat) + this.eps)
+            i = i + 1
+        }
+    }
+}
+
+fun powInt(base: Float, exponent: Int) r: Float {
+    var out = 1.0
+    var i = 0
+    while i < exponent {
+        out = out * base
+        i = i + 1
+    }
+    return out
+}
+
+fun clipGlobalNorm(param: Parameter, maxNorm: Float) r: Float {
+    var total = 0.0
+    var i = 0
+    while i < param.grad.length() {
+        total = total + param.grad[i] * param.grad[i]
+        i = i + 1
+    }
+    let norm = sqrt(total)
+    if norm > maxNorm and norm > 0.0 {
+        let scale = maxNorm / norm
+        i = 0
+        while i < param.grad.length() {
+            param.grad[i] = param.grad[i] * scale
+            i = i + 1
+        }
+    }
+    return norm
+}

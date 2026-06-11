@@ -1,0 +1,1083 @@
+import dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
+import embedding_delta.{MiniLMEmbeddingDeltas}
+import io.file.{copyFileBytes, exists, readBytesPrefix, readBytesRange, size, writeBytes, writeBytesAt}
+import io_utils.{writeAtomicText}
+import json.builder.{escapeJsonString}
+import math.math.{floor}
+import tensor.{Tensor}
+
+class SafeTensorEntry {
+    var name: String
+    var dtype: String
+    var shape: Array<Int>
+    var dataStart: Int
+    var dataEnd: Int
+
+    static fun new(name: String, dtype: String, shape: Array<Int>, dataStart: Int, dataEnd: Int) r: SafeTensorEntry {
+        return SafeTensorEntry{
+            name: name,
+            dtype: dtype,
+            shape: shape,
+            dataStart: dataStart,
+            dataEnd: dataEnd
+        }
+    }
+
+    fun elementCount() r: Int {
+        if this.shape.length() == 0 {
+            return 0
+        }
+        var n = 1
+        var i = 0
+        while i < this.shape.length() {
+            n = n * this.shape[i]
+            i = i + 1
+        }
+        return n
+    }
+
+    fun byteCount() r: Int {
+        return this.dataEnd - this.dataStart
+    }
+
+    fun shapeText() r: String {
+        var out = "["
+        var i = 0
+        while i < this.shape.length() {
+            if i > 0 {
+                out = out + ","
+            }
+            out = out + this.shape[i].toString()
+            i = i + 1
+        }
+        return out + "]"
+    }
+}
+
+class SafeTensorInfo {
+    var path: String
+    var existsFlag: Bool
+    var byteSize: Int
+    var headerLength: Int
+    var validHeader: Bool
+    var tensorCount: Int
+    var entries: Array<SafeTensorEntry>
+    var error: String
+
+    static fun inspect(path: String) r: SafeTensorInfo {
+        let present = exists(path)
+        if not present {
+            return SafeTensorInfo.empty(path, false, 0, "missing")
+        }
+
+        let fileSize = size(path)
+        let prefix = readBytesPrefix(path, 8)
+        if prefix.length() < 8 {
+            return SafeTensorInfo.empty(path, true, fileSize, "safetensors file is shorter than the 8-byte header length prefix")
+        }
+
+        let headerLen = stReadLe64(prefix)
+        if headerLen <= 0 {
+            return SafeTensorInfo.emptyWithHeader(path, true, fileSize, headerLen, "invalid safetensors header length")
+        }
+        let headerBytes = readBytesPrefix(path, 8 + headerLen)
+        if headerBytes.length() < 8 + headerLen {
+            return SafeTensorInfo.emptyWithHeader(path, true, fileSize, headerLen, "safetensors header is truncated")
+        }
+
+        let header = stBytesToString(headerBytes, 8, 8 + headerLen)
+        let entries = parseSafeTensorEntries(header)
+        if entries.length() == 0 {
+            return SafeTensorInfo{
+                path: path,
+                existsFlag: true,
+                byteSize: fileSize,
+                headerLength: headerLen,
+                validHeader: false,
+                tensorCount: 0,
+                entries: entries,
+                error: "safetensors header did not contain tensor entries"
+            }
+        }
+
+        let dataBytes = fileSize - 8 - headerLen
+        if not stOffsetsInBounds(entries, dataBytes) {
+            return SafeTensorInfo{
+                path: path,
+                existsFlag: true,
+                byteSize: fileSize,
+                headerLength: headerLen,
+                validHeader: false,
+                tensorCount: entries.length(),
+                entries: entries,
+                error: "safetensors tensor data offsets exceed data buffer"
+            }
+        }
+
+        return SafeTensorInfo{
+            path: path,
+            existsFlag: true,
+            byteSize: fileSize,
+            headerLength: headerLen,
+            validHeader: true,
+            tensorCount: entries.length(),
+            entries: entries,
+            error: ""
+        }
+    }
+
+    static fun empty(path: String, present: Bool, fileSize: Int, error: String) r: SafeTensorInfo {
+        return SafeTensorInfo.emptyWithHeader(path, present, fileSize, 0, error)
+    }
+
+    static fun emptyWithHeader(path: String, present: Bool, fileSize: Int, headerLen: Int, error: String) r: SafeTensorInfo {
+        return SafeTensorInfo{
+            path: path,
+            existsFlag: present,
+            byteSize: fileSize,
+            headerLength: headerLen,
+            validHeader: false,
+            tensorCount: 0,
+            entries: Array<SafeTensorEntry>(),
+            error: error
+        }
+    }
+
+    fun firstEntry() r: SafeTensorEntry? {
+        if this.entries.length() == 0 {
+            return null
+        }
+        return this.entries[0]
+    }
+}
+
+class SafeTensorLoadResult {
+    var ok: Bool
+    var name: String
+    var tensor: Tensor
+    var loadedValues: Int
+    var error: String
+
+    static fun success(name: String, tensor: Tensor) r: SafeTensorLoadResult {
+        return SafeTensorLoadResult{
+            ok: true,
+            name: name,
+            tensor: tensor,
+            loadedValues: tensor.values.length(),
+            error: ""
+        }
+    }
+
+    static fun failure(name: String, error: String) r: SafeTensorLoadResult {
+        return SafeTensorLoadResult{
+            ok: false,
+            name: name,
+            tensor: Tensor.zeros(0, 0),
+            loadedValues: 0,
+            error: error
+        }
+    }
+
+    fun sampleSum() r: Float {
+        var sum = 0.0
+        var i = 0
+        while i < this.tensor.values.length() {
+            sum = sum + this.tensor.values[i]
+            i = i + 1
+        }
+        return sum
+    }
+}
+
+class SafeTensorWriteSpec {
+    var name: String
+    var rows: Int
+    var cols: Int
+    var values: Array<Float>
+
+    static fun new(name: String, rows: Int, cols: Int, values: Array<Float>) r: SafeTensorWriteSpec {
+        return SafeTensorWriteSpec{
+            name: name,
+            rows: rows,
+            cols: cols,
+            values: values
+        }
+    }
+}
+
+fun parseSafeTensorEntries(header: String) r: Array<SafeTensorEntry> {
+    let entries = Array<SafeTensorEntry>()
+    var i = stSkipWs(header, 0)
+    if i >= header.length() or header.charAt(i) != 123 {
+        return entries
+    }
+    i = i + 1
+
+    while i < header.length() {
+        i = stSkipWs(header, i)
+        if i >= header.length() or header.charAt(i) == 125 {
+            return entries
+        }
+        if header.charAt(i) != 34 {
+            return entries
+        }
+
+        let parsedName = stParseQuoted(header, i)
+        let name = parsedName.text
+        i = stSkipWs(header, parsedName.next)
+        if i >= header.length() or header.charAt(i) != 58 {
+            return entries
+        }
+        i = stSkipWs(header, i + 1)
+
+        if name == "__metadata__" {
+            i = stSkipJsonValue(header, i)
+        } else {
+            if i >= header.length() or header.charAt(i) != 123 {
+                i = stSkipJsonValue(header, i)
+            } else {
+                let objectEnd = stFindObjectEnd(header, i)
+                if objectEnd <= i {
+                    return entries
+                }
+                let objectText = header.substring(i, objectEnd)
+                let dtype = stFindJsonString(objectText, "dtype", "")
+                let shape = stFindIntArray(objectText, "shape")
+                let offsets = stFindIntArray(objectText, "data_offsets")
+                if dtype.length() > 0 and offsets.length() >= 2 {
+                    entries.push(SafeTensorEntry.new(name, dtype, shape, offsets[0], offsets[1]))
+                }
+                i = objectEnd
+            }
+        }
+
+        i = stSkipWs(header, i)
+        if i < header.length() and header.charAt(i) == 44 {
+            i = i + 1
+        }
+    }
+    return entries
+}
+
+fun countF32Tensors(info: SafeTensorInfo) r: Int {
+    var count = 0
+    var i = 0
+    while i < info.entries.length() {
+        if isF32DType(info.entries[i].dtype) {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
+}
+
+fun loadTensorF32(info: SafeTensorInfo, name: String, backend: String = "cpu") r: SafeTensorLoadResult {
+    if not info.validHeader {
+        return SafeTensorLoadResult.failure(name, "safetensors header is not valid")
+    }
+    let index = findTensorEntryIndex(info, name)
+    if index < 0 {
+        return SafeTensorLoadResult.failure(name, "tensor not found")
+    }
+    return loadTensorEntryF32(info, info.entries[index], backend)
+}
+
+fun loadFirstSmallF32Tensor(info: SafeTensorInfo, maxElements: Int, backend: String = "cpu") r: SafeTensorLoadResult {
+    if not info.validHeader {
+        return SafeTensorLoadResult.failure("", "safetensors header is not valid")
+    }
+    var i = 0
+    while i < info.entries.length() {
+        let entry = info.entries[i]
+        if isF32DType(entry.dtype) and entry.elementCount() <= maxElements {
+            return loadTensorEntryF32(info, entry, backend)
+        }
+        i = i + 1
+    }
+    return SafeTensorLoadResult.failure("", "no F32 tensor under probe element cap")
+}
+
+fun loadTensorEntryF32(info: SafeTensorInfo, entry: SafeTensorEntry, backend: String) r: SafeTensorLoadResult {
+    if not isF32DType(entry.dtype) {
+        return SafeTensorLoadResult.failure(entry.name, "tensor dtype is not F32")
+    }
+    let elementCount = entry.elementCount()
+    if elementCount <= 0 {
+        return SafeTensorLoadResult.failure(entry.name, "tensor has no elements")
+    }
+    if entry.byteCount() != elementCount * 4 {
+        return SafeTensorLoadResult.failure(entry.name, "F32 byte count does not match shape")
+    }
+
+    let base = 8 + info.headerLength + entry.dataStart
+    let bytes = readBytesRange(info.path, base, entry.byteCount())
+    if bytes.length() < entry.byteCount() {
+        return SafeTensorLoadResult.failure(entry.name, "tensor data is truncated")
+    }
+
+    let values = Array<Float>()
+    var i = 0
+    while i < elementCount {
+        let byteOffset = i * 4
+        values.push(stReadF32Le(bytes, byteOffset))
+        i = i + 1
+    }
+    let rows = tensorRows(entry)
+    let cols = tensorCols(entry)
+    return SafeTensorLoadResult.success(entry.name, Tensor.fromArray(rows, cols, values, backend))
+}
+
+fun findTensorEntryIndex(info: SafeTensorInfo, name: String) r: Int {
+    var i = 0
+    while i < info.entries.length() {
+        if info.entries[i].name == name {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun stPrepareMaterializationTarget(info: SafeTensorInfo, outputPath: String) r: Bool {
+    if outputPath == info.path {
+        return true
+    }
+    return copyFileBytes(info.path, outputPath)
+}
+
+fun materializeDenseDeltaSafetensors(info: SafeTensorInfo, outputPath: String, weightName: String, biasName: String, deltaPath: String, inputDim: Int, outputDim: Int) r: Bool {
+    if not info.validHeader {
+        return false
+    }
+    if not exists(deltaPath) {
+        return false
+    }
+    let weightIndex = findTensorEntryIndex(info, weightName)
+    let biasIndex = findTensorEntryIndex(info, biasName)
+    if weightIndex < 0 or biasIndex < 0 {
+        return false
+    }
+    let weightEntry = info.entries[weightIndex]
+    let biasEntry = info.entries[biasIndex]
+    if not isF32DType(weightEntry.dtype) or not isF32DType(biasEntry.dtype) {
+        return false
+    }
+    if tensorRows(weightEntry) != outputDim or tensorCols(weightEntry) != inputDim {
+        return false
+    }
+    if biasEntry.elementCount() < outputDim {
+        return false
+    }
+    if weightEntry.byteCount() != inputDim * outputDim * 4 or biasEntry.byteCount() < outputDim * 4 {
+        return false
+    }
+
+    let delta = DenseDeltaAdapter.load(deltaPath, inputDim, outputDim)
+    if not delta.loaded {
+        return false
+    }
+    if delta.weightDelta.length() != inputDim * outputDim or delta.biasDelta.length() != outputDim {
+        return false
+    }
+
+    if not stPrepareMaterializationTarget(info, outputPath) {
+        return false
+    }
+    let dataBase = 8 + info.headerLength
+    let weightBase = dataBase + weightEntry.dataStart
+    let biasBase = dataBase + biasEntry.dataStart
+    let weightBytes = readBytesRange(outputPath, weightBase, weightEntry.byteCount())
+    let biasBytes = readBytesRange(outputPath, biasBase, biasEntry.byteCount())
+    if weightBytes.length() < weightEntry.byteCount() or biasBytes.length() < biasEntry.byteCount() {
+        return false
+    }
+    var i = 0
+    while i < delta.weightDelta.length() {
+        let offset = i * 4
+        let value = stReadF32Le(weightBytes, offset) + delta.weightDelta[i]
+        stWriteF32LeAt(weightBytes, offset, value)
+        i = i + 1
+    }
+    i = 0
+    while i < delta.biasDelta.length() {
+        let offset = i * 4
+        let value = stReadF32Le(biasBytes, offset) + delta.biasDelta[i]
+        stWriteF32LeAt(biasBytes, offset, value)
+        i = i + 1
+    }
+    return writeBytesAt(outputPath, weightBase, weightBytes) and writeBytesAt(outputPath, biasBase, biasBytes)
+}
+
+fun materializeLayerNormDeltaSafetensors(info: SafeTensorInfo, outputPath: String, weightName: String, biasName: String, deltaPath: String, dim: Int) r: Bool {
+    if not info.validHeader {
+        return false
+    }
+    if not exists(deltaPath) {
+        return false
+    }
+    let weightIndex = findTensorEntryIndex(info, weightName)
+    let biasIndex = findTensorEntryIndex(info, biasName)
+    if weightIndex < 0 or biasIndex < 0 {
+        return false
+    }
+    let weightEntry = info.entries[weightIndex]
+    let biasEntry = info.entries[biasIndex]
+    if not isF32DType(weightEntry.dtype) or not isF32DType(biasEntry.dtype) {
+        return false
+    }
+    if weightEntry.elementCount() < dim or biasEntry.elementCount() < dim {
+        return false
+    }
+    if weightEntry.byteCount() < dim * 4 or biasEntry.byteCount() < dim * 4 {
+        return false
+    }
+
+    let delta = LayerNormDeltaAdapter.load(deltaPath, dim)
+    if not delta.loaded {
+        return false
+    }
+    if delta.weightDelta.length() != dim or delta.biasDelta.length() != dim {
+        return false
+    }
+
+    if not stPrepareMaterializationTarget(info, outputPath) {
+        return false
+    }
+    let dataBase = 8 + info.headerLength
+    let weightBase = dataBase + weightEntry.dataStart
+    let biasBase = dataBase + biasEntry.dataStart
+    let weightBytes = readBytesRange(outputPath, weightBase, weightEntry.byteCount())
+    let biasBytes = readBytesRange(outputPath, biasBase, biasEntry.byteCount())
+    if weightBytes.length() < dim * 4 or biasBytes.length() < dim * 4 {
+        return false
+    }
+    var i = 0
+    while i < dim {
+        let offset = i * 4
+        let weightValue = stReadF32Le(weightBytes, offset) + delta.weightDelta[i]
+        stWriteF32LeAt(weightBytes, offset, weightValue)
+        let biasValue = stReadF32Le(biasBytes, offset) + delta.biasDelta[i]
+        stWriteF32LeAt(biasBytes, offset, biasValue)
+        i = i + 1
+    }
+    return writeBytesAt(outputPath, weightBase, weightBytes) and writeBytesAt(outputPath, biasBase, biasBytes)
+}
+
+fun materializeEmbeddingDeltasSafetensors(info: SafeTensorInfo, outputPath: String, deltaPath: String, hiddenSize: Int) r: Bool {
+    if not info.validHeader {
+        return false
+    }
+    if not exists(deltaPath) {
+        return false
+    }
+    let wordIndex = findTensorEntryIndex(info, "embeddings.word_embeddings.weight")
+    let positionIndex = findTensorEntryIndex(info, "embeddings.position_embeddings.weight")
+    let tokenTypeIndex = findTensorEntryIndex(info, "embeddings.token_type_embeddings.weight")
+    let normWeightIndex = findTensorEntryIndex(info, "embeddings.LayerNorm.weight")
+    let normBiasIndex = findTensorEntryIndex(info, "embeddings.LayerNorm.bias")
+    if wordIndex < 0 or positionIndex < 0 or tokenTypeIndex < 0 or normWeightIndex < 0 or normBiasIndex < 0 {
+        return false
+    }
+    let wordEntry = info.entries[wordIndex]
+    let positionEntry = info.entries[positionIndex]
+    let tokenTypeEntry = info.entries[tokenTypeIndex]
+    let normWeightEntry = info.entries[normWeightIndex]
+    let normBiasEntry = info.entries[normBiasIndex]
+    if not isF32DType(wordEntry.dtype) or not isF32DType(positionEntry.dtype) or not isF32DType(tokenTypeEntry.dtype) {
+        return false
+    }
+    if not isF32DType(normWeightEntry.dtype) or not isF32DType(normBiasEntry.dtype) {
+        return false
+    }
+    if tensorCols(wordEntry) != hiddenSize or tensorCols(positionEntry) != hiddenSize or tensorCols(tokenTypeEntry) != hiddenSize {
+        return false
+    }
+    if normWeightEntry.elementCount() < hiddenSize or normBiasEntry.elementCount() < hiddenSize {
+        return false
+    }
+
+    let deltas = MiniLMEmbeddingDeltas.load(deltaPath, hiddenSize, tensorRows(wordEntry), tensorRows(positionEntry), tensorRows(tokenTypeEntry))
+    if not deltas.loaded {
+        return false
+    }
+    if not stPrepareMaterializationTarget(info, outputPath) {
+        return false
+    }
+    let dataBase = 8 + info.headerLength
+    if not materializeEmbeddingTableRows(outputPath, dataBase, wordEntry, deltas.wordRowIds, deltas.wordDelta, hiddenSize) {
+        return false
+    }
+    if not materializeEmbeddingTableRows(outputPath, dataBase, positionEntry, deltas.positionRowIds, deltas.positionDelta, hiddenSize) {
+        return false
+    }
+    if not materializeEmbeddingTableRows(outputPath, dataBase, tokenTypeEntry, deltas.tokenTypeRowIds, deltas.tokenTypeDelta, hiddenSize) {
+        return false
+    }
+    let normWeightBase = dataBase + normWeightEntry.dataStart
+    let normBiasBase = dataBase + normBiasEntry.dataStart
+    let normWeightBytes = readBytesRange(outputPath, normWeightBase, normWeightEntry.byteCount())
+    let normBiasBytes = readBytesRange(outputPath, normBiasBase, normBiasEntry.byteCount())
+    if normWeightBytes.length() < hiddenSize * 4 or normBiasBytes.length() < hiddenSize * 4 {
+        return false
+    }
+    var i = 0
+    while i < hiddenSize {
+        let offset = i * 4
+        stWriteF32LeAt(normWeightBytes, offset, stReadF32Le(normWeightBytes, offset) + deltas.layerNormWeightDelta[i])
+        stWriteF32LeAt(normBiasBytes, offset, stReadF32Le(normBiasBytes, offset) + deltas.layerNormBiasDelta[i])
+        i = i + 1
+    }
+    return writeBytesAt(outputPath, normWeightBase, normWeightBytes) and writeBytesAt(outputPath, normBiasBase, normBiasBytes)
+}
+
+fun materializeEmbeddingTableRows(path: String, dataBase: Int, entry: SafeTensorEntry, rowIds: Array<Int>, deltas: Array<Float>, hiddenSize: Int) r: Bool {
+    var slot = 0
+    while slot < rowIds.length() {
+        let row = rowIds[slot]
+        if row >= 0 and row < tensorRows(entry) {
+            let rowBase = dataBase + entry.dataStart + row * tensorCols(entry) * 4
+            let rowBytes = readBytesRange(path, rowBase, tensorCols(entry) * 4)
+            if rowBytes.length() < hiddenSize * 4 {
+                return false
+            }
+            var d = 0
+            while d < hiddenSize {
+                let deltaIndex = slot * hiddenSize + d
+                let offset = d * 4
+                if deltaIndex < deltas.length() and offset + 3 < rowBytes.length() {
+                    stWriteF32LeAt(rowBytes, offset, stReadF32Le(rowBytes, offset) + deltas[deltaIndex])
+                }
+                d = d + 1
+            }
+            if not writeBytesAt(path, rowBase, rowBytes) {
+                return false
+            }
+        }
+        slot = slot + 1
+    }
+    return true
+}
+
+fun writeSingleTensorF32(path: String, name: String, rows: Int, cols: Int, values: Array<Float>) r: Bool {
+    let expected = rows * cols
+    if rows <= 0 or cols <= 0 or values.length() != expected {
+        return false
+    }
+    let byteCount = values.length() * 4
+    let shape = if rows == 1 { "[" + cols.toString() + "]" } else { "[" + rows.toString() + "," + cols.toString() + "]" }
+    let header = "{"
+        + escapeJsonString(name) + ":{"
+        + "\"dtype\":\"F32\","
+        + "\"shape\":" + shape + ","
+        + "\"data_offsets\":[0," + byteCount.toString() + "]"
+        + "}}"
+    let bytes = Array<Int>()
+    stAppendLe64(bytes, header.length())
+    stAppendStringBytes(bytes, header)
+    var i = 0
+    while i < values.length() {
+        stAppendF32Le(bytes, values[i])
+        i = i + 1
+    }
+    return writeBytes(path, bytes)
+}
+
+fun writeTensorBundleF32(path: String, specs: Array<SafeTensorWriteSpec>) r: Bool {
+    if specs.length() == 0 {
+        return false
+    }
+    var offset = 0
+    var header = "{"
+    var s = 0
+    while s < specs.length() {
+        let spec = specs[s]
+        let expected = spec.rows * spec.cols
+        if spec.name.length() == 0 or spec.rows <= 0 or spec.cols <= 0 or spec.values.length() != expected {
+            return false
+        }
+        if s > 0 {
+            header = header + ","
+        }
+        let byteCount = expected * 4
+        let end = offset + byteCount
+        let shape = if spec.rows == 1 { "[" + spec.cols.toString() + "]" } else { "[" + spec.rows.toString() + "," + spec.cols.toString() + "]" }
+        header = header
+            + escapeJsonString(spec.name) + ":{"
+            + "\"dtype\":\"F32\","
+            + "\"shape\":" + shape + ","
+            + "\"data_offsets\":[" + offset.toString() + "," + end.toString() + "]"
+            + "}"
+        offset = end
+        s = s + 1
+    }
+    header = header + "}"
+    let bytes = Array<Int>()
+    stAppendLe64(bytes, header.length())
+    stAppendStringBytes(bytes, header)
+    s = 0
+    while s < specs.length() {
+        let values = specs[s].values
+        var i = 0
+        while i < values.length() {
+            stAppendF32Le(bytes, values[i])
+            i = i + 1
+        }
+        s = s + 1
+    }
+    return writeBytes(path, bytes)
+}
+
+fun isF32DType(dtype: String) r: Bool {
+    return dtype == "F32" or dtype == "float32" or dtype == "Float32"
+}
+
+fun tensorRows(entry: SafeTensorEntry) r: Int {
+    if entry.shape.length() == 0 {
+        return 1
+    }
+    if entry.shape.length() == 1 {
+        return 1
+    }
+    return entry.shape[0]
+}
+
+fun tensorCols(entry: SafeTensorEntry) r: Int {
+    if entry.shape.length() == 0 {
+        return 1
+    }
+    if entry.shape.length() == 1 {
+        return entry.shape[0]
+    }
+    var cols = 1
+    var i = 1
+    while i < entry.shape.length() {
+        cols = cols * entry.shape[i]
+        i = i + 1
+    }
+    return cols
+}
+
+fun writeSeenWeightsManifest(path: String, embeddingDim: Int, info: SafeTensorInfo, note: String) r: Bool {
+    var json = "{\n"
+        + "  \"format\": \"safetensors\",\n"
+        + "  \"embedding_dim\": " + embeddingDim.toString() + ",\n"
+        + "  \"source_path\": " + escapeJsonString(info.path) + ",\n"
+        + "  \"source_exists\": " + info.existsFlag.toString() + ",\n"
+        + "  \"source_bytes\": " + info.byteSize.toString() + ",\n"
+        + "  \"header_length\": " + info.headerLength.toString() + ",\n"
+        + "  \"valid_header\": " + info.validHeader.toString() + ",\n"
+        + "  \"tensor_count\": " + info.tensorCount.toString() + ",\n"
+        + "  \"f32_tensor_count\": " + countF32Tensors(info).toString() + ",\n"
+        + "  \"note\": " + escapeJsonString(note)
+    if info.entries.length() > 0 {
+        let entry = info.entries[0]
+        json = json + ",\n"
+            + "  \"first_tensor\": {\n"
+            + "    \"name\": " + escapeJsonString(entry.name) + ",\n"
+            + "    \"dtype\": " + escapeJsonString(entry.dtype) + ",\n"
+            + "    \"shape\": " + entry.shapeText() + ",\n"
+            + "    \"data_offsets\": [" + entry.dataStart.toString() + "," + entry.dataEnd.toString() + "],\n"
+            + "    \"elements\": " + entry.elementCount().toString() + ",\n"
+            + "    \"bytes\": " + entry.byteCount().toString() + "\n"
+            + "  }"
+    }
+    let probe = loadFirstSmallF32Tensor(info, 4096)
+    if probe.ok {
+        var firstValue = 0.0
+        var lastValue = 0.0
+        if probe.tensor.values.length() > 0 {
+            firstValue = probe.tensor.values[0]
+            lastValue = probe.tensor.values[probe.tensor.values.length() - 1]
+        }
+        json = json + ",\n"
+            + "  \"loaded_tensor_probe\": {\n"
+            + "    \"name\": " + escapeJsonString(probe.name) + ",\n"
+            + "    \"rows\": " + probe.tensor.shape.rows.toString() + ",\n"
+            + "    \"cols\": " + probe.tensor.shape.cols.toString() + ",\n"
+            + "    \"values\": " + probe.loadedValues.toString() + ",\n"
+            + "    \"first_value\": " + firstValue.toString() + ",\n"
+            + "    \"last_value\": " + lastValue.toString() + ",\n"
+            + "    \"sum\": " + probe.sampleSum().toString() + "\n"
+            + "  }"
+    }
+    if info.error.length() > 0 {
+        json = json + ",\n  \"error\": " + escapeJsonString(info.error)
+    }
+    json = json + "\n}\n"
+    return writeAtomicText(path, json)
+}
+
+class StQuoted {
+    var text: String
+    var next: Int
+}
+
+fun stReadLe64(bytes: Array<Int>) r: Int {
+    var value = 0
+    var multiplier = 1
+    var i = 0
+    while i < 8 and i < bytes.length() {
+        value = value + bytes[i] * multiplier
+        if i < 7 {
+            multiplier = multiplier * 256
+        }
+        i = i + 1
+    }
+    return value
+}
+
+fun stReadF32Le(bytes: Array<Int>, offset: Int) r: Float {
+    if offset + 3 >= bytes.length() {
+        return 0.0
+    }
+    var bits = bytes[offset]
+        + bytes[offset + 1] * 256
+        + bytes[offset + 2] * 65536
+        + bytes[offset + 3] * 16777216
+    var sign = 1.0
+    if bits >= 2147483648 {
+        sign = -1.0
+        bits = bits - 2147483648
+    }
+    let exponent = bits / 8388608
+    let mantissa = bits % 8388608
+    if exponent == 0 {
+        if mantissa == 0 {
+            return sign * 0.0
+        }
+        return sign * (mantissa.toFloat() / 8388608.0) * stPow2(-126)
+    }
+    if exponent == 255 {
+        if mantissa == 0 {
+            return sign * stPow2(127)
+        }
+        return 0.0
+    }
+    return sign * (1.0 + mantissa.toFloat() / 8388608.0) * stPow2(exponent - 127)
+}
+
+fun stWriteF32LeAt(bytes: Array<Int>, offset: Int, value: Float) r: Void {
+    if offset < 0 or offset + 3 >= bytes.length() {
+        return
+    }
+    let bits = stFloatToF32Bits(value)
+    bytes[offset] = bits % 256
+    bytes[offset + 1] = (bits / 256) % 256
+    bytes[offset + 2] = (bits / 65536) % 256
+    bytes[offset + 3] = (bits / 16777216) % 256
+}
+
+fun stAppendLe64(bytes: Array<Int>, value: Int) r: Void {
+    var remaining = value
+    var i = 0
+    while i < 8 {
+        bytes.push(remaining % 256)
+        remaining = remaining / 256
+        i = i + 1
+    }
+}
+
+fun stAppendStringBytes(bytes: Array<Int>, text: String) r: Void {
+    var i = 0
+    while i < text.length() {
+        bytes.push(text.charAt(i))
+        i = i + 1
+    }
+}
+
+fun stAppendF32Le(bytes: Array<Int>, value: Float) r: Void {
+    let bits = stFloatToF32Bits(value)
+    bytes.push(bits % 256)
+    bytes.push((bits / 256) % 256)
+    bytes.push((bits / 65536) % 256)
+    bytes.push((bits / 16777216) % 256)
+}
+
+fun stFloatToF32Bits(value: Float) r: Int {
+    var signBit = 0
+    var v = value
+    if v < 0.0 {
+        signBit = 2147483648
+        v = 0.0 - v
+    }
+    if v <= 0.0 {
+        return signBit
+    }
+    if v < 0.00000000000000000000000000000000000001 {
+        return signBit
+    }
+    var exponent = 0
+    while v >= 2.0 {
+        v = v / 2.0
+        exponent = exponent + 1
+    }
+    while v < 1.0 and exponent > -126 {
+        v = v * 2.0
+        exponent = exponent - 1
+    }
+    if exponent < -126 {
+        return signBit
+    }
+    var expBits = exponent + 127
+    var mantissa = floor((v - 1.0) * 8388608.0 + 0.5).toInt()
+    if mantissa >= 8388608 {
+        mantissa = 0
+        expBits = expBits + 1
+    }
+    if expBits >= 255 {
+        return signBit + 254 * 8388608 + 8388607
+    }
+    return signBit + expBits * 8388608 + mantissa
+}
+
+fun stPow2(exponent: Int) r: Float {
+    var value = 1.0
+    if exponent >= 0 {
+        var i = 0
+        while i < exponent {
+            value = value * 2.0
+            i = i + 1
+        }
+        return value
+    }
+    var j = 0
+    while j < 0 - exponent {
+        value = value / 2.0
+        j = j + 1
+    }
+    return value
+}
+
+fun stBytesToString(bytes: Array<Int>, start: Int, end: Int) r: String {
+    var out = ""
+    var i = start
+    while i < end and i < bytes.length() {
+        out = out + String.fromCharCode(bytes[i])
+        i = i + 1
+    }
+    return out
+}
+
+fun stOffsetsInBounds(entries: Array<SafeTensorEntry>, dataBytes: Int) r: Bool {
+    var i = 0
+    while i < entries.length() {
+        let entry = entries[i]
+        if entry.dataStart < 0 or entry.dataEnd < entry.dataStart or entry.dataEnd > dataBytes {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun stFindJsonString(text: String, key: String, fallback: String) r: String {
+    let pos = stFindKeyColon(text, key)
+    if pos < 0 {
+        return fallback
+    }
+    let i = stSkipWs(text, pos)
+    if i >= text.length() or text.charAt(i) != 34 {
+        return fallback
+    }
+    return stParseQuoted(text, i).text
+}
+
+fun stFindIntArray(text: String, key: String) r: Array<Int> {
+    let values = Array<Int>()
+    let pos = stFindKeyColon(text, key)
+    if pos < 0 {
+        return values
+    }
+    var i = stSkipWs(text, pos)
+    if i >= text.length() or text.charAt(i) != 91 {
+        return values
+    }
+    i = i + 1
+    while i < text.length() {
+        i = stSkipWs(text, i)
+        if i >= text.length() {
+            return values
+        }
+        if text.charAt(i) == 93 {
+            return values
+        }
+        let start = i
+        if text.charAt(i) == 45 {
+            i = i + 1
+        }
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            i = i + 1
+        }
+        if i > start {
+            values.push(stParseIntText(text.substring(start, i)))
+        }
+        i = stSkipWs(text, i)
+        if i < text.length() and text.charAt(i) == 44 {
+            i = i + 1
+        } else if i < text.length() and text.charAt(i) == 93 {
+            return values
+        } else {
+            return values
+        }
+    }
+    return values
+}
+
+fun stFindKeyColon(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if stMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun stParseQuoted(text: String, start: Int) r: StQuoted {
+    var out = ""
+    var i = start + 1
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 34 {
+            return StQuoted{ text: out, next: i + 1 }
+        }
+        if ch == 92 {
+            i = i + 1
+            if i < text.length() {
+                let esc = text.charAt(i)
+                if esc == 110 { out = out + "\n" }
+                else if esc == 114 { out = out + "\r" }
+                else if esc == 116 { out = out + "\t" }
+                else { out = out + String.fromCharCode(esc) }
+            }
+        } else {
+            out = out + String.fromCharCode(ch)
+        }
+        i = i + 1
+    }
+    return StQuoted{ text: out, next: i }
+}
+
+fun stFindObjectEnd(text: String, start: Int) r: Int {
+    var depth = 0
+    var i = start
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 34 {
+            i = stParseQuoted(text, i).next
+        } else {
+            if ch == 123 {
+                depth = depth + 1
+            } else if ch == 125 {
+                depth = depth - 1
+                if depth == 0 {
+                    return i + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    return -1
+}
+
+fun stSkipJsonValue(text: String, start: Int) r: Int {
+    var i = stSkipWs(text, start)
+    if i >= text.length() {
+        return i
+    }
+    let ch = text.charAt(i)
+    if ch == 34 {
+        return stParseQuoted(text, i).next
+    }
+    if ch == 123 {
+        let end = stFindObjectEnd(text, i)
+        if end > i {
+            return end
+        }
+        return text.length()
+    }
+    if ch == 91 {
+        return stFindArrayEnd(text, i)
+    }
+    while i < text.length() {
+        let c = text.charAt(i)
+        if c == 44 or c == 125 {
+            return i
+        }
+        i = i + 1
+    }
+    return i
+}
+
+fun stFindArrayEnd(text: String, start: Int) r: Int {
+    var depth = 0
+    var i = start
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 34 {
+            i = stParseQuoted(text, i).next
+        } else {
+            if ch == 91 {
+                depth = depth + 1
+            } else if ch == 93 {
+                depth = depth - 1
+                if depth == 0 {
+                    return i + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    return text.length()
+}
+
+fun stMatchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun stSkipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+fun stParseIntText(text: String) r: Int {
+    var sign = 1
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1
+        i = 1
+    }
+    var value = 0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10 + (text.charAt(i) - 48)
+        i = i + 1
+    }
+    return value * sign
+}

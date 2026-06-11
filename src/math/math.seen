@@ -1,0 +1,29 @@
+extern "C" fun seen_math_sqrt(value: Float) r: Float
+extern "C" fun seen_math_exp(value: Float) r: Float
+extern "C" fun seen_math_floor(value: Float) r: Float
+
+fun sqrt(value: Float) r: Float {
+    return seen_math_sqrt(value)
+}
+
+fun exp(value: Float) r: Float {
+    return seen_math_exp(value)
+}
+
+fun floor(value: Float) r: Float {
+    return seen_math_floor(value)
+}
+
+fun max(a: Float, b: Float) r: Float {
+    if a > b {
+        return a
+    }
+    return b
+}
+
+fun min(a: Float, b: Float) r: Float {
+    if a < b {
+        return a
+    }
+    return b
+}

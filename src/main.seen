@@ -1,0 +1,5 @@
+import trainer.cli.{trainerMain}
+
+fun main() -> Int {
+    return trainerMain()
+}
