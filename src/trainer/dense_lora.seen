@@ -1,6 +1,7 @@
-import io.file.{ensureParentDirectories, exists, readText}
+import io.file.{ensureParentDirectories, exists, readBytes, readText, writeBytes}
 import adapter.{adapterClamp, adapterContains, adapterLowRankSeed, adapterPowFloat, adapterSqrtApprox}
 import io_utils.{writeAtomicText}
+import math.math.{floor}
 import str.string.{StringBuilder}
 
 class DenseLoRAAdapter {
@@ -231,6 +232,9 @@ class DenseDeltaAdapter {
     static fun load(path: String, inputDim: Int, outputDim: Int) r: DenseDeltaAdapter {
         let adapter = DenseDeltaAdapter.identity(inputDim, outputDim)
         adapter.path = path
+        if adapter.loadBinarySidecar(path) {
+            return adapter
+        }
         if not exists(path) {
             return adapter
         }
@@ -408,7 +412,55 @@ class DenseDeltaAdapter {
         this.loaded = true
         let builder = this.toJsonBuilderWithFormat(format)
         ensureParentDirectories(path)
-        return builder.writeToFile(path)
+        let ok = builder.writeToFile(path)
+        if ok {
+            this.saveBinarySidecar(path)
+        }
+        return ok
+    }
+
+    fun loadBinarySidecar(path: String) r: Bool {
+        let bytes = readBytes(denseDeltaBinarySidecarPath(path))
+        if bytes.length() < 20 {
+            return false
+        }
+        if not denseBinaryMagic(bytes, "SDD1") {
+            return false
+        }
+        let fileInput = denseReadI32Le(bytes, 4)
+        let fileOutput = denseReadI32Le(bytes, 8)
+        let weightCount = denseReadI32Le(bytes, 12)
+        let biasCount = denseReadI32Le(bytes, 16)
+        if fileInput != this.inputDim or fileOutput != this.outputDim {
+            return false
+        }
+        if weightCount != this.inputDim * this.outputDim or biasCount != this.outputDim {
+            return false
+        }
+        let expectedBytes = 20 + (weightCount + biasCount) * 4
+        if bytes.length() < expectedBytes {
+            return false
+        }
+        if not denseReadFloatArrayInto(bytes, 20, weightCount, this.weightDelta) {
+            return false
+        }
+        if not denseReadFloatArrayInto(bytes, 20 + weightCount * 4, biasCount, this.biasDelta) {
+            return false
+        }
+        this.loaded = true
+        return true
+    }
+
+    fun saveBinarySidecar(path: String) r: Bool {
+        let bytes = Array<Int>()
+        denseAppendStringBytes(bytes, "SDD1")
+        denseAppendI32Le(bytes, this.inputDim)
+        denseAppendI32Le(bytes, this.outputDim)
+        denseAppendI32Le(bytes, this.weightDelta.length())
+        denseAppendI32Le(bytes, this.biasDelta.length())
+        denseAppendFloatArrayLe(bytes, this.weightDelta)
+        denseAppendFloatArrayLe(bytes, this.biasDelta)
+        return writeBytes(denseDeltaBinarySidecarPath(path), bytes)
     }
 
     fun toJson() r: String {
@@ -538,6 +590,9 @@ class LayerNormDeltaAdapter {
     static fun load(path: String, dim: Int) r: LayerNormDeltaAdapter {
         let adapter = LayerNormDeltaAdapter.identity(dim)
         adapter.path = path
+        if adapter.loadBinarySidecar(path) {
+            return adapter
+        }
         if not exists(path) {
             return adapter
         }
@@ -724,7 +779,50 @@ class LayerNormDeltaAdapter {
     fun saveAs(path: String, format: String) r: Bool {
         this.path = path
         this.loaded = true
-        return writeAtomicText(path, this.toJsonWithFormat(format))
+        let ok = writeAtomicText(path, this.toJsonWithFormat(format))
+        if ok {
+            this.saveBinarySidecar(path)
+        }
+        return ok
+    }
+
+    fun loadBinarySidecar(path: String) r: Bool {
+        let bytes = readBytes(denseDeltaBinarySidecarPath(path))
+        if bytes.length() < 16 {
+            return false
+        }
+        if not denseBinaryMagic(bytes, "SLN1") {
+            return false
+        }
+        let fileDim = denseReadI32Le(bytes, 4)
+        let weightCount = denseReadI32Le(bytes, 8)
+        let biasCount = denseReadI32Le(bytes, 12)
+        if fileDim != this.dim or weightCount != this.dim or biasCount != this.dim {
+            return false
+        }
+        let expectedBytes = 16 + (weightCount + biasCount) * 4
+        if bytes.length() < expectedBytes {
+            return false
+        }
+        if not denseReadFloatArrayInto(bytes, 16, weightCount, this.weightDelta) {
+            return false
+        }
+        if not denseReadFloatArrayInto(bytes, 16 + weightCount * 4, biasCount, this.biasDelta) {
+            return false
+        }
+        this.loaded = true
+        return true
+    }
+
+    fun saveBinarySidecar(path: String) r: Bool {
+        let bytes = Array<Int>()
+        denseAppendStringBytes(bytes, "SLN1")
+        denseAppendI32Le(bytes, this.dim)
+        denseAppendI32Le(bytes, this.weightDelta.length())
+        denseAppendI32Le(bytes, this.biasDelta.length())
+        denseAppendFloatArrayLe(bytes, this.weightDelta)
+        denseAppendFloatArrayLe(bytes, this.biasDelta)
+        return writeBytes(denseDeltaBinarySidecarPath(path), bytes)
     }
 
     fun toJson() r: String {
@@ -915,6 +1013,166 @@ fun miniLMLayerOutputDeltaPath(outputDir: String, layer: Int) r: String {
 
 fun miniLMLayerOutputLayerNormDeltaPath(outputDir: String, layer: Int) r: String {
     return outputDir + "/minilm_layer_" + layer.toString() + "_output_layernorm_delta.json"
+}
+
+fun denseDeltaBinarySidecarPath(path: String) r: String {
+    return path + ".bin"
+}
+
+fun denseBinaryMagic(bytes: Array<Int>, magic: String) r: Bool {
+    if bytes.length() < magic.length() {
+        return false
+    }
+    var i = 0
+    while i < magic.length() {
+        if bytes[i] != magic.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun denseAppendStringBytes(bytes: Array<Int>, text: String) r: Void {
+    var i = 0
+    while i < text.length() {
+        bytes.push(text.charAt(i))
+        i = i + 1
+    }
+}
+
+fun denseAppendI32Le(bytes: Array<Int>, value: Int) r: Void {
+    bytes.push(value % 256)
+    bytes.push((value / 256) % 256)
+    bytes.push((value / 65536) % 256)
+    bytes.push((value / 16777216) % 256)
+}
+
+fun denseReadI32Le(bytes: Array<Int>, offset: Int) r: Int {
+    if offset < 0 or offset + 3 >= bytes.length() {
+        return -1
+    }
+    return bytes[offset]
+        + bytes[offset + 1] * 256
+        + bytes[offset + 2] * 65536
+        + bytes[offset + 3] * 16777216
+}
+
+fun denseAppendFloatArrayLe(bytes: Array<Int>, values: Array<Float>) r: Void {
+    var i = 0
+    while i < values.length() {
+        denseAppendF32Le(bytes, values[i])
+        i = i + 1
+    }
+}
+
+fun denseReadFloatArrayInto(bytes: Array<Int>, offset: Int, count: Int, target: Array<Float>) r: Bool {
+    if count < 0 or count > target.length() {
+        return false
+    }
+    if offset < 0 or offset + count * 4 > bytes.length() {
+        return false
+    }
+    var i = 0
+    while i < count {
+        target[i] = denseReadF32Le(bytes, offset + i * 4)
+        i = i + 1
+    }
+    return true
+}
+
+fun denseAppendF32Le(bytes: Array<Int>, value: Float) r: Void {
+    let bits = denseFloatToF32Bits(value)
+    bytes.push(bits % 256)
+    bytes.push((bits / 256) % 256)
+    bytes.push((bits / 65536) % 256)
+    bytes.push((bits / 16777216) % 256)
+}
+
+fun denseReadF32Le(bytes: Array<Int>, offset: Int) r: Float {
+    if offset < 0 or offset + 3 >= bytes.length() {
+        return 0.0
+    }
+    var bits = denseReadI32Le(bytes, offset)
+    var sign = 1.0
+    if bits >= 2147483648 {
+        sign = -1.0
+        bits = bits - 2147483648
+    }
+    let exponent = bits / 8388608
+    let mantissa = bits % 8388608
+    if exponent == 0 {
+        if mantissa == 0 {
+            return sign * 0.0
+        }
+        return sign * (mantissa.toFloat() / 8388608.0) * densePow2(-126)
+    }
+    if exponent == 255 {
+        if mantissa == 0 {
+            return sign * densePow2(127)
+        }
+        return 0.0
+    }
+    return sign * (1.0 + mantissa.toFloat() / 8388608.0) * densePow2(exponent - 127)
+}
+
+fun denseFloatToF32Bits(value: Float) r: Int {
+    var signBit = 0
+    var v = value
+    if v < 0.0 {
+        signBit = 2147483648
+        v = 0.0 - v
+    }
+    if v <= 0.0 {
+        return signBit
+    }
+    if v < 0.00000000000000000000000000000000000001 {
+        return signBit
+    }
+    var exponent = 0
+    while v >= 2.0 {
+        v = v / 2.0
+        exponent = exponent + 1
+    }
+    while v < 1.0 and exponent > -126 {
+        v = v * 2.0
+        exponent = exponent - 1
+    }
+    if exponent < -126 {
+        return signBit
+    }
+    var expBits = exponent + 127
+    var mantissa = floor((v - 1.0) * 8388608.0 + 0.5).toInt()
+    if mantissa >= 8388608 {
+        mantissa = 0
+        expBits = expBits + 1
+    }
+    if expBits >= 255 {
+        return signBit + 254 * 8388608 + 8388607
+    }
+    return signBit + expBits * 8388608 + mantissa
+}
+
+fun densePow2(exponent: Int) r: Float {
+    var exp = exponent
+    var reciprocal = false
+    if exp < 0 {
+        reciprocal = true
+        exp = 0 - exp
+    }
+    var value = 1.0
+    var base = 2.0
+    while exp > 0 {
+        if exp % 2 == 1 {
+            value = value * base
+        }
+        base = base * base
+        exp = exp / 2
+    }
+    if reciprocal {
+        return 1.0 / value
+    }
+    return value
 }
 
 fun layerNormDeltaFormatRecognized(text: String) r: Bool {

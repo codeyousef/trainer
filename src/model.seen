@@ -48,15 +48,17 @@ class ModelBundle {
         }
         if embeddings.loaded and cfg.resumeOutputArtifacts {
             println("trainer: resuming output artifacts")
-            minilmDenseAdapter = DenseLoRAAdapter.load(cfg.minilmDenseAdapterPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
-            minilmDenseDelta = DenseDeltaAdapter.load(cfg.minilmDenseDeltaPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
-            minilmIntermediateDelta = DenseDeltaAdapter.load(cfg.minilmIntermediateDeltaPath(), modelMeta.hiddenSize, modelMeta.intermediateSize)
-            minilmQueryDelta = DenseDeltaAdapter.load(cfg.minilmQueryDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
-            minilmKeyDelta = DenseDeltaAdapter.load(cfg.minilmKeyDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
-            minilmValueDelta = DenseDeltaAdapter.load(cfg.minilmValueDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
-            minilmAttentionDenseDelta = DenseDeltaAdapter.load(cfg.minilmAttentionDenseDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
-            minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmAttentionLayerNormDeltaPath(), modelMeta.hiddenSize)
-            minilmLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmLayerNormDeltaPath(), modelMeta.hiddenSize)
+            if not cfg.trainAllMiniLMLayers {
+                minilmDenseAdapter = DenseLoRAAdapter.load(cfg.minilmDenseAdapterPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
+                minilmDenseDelta = DenseDeltaAdapter.load(cfg.minilmDenseDeltaPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
+                minilmIntermediateDelta = DenseDeltaAdapter.load(cfg.minilmIntermediateDeltaPath(), modelMeta.hiddenSize, modelMeta.intermediateSize)
+                minilmQueryDelta = DenseDeltaAdapter.load(cfg.minilmQueryDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+                minilmKeyDelta = DenseDeltaAdapter.load(cfg.minilmKeyDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+                minilmValueDelta = DenseDeltaAdapter.load(cfg.minilmValueDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+                minilmAttentionDenseDelta = DenseDeltaAdapter.load(cfg.minilmAttentionDenseDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
+                minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmAttentionLayerNormDeltaPath(), modelMeta.hiddenSize)
+                minilmLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmLayerNormDeltaPath(), modelMeta.hiddenSize)
+            }
             if cfg.trainAllMiniLMLayers {
                 minilmLayerDeltas = MiniLMLayerDeltas.load(cfg.outputModelDir, runtimeLayers, modelMeta.hiddenSize, modelMeta.intermediateSize)
             }

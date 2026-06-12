@@ -1,4 +1,4 @@
-import dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
+import dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter, denseDeltaBinarySidecarPath}
 import embedding_delta.{MiniLMEmbeddingDeltas}
 import io.file.{copyFileBytes, exists, readBytesPrefix, readBytesRange, size, writeBytes, writeBytesAt}
 import io_utils.{writeAtomicText}
@@ -349,7 +349,7 @@ fun materializeDenseDeltaSafetensors(info: SafeTensorInfo, outputPath: String, w
     if not info.validHeader {
         return false
     }
-    if not exists(deltaPath) {
+    if not exists(deltaPath) and not exists(denseDeltaBinarySidecarPath(deltaPath)) {
         return false
     }
     let weightIndex = findTensorEntryIndex(info, weightName)
@@ -412,7 +412,7 @@ fun materializeLayerNormDeltaSafetensors(info: SafeTensorInfo, outputPath: Strin
     if not info.validHeader {
         return false
     }
-    if not exists(deltaPath) {
+    if not exists(deltaPath) and not exists(denseDeltaBinarySidecarPath(deltaPath)) {
         return false
     }
     let weightIndex = findTensorEntryIndex(info, weightName)

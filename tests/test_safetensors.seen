@@ -1,5 +1,6 @@
 import trainer.dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
 import trainer.embedding_delta.{MiniLMEmbeddingDeltas}
+import trainer.io.file.{deleteFile, exists}
 import trainer.safetensors.{SafeTensorInfo, SafeTensorWriteSpec, loadTensorF32, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors, writeSingleTensorF32, writeTensorBundleF32}
 
 fun expect(condition: Bool, message: String) r: Void {
@@ -90,6 +91,12 @@ fun main() -> Int {
     denseDelta.biasDelta[1] = -0.25
     let denseDeltaPath = "/tmp/seen_trainer_safetensors/dense_delta.json"
     expect(denseDelta.save(denseDeltaPath), "save dense delta")
+    expect(exists(denseDeltaPath + ".bin"), "save dense delta binary sidecar")
+    let _deleteDenseJson = deleteFile(denseDeltaPath)
+    let denseSidecarLoaded = DenseDeltaAdapter.load(denseDeltaPath, 2, 2)
+    expect(denseSidecarLoaded.loaded, "load dense delta from binary sidecar")
+    expect(closeEnough(denseSidecarLoaded.weightDelta[0], 0.1) and closeEnough(denseSidecarLoaded.weightDelta[3], 0.4), "dense sidecar weight values")
+    expect(closeEnough(denseSidecarLoaded.biasDelta[0], 0.5) and closeEnough(denseSidecarLoaded.biasDelta[1], -0.25), "dense sidecar bias values")
     let denseOut = "/tmp/seen_trainer_safetensors/materialized_dense.safetensors"
     expect(materializeDenseDeltaSafetensors(SafeTensorInfo.inspect(bundlePath), denseOut, "dense.weight", "dense.bias", denseDeltaPath, 2, 2), "materialize dense delta")
     let denseInfo = SafeTensorInfo.inspect(denseOut)
@@ -106,6 +113,12 @@ fun main() -> Int {
     lnDelta.biasDelta[1] = 0.2
     let lnDeltaPath = "/tmp/seen_trainer_safetensors/layernorm_delta.json"
     expect(lnDelta.save(lnDeltaPath), "save layernorm delta")
+    expect(exists(lnDeltaPath + ".bin"), "save layernorm delta binary sidecar")
+    let _deleteLayerNormJson = deleteFile(lnDeltaPath)
+    let lnSidecarLoaded = LayerNormDeltaAdapter.load(lnDeltaPath, 2)
+    expect(lnSidecarLoaded.loaded, "load layernorm delta from binary sidecar")
+    expect(closeEnough(lnSidecarLoaded.weightDelta[0], 0.25) and closeEnough(lnSidecarLoaded.weightDelta[1], -0.5), "layernorm sidecar weight values")
+    expect(closeEnough(lnSidecarLoaded.biasDelta[0], 0.1) and closeEnough(lnSidecarLoaded.biasDelta[1], 0.2), "layernorm sidecar bias values")
     let lnOut = "/tmp/seen_trainer_safetensors/materialized_ln.safetensors"
     expect(materializeLayerNormDeltaSafetensors(denseInfo, lnOut, "ln.weight", "ln.bias", lnDeltaPath, 2), "materialize layernorm delta")
     let lnInfo = SafeTensorInfo.inspect(lnOut)
