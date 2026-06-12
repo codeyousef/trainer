@@ -72,9 +72,11 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
         encoder.minilmAttentionDenseDelta.saveAs(cfg.minilmAttentionDenseDeltaPath(), "seen-minilm-attention-output-dense-delta-v1")
         encoder.minilmAttentionLayerNormDelta.saveAttentionOutput(cfg.minilmAttentionLayerNormDeltaPath())
         encoder.minilmLayerNormDelta.save(cfg.minilmLayerNormDeltaPath())
-        let baseUpdate = writeDirectBaseWeightUpdateArtifact(cfg, encoder.modelEmbeddings.layers, encoder.embeddingDim, encoder.modelEmbeddings.intermediateSize)
-        if baseUpdate.anyMaterialized() {
-            println("trainer: flushed " + baseUpdate.totalSurfaces.toString() + " trained surfaces into " + baseUpdate.outputPath)
+        if cfg.copyBaseArtifacts {
+            let baseUpdate = writeDirectBaseWeightUpdateArtifact(cfg, encoder.modelEmbeddings.layers, encoder.embeddingDim, encoder.modelEmbeddings.intermediateSize)
+            if baseUpdate.anyMaterialized() {
+                println("trainer: flushed " + baseUpdate.totalSurfaces.toString() + " trained surfaces into " + baseUpdate.outputPath)
+            }
         }
     }
     encoder.minilmLayerAdapter.save(cfg.minilmLayerAdapterPath())
@@ -171,6 +173,7 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"parameter_registry_load_cap_elements\": " + resolvedParameterRegistryLoadCap(cfg).toString() + ",\n"
         + "  \"train_all_minilm_layers\": " + cfg.trainAllMiniLMLayers.toString() + ",\n"
         + "  \"max_minilm_layers\": " + cfg.maxMiniLMLayers.toString() + ",\n"
+        + "  \"cache_minilm_tensors\": " + cfg.cacheMiniLMTensors.toString() + ",\n"
         + "  \"effective_minilm_layers\": " + runtimeLayers.toString() + ",\n"
         + "  \"capabilities\": {\n"
         + trainerCapabilityFields(cfg) + "\n"
@@ -227,6 +230,7 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"minilm_embedding_delta_update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
         + "  \"minilm_embedding_delta_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
         + "  \"minilm_embedding_delta_path\": \"" + miniLMEmbeddingDeltasPath(cfg.outputModelDir) + "\",\n"
+        + "  \"direct_base_weight_update_enabled\": " + cfg.copyBaseArtifacts.toString() + ",\n"
         + "  \"direct_base_weight_update_artifact\": \"" + directBaseWeightsPath(cfg) + "\",\n"
         + "  \"direct_base_weight_update_manifest\": \"" + cfg.outputModelDir + "/seen_base_weight_update_manifest.json\",\n"
         + "  \"direct_base_weight_update_mode\": \"apply_adamw_to_loaded_base_plus_delta_then_materialize_delta_into_safetensors_base_weights\",\n"

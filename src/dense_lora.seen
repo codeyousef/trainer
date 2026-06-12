@@ -1,6 +1,7 @@
 import io.file.{exists, readText}
 import adapter.{adapterClamp, adapterContains, adapterLowRankSeed, adapterPowFloat, adapterSqrtApprox}
 import io_utils.{writeAtomicText}
+import str.string.{StringBuilder}
 
 class DenseLoRAAdapter {
     var inputDim: Int
@@ -413,31 +414,38 @@ class DenseDeltaAdapter {
     }
 
     fun toJsonWithFormat(format: String) r: String {
-        var out = "{\n"
-            + "  \"format\": \"" + format + "\",\n"
-            + "  \"input_dim\": " + this.inputDim.toString() + ",\n"
-            + "  \"output_dim\": " + this.outputDim.toString() + ",\n"
-            + "  \"weight_delta\": ["
+        let builder = StringBuilder.new()
+        builder.append("{\n")
+        builder.append("  \"format\": \"")
+        builder.append(format)
+        builder.append("\",\n")
+        builder.append("  \"input_dim\": ")
+        builder.append(this.inputDim.toString())
+        builder.append(",\n")
+        builder.append("  \"output_dim\": ")
+        builder.append(this.outputDim.toString())
+        builder.append(",\n")
+        builder.append("  \"weight_delta\": [")
         var i = 0
         while i < this.weightDelta.length() {
             if i > 0 {
-                out = out + ", "
+                builder.append(", ")
             }
-            out = out + this.weightDelta[i].toString()
+            builder.append(this.weightDelta[i].toString())
             i = i + 1
         }
-        out = out + "],\n"
-            + "  \"bias_delta\": ["
+        builder.append("],\n")
+        builder.append("  \"bias_delta\": [")
         i = 0
         while i < this.biasDelta.length() {
             if i > 0 {
-                out = out + ", "
+                builder.append(", ")
             }
-            out = out + this.biasDelta[i].toString()
+            builder.append(this.biasDelta[i].toString())
             i = i + 1
         }
-        out = out + "]\n}\n"
-        return out
+        builder.append("]\n}\n")
+        return builder.toString()
     }
 
     fun summaryNamed(prefix: String) r: String {

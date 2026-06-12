@@ -25,7 +25,7 @@ fun trainerCapabilityFields(cfg: TrainerConfig) r: String {
         + "  \"embedding_delta_update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
         + "  \"embedding_delta_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
         + "  \"all_ready_layer_delta_backprop\": true,\n"
-        + "  \"direct_safetensors_base_weight_update\": true,\n"
+        + "  \"direct_safetensors_base_weight_update\": " + cfg.copyBaseArtifacts.toString() + ",\n"
         + "  \"direct_safetensors_base_weight_update_mode\": \"apply_adamw_to_loaded_base_plus_delta_then_materialize_delta_into_safetensors_base_weights\",\n"
         + "  \"direct_safetensors_base_weight_update_artifact\": \"" + cfg.outputModelDir + "/seen_trained_base_model.safetensors\",\n"
         + "  \"direct_safetensors_base_weight_update_manifest\": \"" + cfg.outputModelDir + "/seen_base_weight_update_manifest.json\",\n"

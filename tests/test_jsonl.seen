@@ -59,12 +59,14 @@ fun main() -> Int {
         + "\"parameter_registry_load_cap_elements\":7,"
         + "\"train_all_minilm_layers\":false,"
         + "\"max_minilm_layers\":1,"
+        + "\"cache_minilm_tensors\":true,"
         + "\"learning_rate\":2e-5}")
     let cfg = readConfig(sourceDir + "/config.json")
     expect(cfg.learningRate > 0.000019 and cfg.learningRate < 0.000021, "scientific config float")
     expect(cfg.parameterRegistryLoadCapElements == 7, "registry cap config")
     expect(not cfg.trainAllMiniLMLayers, "train all layers config")
     expect(cfg.maxMiniLMLayers == 1, "max minilm layers config")
+    expect(cfg.cacheMiniLMTensors, "cache minilm tensors config")
     let pairs = readSourcePairs(cfg)
     expect(pairs.length() == 1, "csv source adapter filter")
     expect(pairs[0].queryText == "How to reset?", "csv query column")

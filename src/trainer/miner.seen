@@ -316,6 +316,9 @@ fun insertTopCandidate(indices: Array<Int>, scores: Array<Float>, idx: Int, scor
 }
 
 fun passesQualityFilter(item: TripletExample, encoder: Encoder, margin: Float) r: Bool {
+    if margin <= -1.0 {
+        return true
+    }
     if item.hardNegativeChunkText.length() == 0 {
         return true
     }

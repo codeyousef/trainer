@@ -26,7 +26,7 @@ class ModelBundle {
         let runtimeLayers = resolvedMiniLMLayers(cfg, modelMeta.layers)
         let tokenizer = Tokenizer.load(cfg.tokenizerPath(), cfg.maxSequenceLength)
         let weights = SafeTensorInfo.inspect(cfg.modelWeightsPath())
-        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, runtimeLayers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
+        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, runtimeLayers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend, cfg.cacheMiniLMTensors)
         var minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)
