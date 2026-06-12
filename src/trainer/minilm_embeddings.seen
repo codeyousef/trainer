@@ -900,20 +900,20 @@ fun applyEncoderLayerWithDenseAdapterBackend(info: SafeTensorInfo, sequence: Arr
 
     let attnDense = projectSequenceWithDenseDeltaBackend(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attentionDenseDelta, applyDenseAdapter, backend)
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
-    var attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values)
+    var attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values, backend)
     if applyDenseAdapter {
         let effectiveAttentionWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attentionLayerNormDelta)
         let effectiveAttentionBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
-        attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias)
+        attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias, backend)
     }
     let ffIntermediate = feedForwardIntermediateWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, applyDenseAdapter, backend)
     let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, applyDenseAdapter, backend)
     if applyDenseAdapter {
         let effectiveWeight = layerNormDelta.effectiveWeight(outputLnWeight.values)
         let effectiveBias = layerNormDelta.effectiveBias(outputLnBias.values)
-        return residualLayerNormValues(ffOutput, attnNorm, seqLen, hiddenSize, effectiveWeight, effectiveBias)
+        return residualLayerNormValuesBackend(ffOutput, attnNorm, seqLen, hiddenSize, effectiveWeight, effectiveBias, backend)
     }
-    return residualLayerNorm(ffOutput, attnNorm, seqLen, hiddenSize, outputLnWeight, outputLnBias)
+    return residualLayerNormBackend(ffOutput, attnNorm, seqLen, hiddenSize, outputLnWeight, outputLnBias, backend)
 }
 
 fun normalizeMiniLMLayerAdapterLayer(adapterLayer: Int, readyLayers: Int) r: Int {
@@ -1178,7 +1178,22 @@ fun residualLayerNorm(values: Array<Float>, residual: Array<Float>, seqLen: Int,
     return residualLayerNormValues(values, residual, seqLen, hiddenSize, normWeight.values, normBias.values)
 }
 
+fun residualLayerNormBackend(values: Array<Float>, residual: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: EmbeddingTensorLoad, normBias: EmbeddingTensorLoad, backend: String) r: Array<Float> {
+    return residualLayerNormValuesBackend(values, residual, seqLen, hiddenSize, normWeight.values, normBias.values, backend)
+}
+
 fun residualLayerNormValues(values: Array<Float>, residual: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>) r: Array<Float> {
+    return residualLayerNormValuesBackend(values, residual, seqLen, hiddenSize, normWeight, normBias, "cpu")
+}
+
+fun residualLayerNormValuesBackend(values: Array<Float>, residual: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>, backend: String) r: Array<Float> {
+    if miniLMBackendIsGpu(backend) {
+        let merged = addFlatRows(values, residual, seqLen, hiddenSize)
+        let normed = layerNormRowsBackend(merged, seqLen, hiddenSize, normWeight, normBias, backend)
+        if normed.length() == seqLen * hiddenSize {
+            return normed
+        }
+    }
     let out = Array<Float>()
     var row = 0
     while row < seqLen {
@@ -1527,14 +1542,14 @@ fun applyFinalDenseTrace(info: SafeTensorInfo, sequence: Array<Float>, seqLen: I
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
     let effectiveAttnWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attentionLayerNormDelta)
     let effectiveAttnBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
-    let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, effectiveAttnWeight, effectiveAttnBias)
+    let attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, effectiveAttnWeight, effectiveAttnBias, backend)
     let interPre = feedForwardPreActivationWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, true, backend)
     let ffIntermediate = geluFlat(interPre)
     let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, true, backend)
     let lnInput = addFlatRows(ffOutput, attnNorm, seqLen, hiddenSize)
     let effectiveWeight = layerNormDelta.effectiveWeight(outputLnWeight.values)
     let effectiveBias = layerNormDelta.effectiveBias(outputLnBias.values)
-    let output = layerNormRows(lnInput, seqLen, hiddenSize, effectiveWeight, effectiveBias)
+    let output = layerNormRowsBackend(lnInput, seqLen, hiddenSize, effectiveWeight, effectiveBias, backend)
     return MiniLMDenseTrace.success(seqLen, intermediateSize, hiddenSize, attnNorm, interPre, ffIntermediate, sequence, q, k, v, context, attnOutWeight.values, attnLnInput, effectiveAttnWeight, intermediateWeight.values, lnInput, effectiveWeight, effectiveBias, outputWeight.values, output, meanPoolFlat(output, seqLen, hiddenSize))
 }
 
@@ -1579,6 +1594,22 @@ fun addFlatRows(a: Array<Float>, b: Array<Float>, seqLen: Int, hiddenSize: Int) 
 }
 
 fun layerNormRows(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>) r: Array<Float> {
+    return layerNormRowsBackend(values, seqLen, hiddenSize, normWeight, normBias, "cpu")
+}
+
+fun layerNormRowsBackend(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>, backend: String) r: Array<Float> {
+    if miniLMBackendIsGpu(backend) and seqLen > 0 and hiddenSize > 0 and values.length() >= seqLen * hiddenSize and normWeight.length() >= hiddenSize and normBias.length() >= hiddenSize {
+        let input = Tensor.fromArray(seqLen, hiddenSize, values, backend)
+        let normalized = input.layerNormRows()
+        if normalized.values.length() == seqLen * hiddenSize {
+            let weights = Tensor.fromArray(seqLen, hiddenSize, repeatLayerNormParameters(normWeight, seqLen, hiddenSize), backend)
+            let biases = Tensor.fromArray(seqLen, hiddenSize, repeatLayerNormParameters(normBias, seqLen, hiddenSize), backend)
+            let out = normalized.mulElementwise(weights).add(biases)
+            if out.values.length() == seqLen * hiddenSize {
+                return out.values
+            }
+        }
+    }
     let out = Array<Float>()
     var row = 0
     while row < seqLen {
@@ -1587,6 +1618,24 @@ fun layerNormRows(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight
         var d = 0
         while d < hiddenSize {
             out.push(normed[d])
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun repeatLayerNormParameters(values: Array<Float>, seqLen: Int, hiddenSize: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        var d = 0
+        while d < hiddenSize {
+            var value = 0.0
+            if d >= 0 and d < values.length() {
+                value = values[d]
+            }
+            out.push(value)
             d = d + 1
         }
         row = row + 1
@@ -1931,7 +1980,7 @@ fun transformerLayerInputGradientBackend(info: SafeTensorInfo, sequence: Array<F
     }
     let attnDense = projectSequenceLinearBackend(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, backend)
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
-    let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values)
+    let attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values, backend)
     let interPre = projectSequenceLinearBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, backend)
     let ffIntermediate = geluFlat(interPre)
     let ffOutput = projectSequenceLinearBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, backend)
@@ -2009,7 +2058,7 @@ fun transformerLayerInputGradientWithLayerDeltasBackend(info: SafeTensorInfo, se
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
     let attnWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attnLayerNormDelta)
     let attnBias = layerNormDeltaEffectiveBias(attnLnBias.values, attnLayerNormDelta)
-    let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnWeight, attnBias)
+    let attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, attnWeight, attnBias, backend)
     let interPre = feedForwardPreActivationWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, true, backend)
     let ffIntermediate = geluFlat(interPre)
     let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), outputDelta, true, backend)
