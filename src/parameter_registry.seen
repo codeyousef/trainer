@@ -1,0 +1,341 @@
+import json.builder.{escapeJsonString}
+import io_utils.{writeAtomicText}
+import minilm_weights.{mwFindCandidateIndex}
+import safetensors.{SafeTensorInfo, loadTensorF32, tensorCols, tensorRows}
+import tensor.{Parameter}
+
+class MiniLMParameterSlot {
+    var logicalName: String
+    var tensorName: String
+    var role: String
+    var found: Bool
+    var loaded: Bool
+    var trainable: Bool
+    var rows: Int
+    var cols: Int
+    var elements: Int
+    var parameterIndex: Int
+    var valueBuffer: Int
+    var gradBuffer: Int
+    var momentBufferM: Int
+    var momentBufferV: Int
+    var loadError: String
+
+    static fun missing(logicalName: String, role: String, error: String) r: MiniLMParameterSlot {
+        return MiniLMParameterSlot{
+            logicalName: logicalName,
+            tensorName: "",
+            role: role,
+            found: false,
+            loaded: false,
+            trainable: false,
+            rows: 0,
+            cols: 0,
+            elements: 0,
+            parameterIndex: -1,
+            valueBuffer: 0,
+            gradBuffer: 0,
+            momentBufferM: 0,
+            momentBufferV: 0,
+            loadError: error
+        }
+    }
+
+    static fun unloaded(logicalName: String, tensorName: String, role: String, rows: Int, cols: Int, elements: Int, error: String) r: MiniLMParameterSlot {
+        return MiniLMParameterSlot{
+            logicalName: logicalName,
+            tensorName: tensorName,
+            role: role,
+            found: true,
+            loaded: false,
+            trainable: false,
+            rows: rows,
+            cols: cols,
+            elements: elements,
+            parameterIndex: -1,
+            valueBuffer: 0,
+            gradBuffer: 0,
+            momentBufferM: 0,
+            momentBufferV: 0,
+            loadError: error
+        }
+    }
+
+    static fun loaded(logicalName: String, tensorName: String, role: String, rows: Int, cols: Int, parameterIndex: Int, valueBuffer: Int, gradBuffer: Int, momentBufferM: Int, momentBufferV: Int) r: MiniLMParameterSlot {
+        return MiniLMParameterSlot{
+            logicalName: logicalName,
+            tensorName: tensorName,
+            role: role,
+            found: true,
+            loaded: true,
+            trainable: true,
+            rows: rows,
+            cols: cols,
+            elements: rows * cols,
+            parameterIndex: parameterIndex,
+            valueBuffer: valueBuffer,
+            gradBuffer: gradBuffer,
+            momentBufferM: momentBufferM,
+            momentBufferV: momentBufferV,
+            loadError: ""
+        }
+    }
+
+    fun json() r: String {
+        return "    {"
+            + "\"logical\": " + escapeJsonString(this.logicalName)
+            + ", \"tensor\": " + escapeJsonString(this.tensorName)
+            + ", \"role\": " + escapeJsonString(this.role)
+            + ", \"found\": " + this.found.toString()
+            + ", \"loaded\": " + this.loaded.toString()
+            + ", \"trainable\": " + this.trainable.toString()
+            + ", \"rows\": " + this.rows.toString()
+            + ", \"cols\": " + this.cols.toString()
+            + ", \"elements\": " + this.elements.toString()
+            + ", \"parameter_index\": " + this.parameterIndex.toString()
+            + ", \"value_buffer\": " + this.valueBuffer.toString()
+            + ", \"grad_buffer\": " + this.gradBuffer.toString()
+            + ", \"moment_buffer_m\": " + this.momentBufferM.toString()
+            + ", \"moment_buffer_v\": " + this.momentBufferV.toString()
+            + ", \"load_error\": " + escapeJsonString(this.loadError)
+            + "}"
+    }
+}
+
+class MiniLMParameterRegistry {
+    var validSource: Bool
+    var hiddenSize: Int
+    var layersExpected: Int
+    var intermediateSize: Int
+    var maxLoadElements: Int
+    var backend: String
+    var totalSlots: Int
+    var foundSlots: Int
+    var loadedSlots: Int
+    var trainableSlots: Int
+    var embeddingSlots: Int
+    var encoderSlots: Int
+    var parameterCount: Int
+    var gradBufferCount: Int
+    var momentBufferCount: Int
+    var firstMissing: String
+    var firstLoadError: String
+    var slots: Array<MiniLMParameterSlot>
+    var parameters: Array<Parameter>
+    var slotsJsonText: String
+
+    static fun empty(hiddenSize: Int, layersExpected: Int, intermediateSize: Int, maxLoadElements: Int, backend: String, validSource: Bool) r: MiniLMParameterRegistry {
+        return MiniLMParameterRegistry{
+            validSource: validSource,
+            hiddenSize: hiddenSize,
+            layersExpected: layersExpected,
+            intermediateSize: intermediateSize,
+            maxLoadElements: maxLoadElements,
+            backend: backend,
+            totalSlots: 0,
+            foundSlots: 0,
+            loadedSlots: 0,
+            trainableSlots: 0,
+            embeddingSlots: 0,
+            encoderSlots: 0,
+            parameterCount: 0,
+            gradBufferCount: 0,
+            momentBufferCount: 0,
+            firstMissing: "",
+            firstLoadError: "",
+            slots: Array<MiniLMParameterSlot>(),
+            parameters: Array<Parameter>(),
+            slotsJsonText: ""
+        }
+    }
+
+    static fun inspect(info: SafeTensorInfo, hiddenSize: Int, layersExpected: Int, intermediateSize: Int, maxLoadElements: Int, backend: String) r: MiniLMParameterRegistry {
+        let registry = MiniLMParameterRegistry.empty(hiddenSize, layersExpected, intermediateSize, maxLoadElements, backend, info.validHeader)
+        if not info.validHeader {
+            registry.firstLoadError = info.error
+            return registry
+        }
+
+        registry.addEmbeddingSlot(info, "embeddings.word", "embeddings.word_embeddings.weight")
+        registry.addEmbeddingSlot(info, "embeddings.position", "embeddings.position_embeddings.weight")
+        registry.addEmbeddingSlot(info, "embeddings.token_type", "embeddings.token_type_embeddings.weight")
+        registry.addEmbeddingSlot(info, "embeddings.layer_norm.weight", "embeddings.LayerNorm.weight")
+        registry.addEmbeddingSlot(info, "embeddings.layer_norm.bias", "embeddings.LayerNorm.bias")
+
+        var layer = 0
+        while layer < layersExpected {
+            registry.addLayerSlots(info, layer)
+            layer = layer + 1
+        }
+        return registry
+    }
+
+    fun addEmbeddingSlot(info: SafeTensorInfo, logicalName: String, canonicalName: String) r: Void {
+        this.embeddingSlots = this.embeddingSlots + 1
+        this.addSlot(info, logicalName, canonicalName, "embedding")
+    }
+
+    fun addLayerSlots(info: SafeTensorInfo, layer: Int) r: Void {
+        let prefix = "encoder.layer." + layer.toString() + "."
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.query.weight", prefix + "attention.self.query.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.query.bias", prefix + "attention.self.query.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.key.weight", prefix + "attention.self.key.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.key.bias", prefix + "attention.self.key.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.value.weight", prefix + "attention.self.value.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.value.bias", prefix + "attention.self.value.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.output.weight", prefix + "attention.output.dense.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.output.bias", prefix + "attention.output.dense.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.layer_norm.weight", prefix + "attention.output.LayerNorm.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".attention.layer_norm.bias", prefix + "attention.output.LayerNorm.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".intermediate.weight", prefix + "intermediate.dense.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".intermediate.bias", prefix + "intermediate.dense.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".output.weight", prefix + "output.dense.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".output.bias", prefix + "output.dense.bias")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".output.layer_norm.weight", prefix + "output.LayerNorm.weight")
+        this.addEncoderSlot(info, "layer." + layer.toString() + ".output.layer_norm.bias", prefix + "output.LayerNorm.bias")
+    }
+
+    fun addEncoderSlot(info: SafeTensorInfo, logicalName: String, canonicalName: String) r: Void {
+        this.encoderSlots = this.encoderSlots + 1
+        this.addSlot(info, logicalName, canonicalName, "encoder")
+    }
+
+    fun addSlot(info: SafeTensorInfo, logicalName: String, canonicalName: String, role: String) r: Void {
+        this.totalSlots = this.totalSlots + 1
+        let index = mwFindCandidateIndex(info, canonicalName)
+        if index < 0 {
+            if this.firstMissing.length() == 0 {
+                this.firstMissing = logicalName
+            }
+            this.appendSlotJson(logicalName, "", role, false, false, false, 0, 0, 0, -1, 0, 0, 0, 0, "missing")
+            this.slots.push(MiniLMParameterSlot.missing(logicalName, role, "missing"))
+            return
+        }
+
+        let entry = info.entries[index]
+        let rows = tensorRows(entry)
+        let cols = tensorCols(entry)
+        let elements = entry.elementCount()
+        this.foundSlots = this.foundSlots + 1
+        if this.maxLoadElements <= 0 {
+            this.recordLoadError("loading disabled by cap")
+            this.appendSlotJson(logicalName, entry.name, role, true, false, false, rows, cols, elements, -1, 0, 0, 0, 0, "loading disabled by cap")
+            this.slots.push(MiniLMParameterSlot.unloaded(logicalName, entry.name, role, rows, cols, elements, "loading disabled by cap"))
+            return
+        }
+        if elements > this.maxLoadElements {
+            let capError = "element count exceeds cap"
+            this.recordLoadError(capError)
+            this.appendSlotJson(logicalName, entry.name, role, true, false, false, rows, cols, elements, -1, 0, 0, 0, 0, capError)
+            this.slots.push(MiniLMParameterSlot.unloaded(logicalName, entry.name, role, rows, cols, elements, capError))
+            return
+        }
+
+        let loaded = loadTensorF32(info, entry.name, this.backend)
+        if not loaded.ok {
+            this.recordLoadError(loaded.error)
+            this.appendSlotJson(logicalName, entry.name, role, true, false, false, rows, cols, elements, -1, 0, 0, 0, 0, loaded.error)
+            this.slots.push(MiniLMParameterSlot.unloaded(logicalName, entry.name, role, rows, cols, elements, loaded.error))
+            return
+        }
+
+        let parameter = Parameter.zeros(loaded.tensor.values.length())
+        var i = 0
+        while i < loaded.tensor.values.length() {
+            parameter.value[i] = loaded.tensor.values[i]
+            i = i + 1
+        }
+        let parameterIndex = this.parameters.length()
+        this.parameters.push(parameter)
+        this.loadedSlots = this.loadedSlots + 1
+        this.trainableSlots = this.trainableSlots + 1
+        this.parameterCount = this.parameterCount + parameter.value.length()
+        this.gradBufferCount = this.gradBufferCount + parameter.grad.length()
+        this.momentBufferCount = this.momentBufferCount + parameter.m.length() + parameter.v.length()
+        this.appendSlotJson(logicalName, entry.name, role, true, true, true, rows, cols, elements, parameterIndex, parameter.value.length(), parameter.grad.length(), parameter.m.length(), parameter.v.length(), "")
+        this.slots.push(MiniLMParameterSlot.loaded(logicalName, entry.name, role, rows, cols, parameterIndex, parameter.value.length(), parameter.grad.length(), parameter.m.length(), parameter.v.length()))
+    }
+
+    fun appendSlotJson(logicalName: String, tensorName: String, role: String, found: Bool, loaded: Bool, trainable: Bool, rows: Int, cols: Int, elements: Int, parameterIndex: Int, valueBuffer: Int, gradBuffer: Int, momentBufferM: Int, momentBufferV: Int, loadError: String) r: Void {
+        if this.slotsJsonText.length() > 0 {
+            this.slotsJsonText = this.slotsJsonText + ",\n"
+        }
+        this.slotsJsonText = this.slotsJsonText
+            + "    {"
+            + "\"logical\": " + escapeJsonString(logicalName)
+            + ", \"tensor\": " + escapeJsonString(tensorName)
+            + ", \"role\": " + escapeJsonString(role)
+            + ", \"found\": " + found.toString()
+            + ", \"loaded\": " + loaded.toString()
+            + ", \"trainable\": " + trainable.toString()
+            + ", \"rows\": " + rows.toString()
+            + ", \"cols\": " + cols.toString()
+            + ", \"elements\": " + elements.toString()
+            + ", \"parameter_index\": " + parameterIndex.toString()
+            + ", \"value_buffer\": " + valueBuffer.toString()
+            + ", \"grad_buffer\": " + gradBuffer.toString()
+            + ", \"moment_buffer_m\": " + momentBufferM.toString()
+            + ", \"moment_buffer_v\": " + momentBufferV.toString()
+            + ", \"load_error\": " + escapeJsonString(loadError)
+            + "}"
+    }
+
+    fun recordLoadError(error: String) r: Void {
+        if this.firstLoadError.length() == 0 {
+            this.firstLoadError = error
+        }
+    }
+
+    fun allRequiredFound() r: Bool {
+        return this.totalSlots > 0 and this.foundSlots == this.totalSlots
+    }
+
+    fun allRequiredLoaded() r: Bool {
+        return this.totalSlots > 0 and this.loadedSlots == this.totalSlots
+    }
+
+    fun summary() r: String {
+        return "minilm_parameters_loaded=" + this.loadedSlots.toString() + "/" + this.totalSlots.toString()
+            + " minilm_parameter_values=" + this.parameterCount.toString()
+            + " minilm_parameter_grad_buffers=" + this.gradBufferCount.toString()
+            + " minilm_parameter_moment_buffers=" + this.momentBufferCount.toString()
+            + " minilm_parameter_registry_backend=" + this.backend
+    }
+
+    fun slotsJson() r: String {
+        return this.slotsJsonText
+    }
+}
+
+fun miniLMParameterRegistryJson(registry: MiniLMParameterRegistry) r: String {
+    return "{\n"
+        + "  \"format\": \"seen-minilm-parameter-registry-v1\",\n"
+        + "  \"parameterization\": \"safetensors_backed_parameter_values_with_grad_and_adam_moments\",\n"
+        + "  \"valid_source\": " + registry.validSource.toString() + ",\n"
+        + "  \"backend\": " + escapeJsonString(registry.backend) + ",\n"
+        + "  \"hidden_size\": " + registry.hiddenSize.toString() + ",\n"
+        + "  \"layers_expected\": " + registry.layersExpected.toString() + ",\n"
+        + "  \"intermediate_size\": " + registry.intermediateSize.toString() + ",\n"
+        + "  \"max_load_elements\": " + registry.maxLoadElements.toString() + ",\n"
+        + "  \"total_slots\": " + registry.totalSlots.toString() + ",\n"
+        + "  \"found_slots\": " + registry.foundSlots.toString() + ",\n"
+        + "  \"loaded_slots\": " + registry.loadedSlots.toString() + ",\n"
+        + "  \"trainable_slots\": " + registry.trainableSlots.toString() + ",\n"
+        + "  \"embedding_slots\": " + registry.embeddingSlots.toString() + ",\n"
+        + "  \"encoder_slots\": " + registry.encoderSlots.toString() + ",\n"
+        + "  \"parameter_count\": " + registry.parameterCount.toString() + ",\n"
+        + "  \"parameter_objects\": " + registry.parameters.length().toString() + ",\n"
+        + "  \"grad_buffer_count\": " + registry.gradBufferCount.toString() + ",\n"
+        + "  \"moment_buffer_count\": " + registry.momentBufferCount.toString() + ",\n"
+        + "  \"all_required_found\": " + registry.allRequiredFound().toString() + ",\n"
+        + "  \"all_required_loaded\": " + registry.allRequiredLoaded().toString() + ",\n"
+        + "  \"first_missing\": " + escapeJsonString(registry.firstMissing) + ",\n"
+        + "  \"first_load_error\": " + escapeJsonString(registry.firstLoadError) + ",\n"
+        + "  \"slots\": [\n"
+        + registry.slotsJson()
+        + "\n  ]\n}\n"
+}
+
+fun writeMiniLMParameterRegistry(path: String, registry: MiniLMParameterRegistry) r: Bool {
+    return writeAtomicText(path, miniLMParameterRegistryJson(registry))
+}

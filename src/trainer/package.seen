@@ -6,6 +6,7 @@ import embedding_delta.{miniLMEmbeddingDeltasPath}
 import io_utils.{writeAtomicText}
 import minilm_weights.{MiniLMWeightMap, writeMiniLMWeightMap}
 import model.{readBertConfig}
+import parameter_registry.{MiniLMParameterRegistry, writeMiniLMParameterRegistry}
 import safetensors.{SafeTensorInfo, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors, writeSeenWeightsManifest}
 
 class PackageResult {
@@ -65,6 +66,10 @@ fun writeModelPackage(cfg: TrainerConfig) r: PackageResult {
     let weights = SafeTensorInfo.inspect(packagedWeightsPathOrBase(cfg))
     let weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
     if writeMiniLMWeightMap(cfg.outputModelDir + "/minilm_weight_map.json", weightMap) {
+        files = files + 1
+    }
+    let parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
+    if writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry) {
         files = files + 1
     }
     if writeSeenWeightsManifest(cfg.outputModelDir + "/model.safetensors.manifest.json", cfg.embeddingDim, weights, packageWeightsManifestNote(denseDeltaMaterialized, intermediateDeltaMaterialized, queryDeltaMaterialized, keyDeltaMaterialized, valueDeltaMaterialized, attentionDenseDeltaMaterialized, attentionLayerNormDeltaMaterialized, layerNormDeltaMaterialized, allLayerDeltaMaterialized, embeddingDeltaMaterialized)) {

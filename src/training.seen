@@ -225,6 +225,8 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"direct_base_weight_update_manifest\": \"" + cfg.outputModelDir + "/seen_base_weight_update_manifest.json\",\n"
         + "  \"direct_base_weight_update_mode\": \"apply_adamw_to_loaded_base_plus_delta_then_materialize_delta_into_safetensors_base_weights\",\n"
         + "  \"base_weight_parameterization\": \"safetensors_base_plus_delta_parameters_materialized_into_base_weights\",\n"
+        + "  \"safetensors_parameter_registry_path\": \"" + cfg.outputModelDir + "/minilm_parameter_registry.json\",\n"
+        + "  \"safetensors_parameter_registry_buffers\": [\"value\", \"grad\", \"adam_m\", \"adam_v\"],\n"
         + "  \"direct_base_parameter_optimizer\": \"adamw_on_loaded_safetensors_base_plus_seen_delta\",\n"
         + "  \"direct_base_weight_update_scope\": \"sparse_embeddings_embedding_layernorm_and_all_ready_minilm_layer_surfaces\",\n"
         + "  \"minilm_attention_output_dense_delta_trained\": true,\n"

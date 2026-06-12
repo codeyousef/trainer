@@ -42,6 +42,7 @@ the scalar path as the correctness reference.
 ## Model Outputs
 
 The package step writes SentenceTransformer-compatible files plus Seen manifests. When local MiniLM safetensors are loaded, training updates sparse embedding rows, embedding LayerNorm, and all ready encoder layer surfaces. These trainable base surfaces apply AdamW to the loaded safetensors base value plus the Seen delta, then persist the resulting delta so it can be materialized into `seen_trained_base_model.safetensors`.
+Packages also include `minilm_parameter_registry.json`, a Seen-native object graph of loaded MiniLM safetensors tensors as `Parameter` buffers with value, gradient, and Adam moment arrays.
 
 Safetensors metadata is inspected through header reads, tensor loads use byte-range reads, and materialization patches tensor-sized slices or sparse rows instead of loading the whole model file into a Seen byte array.
 

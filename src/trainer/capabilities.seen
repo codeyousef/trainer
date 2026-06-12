@@ -16,6 +16,9 @@ fun trainerCapabilityFields(cfg: TrainerConfig) r: String {
         + "  \"full_base_model_weight_backprop\": true,\n"
         + "  \"full_base_model_weight_backprop_scope\": \"MiniLM_encoder_surfaces_when_all_required_safetensors_are_loaded\",\n"
         + "  \"base_weight_parameterization\": \"safetensors_base_plus_delta_parameters_materialized_into_base_weights\",\n"
+        + "  \"safetensors_parameter_registry\": true,\n"
+        + "  \"safetensors_parameter_registry_artifact\": \"" + cfg.outputModelDir + "/minilm_parameter_registry.json\",\n"
+        + "  \"safetensors_parameter_registry_buffers\": [\"value\", \"grad\", \"adam_m\", \"adam_v\"],\n"
         + "  \"adapter_and_delta_backprop\": true,\n"
         + "  \"embedding_delta_backprop\": true,\n"
         + "  \"embedding_delta_update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
@@ -63,5 +66,5 @@ fun trainerCapabilitiesJson(cfg: TrainerConfig) r: String {
 }
 
 fun trainerPackageReadmeNote() r: String {
-    return "The trainer is implemented in Seen. This v1 trains Seen-native MiniLM sparse embedding deltas, embedding LayerNorm deltas, adapter surfaces, and all-ready-layer query/key/value, attention-output, intermediate, output, and LayerNorm delta surfaces, applies AdamW to loaded safetensors base-plus-delta parameters, flushes the resulting Seen deltas into a safetensors base-weight artifact, uses mean pooling consistently, and emits a SentenceTransformer-compatible package with Seen manifests. Full MiniLM encoder weight backprop is represented with base-aware delta parameters that are materialized into safetensors base weights when all required local model tensors are loaded; the scalar tensor path is the correctness reference and MiniLM forward projections plus tensor operations can dispatch through Seen's Vulkan GPU runtime when backend is gpu and shader artifacts are present.\n"
+    return "The trainer is implemented in Seen. This v1 trains Seen-native MiniLM sparse embedding deltas, embedding LayerNorm deltas, adapter surfaces, and all-ready-layer query/key/value, attention-output, intermediate, output, and LayerNorm delta surfaces, applies AdamW to loaded safetensors base-plus-delta parameters, flushes the resulting Seen deltas into a safetensors base-weight artifact, uses mean pooling consistently, and emits a SentenceTransformer-compatible package with Seen manifests. Full MiniLM encoder weight backprop is represented with base-aware delta parameters that are materialized into safetensors base weights when all required local model tensors are loaded; packages include a safetensors-backed MiniLM parameter registry with value, grad, and Adam moment buffers for loaded tensors; the scalar tensor path is the correctness reference and MiniLM forward projections plus tensor operations can dispatch through Seen's Vulkan GPU runtime when backend is gpu and shader artifacts are present.\n"
 }
