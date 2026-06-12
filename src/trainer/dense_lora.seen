@@ -1,7 +1,7 @@
 import io.file.{ensureParentDirectories, exists, readBytes, readText, writeBytes}
 import adapter.{adapterClamp, adapterContains, adapterLowRankSeed, adapterPowFloat, adapterSqrtApprox}
+import collections.byte_buffer.{f32ArrayAppendLittleEndianBytes, f32ArrayCopyFromLittleEndianBytes}
 import io_utils.{writeAtomicText}
-import math.math.{floor}
 import str.string.{StringBuilder}
 
 class DenseLoRAAdapter {
@@ -441,10 +441,10 @@ class DenseDeltaAdapter {
         if bytes.length() < expectedBytes {
             return false
         }
-        if not denseReadFloatArrayInto(bytes, 20, weightCount, this.weightDelta) {
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, 20, weightCount, this.weightDelta) {
             return false
         }
-        if not denseReadFloatArrayInto(bytes, 20 + weightCount * 4, biasCount, this.biasDelta) {
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, 20 + weightCount * 4, biasCount, this.biasDelta) {
             return false
         }
         this.loaded = true
@@ -458,8 +458,12 @@ class DenseDeltaAdapter {
         denseAppendI32Le(bytes, this.outputDim)
         denseAppendI32Le(bytes, this.weightDelta.length())
         denseAppendI32Le(bytes, this.biasDelta.length())
-        denseAppendFloatArrayLe(bytes, this.weightDelta)
-        denseAppendFloatArrayLe(bytes, this.biasDelta)
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.weightDelta) {
+            return false
+        }
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.biasDelta) {
+            return false
+        }
         return writeBytes(denseDeltaBinarySidecarPath(path), bytes)
     }
 
@@ -804,10 +808,10 @@ class LayerNormDeltaAdapter {
         if bytes.length() < expectedBytes {
             return false
         }
-        if not denseReadFloatArrayInto(bytes, 16, weightCount, this.weightDelta) {
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, 16, weightCount, this.weightDelta) {
             return false
         }
-        if not denseReadFloatArrayInto(bytes, 16 + weightCount * 4, biasCount, this.biasDelta) {
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, 16 + weightCount * 4, biasCount, this.biasDelta) {
             return false
         }
         this.loaded = true
@@ -820,8 +824,12 @@ class LayerNormDeltaAdapter {
         denseAppendI32Le(bytes, this.dim)
         denseAppendI32Le(bytes, this.weightDelta.length())
         denseAppendI32Le(bytes, this.biasDelta.length())
-        denseAppendFloatArrayLe(bytes, this.weightDelta)
-        denseAppendFloatArrayLe(bytes, this.biasDelta)
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.weightDelta) {
+            return false
+        }
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.biasDelta) {
+            return false
+        }
         return writeBytes(denseDeltaBinarySidecarPath(path), bytes)
     }
 
@@ -1056,123 +1064,6 @@ fun denseReadI32Le(bytes: Array<Int>, offset: Int) r: Int {
         + bytes[offset + 1] * 256
         + bytes[offset + 2] * 65536
         + bytes[offset + 3] * 16777216
-}
-
-fun denseAppendFloatArrayLe(bytes: Array<Int>, values: Array<Float>) r: Void {
-    var i = 0
-    while i < values.length() {
-        denseAppendF32Le(bytes, values[i])
-        i = i + 1
-    }
-}
-
-fun denseReadFloatArrayInto(bytes: Array<Int>, offset: Int, count: Int, target: Array<Float>) r: Bool {
-    if count < 0 or count > target.length() {
-        return false
-    }
-    if offset < 0 or offset + count * 4 > bytes.length() {
-        return false
-    }
-    var i = 0
-    while i < count {
-        target[i] = denseReadF32Le(bytes, offset + i * 4)
-        i = i + 1
-    }
-    return true
-}
-
-fun denseAppendF32Le(bytes: Array<Int>, value: Float) r: Void {
-    let bits = denseFloatToF32Bits(value)
-    bytes.push(bits % 256)
-    bytes.push((bits / 256) % 256)
-    bytes.push((bits / 65536) % 256)
-    bytes.push((bits / 16777216) % 256)
-}
-
-fun denseReadF32Le(bytes: Array<Int>, offset: Int) r: Float {
-    if offset < 0 or offset + 3 >= bytes.length() {
-        return 0.0
-    }
-    var bits = denseReadI32Le(bytes, offset)
-    var sign = 1.0
-    if bits >= 2147483648 {
-        sign = -1.0
-        bits = bits - 2147483648
-    }
-    let exponent = bits / 8388608
-    let mantissa = bits % 8388608
-    if exponent == 0 {
-        if mantissa == 0 {
-            return sign * 0.0
-        }
-        return sign * (mantissa.toFloat() / 8388608.0) * densePow2(-126)
-    }
-    if exponent == 255 {
-        if mantissa == 0 {
-            return sign * densePow2(127)
-        }
-        return 0.0
-    }
-    return sign * (1.0 + mantissa.toFloat() / 8388608.0) * densePow2(exponent - 127)
-}
-
-fun denseFloatToF32Bits(value: Float) r: Int {
-    var signBit = 0
-    var v = value
-    if v < 0.0 {
-        signBit = 2147483648
-        v = 0.0 - v
-    }
-    if v <= 0.0 {
-        return signBit
-    }
-    if v < 0.00000000000000000000000000000000000001 {
-        return signBit
-    }
-    var exponent = 0
-    while v >= 2.0 {
-        v = v / 2.0
-        exponent = exponent + 1
-    }
-    while v < 1.0 and exponent > -126 {
-        v = v * 2.0
-        exponent = exponent - 1
-    }
-    if exponent < -126 {
-        return signBit
-    }
-    var expBits = exponent + 127
-    var mantissa = floor((v - 1.0) * 8388608.0 + 0.5).toInt()
-    if mantissa >= 8388608 {
-        mantissa = 0
-        expBits = expBits + 1
-    }
-    if expBits >= 255 {
-        return signBit + 254 * 8388608 + 8388607
-    }
-    return signBit + expBits * 8388608 + mantissa
-}
-
-fun densePow2(exponent: Int) r: Float {
-    var exp = exponent
-    var reciprocal = false
-    if exp < 0 {
-        reciprocal = true
-        exp = 0 - exp
-    }
-    var value = 1.0
-    var base = 2.0
-    while exp > 0 {
-        if exp % 2 == 1 {
-            value = value * base
-        }
-        base = base * base
-        exp = exp / 2
-    }
-    if reciprocal {
-        return 1.0 / value
-    }
-    return value
 }
 
 fun layerNormDeltaFormatRecognized(text: String) r: Bool {

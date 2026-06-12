@@ -1,5 +1,5 @@
 import trainer.embedding_delta.{MiniLMEmbeddingDeltas, miniLMEmbeddingDeltasPath}
-import trainer.io.file.{exists}
+import trainer.io.file.{deleteFile, exists}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
@@ -66,10 +66,16 @@ fun main() -> Int {
     let path = miniLMEmbeddingDeltasPath("/tmp/seen_trainer_embedding_delta")
     expect(delta.save(path), "save embedding deltas")
     expect(exists(path), "embedding delta file exists")
+    expect(exists(path + ".bin"), "embedding delta sidecar exists")
     let loaded = MiniLMEmbeddingDeltas.load(path, 4, 32, 8, 2)
     expect(loaded.loaded, "embedding deltas load")
     expect(loaded.wordRowIds.length() == 1 and loaded.wordRowIds[0] == 5, "loaded word row")
     expect(loaded.wordDeltaAt(5, 0) < 0.0, "loaded word delta")
+    expect(deleteFile(path), "delete embedding delta json")
+    let sidecarLoaded = MiniLMEmbeddingDeltas.load(path, 4, 32, 8, 2)
+    expect(sidecarLoaded.loaded, "embedding deltas load from sidecar")
+    expect(sidecarLoaded.wordRowIds.length() == 1 and sidecarLoaded.wordRowIds[0] == 5, "sidecar word row")
+    expect(sidecarLoaded.wordDeltaAt(5, 0) < 0.0, "sidecar word delta")
 
     let baseAware = MiniLMEmbeddingDeltas.identity(2, 3, 2, 1)
     let baseWord = Array<Float>()

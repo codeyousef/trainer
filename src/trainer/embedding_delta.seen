@@ -1,6 +1,7 @@
 import adapter.{adapterClamp, adapterContains, adapterPowFloat, adapterSqrtApprox}
-import dense_lora.{denseBoolText, denseCopyArrayInto, denseCountArray, denseParseArray, denseParseIntValue, denseZeros}
-import io.file.{ensureParentDirectories, exists, readText}
+import collections.byte_buffer.{f32ArrayAppendLittleEndianBytes, f32ArrayCopyFromLittleEndianBytes}
+import dense_lora.{denseAppendI32Le, denseAppendStringBytes, denseBinaryMagic, denseBoolText, denseCopyArrayInto, denseCountArray, denseDeltaBinarySidecarPath, denseParseArray, denseParseIntValue, denseReadI32Le, denseZeros}
+import io.file.{ensureParentDirectories, exists, readBytes, readText, writeBytes}
 import str.string.{StringBuilder}
 
 class MiniLMEmbeddingDeltas {
@@ -63,6 +64,9 @@ class MiniLMEmbeddingDeltas {
     static fun load(path: String, hiddenSize: Int, wordRows: Int, positionRows: Int, tokenTypeRows: Int) r: MiniLMEmbeddingDeltas {
         let deltas = MiniLMEmbeddingDeltas.identity(hiddenSize, wordRows, positionRows, tokenTypeRows)
         deltas.path = path
+        if deltas.loadBinarySidecar(path) {
+            return deltas
+        }
         if not exists(path) {
             return deltas
         }
@@ -223,7 +227,144 @@ class MiniLMEmbeddingDeltas {
         this.loaded = true
         let builder = this.toJsonBuilder()
         ensureParentDirectories(path)
-        return builder.writeToFile(path)
+        let ok = builder.writeToFile(path)
+        if ok {
+            this.saveBinarySidecar(path)
+        }
+        return ok
+    }
+
+    fun loadBinarySidecar(path: String) r: Bool {
+        let bytes = readBytes(denseDeltaBinarySidecarPath(path))
+        if bytes.length() < 56 {
+            return false
+        }
+        if not denseBinaryMagic(bytes, "SED1") {
+            return false
+        }
+        let fileHidden = denseReadI32Le(bytes, 4)
+        let fileWordRows = denseReadI32Le(bytes, 8)
+        let filePositionRows = denseReadI32Le(bytes, 12)
+        let fileTokenTypeRows = denseReadI32Le(bytes, 16)
+        let fileStep = denseReadI32Le(bytes, 20)
+        let wordIdCount = denseReadI32Le(bytes, 24)
+        let wordDeltaCount = denseReadI32Le(bytes, 28)
+        let positionIdCount = denseReadI32Le(bytes, 32)
+        let positionDeltaCount = denseReadI32Le(bytes, 36)
+        let tokenTypeIdCount = denseReadI32Le(bytes, 40)
+        let tokenTypeDeltaCount = denseReadI32Le(bytes, 44)
+        let layerNormWeightCount = denseReadI32Le(bytes, 48)
+        let layerNormBiasCount = denseReadI32Le(bytes, 52)
+        if fileHidden != this.hiddenSize or fileWordRows != this.wordRows or filePositionRows != this.positionRows or fileTokenTypeRows != this.tokenTypeRows {
+            return false
+        }
+        if wordIdCount < 0 or positionIdCount < 0 or tokenTypeIdCount < 0 {
+            return false
+        }
+        if wordDeltaCount != wordIdCount * this.hiddenSize or positionDeltaCount != positionIdCount * this.hiddenSize or tokenTypeDeltaCount != tokenTypeIdCount * this.hiddenSize {
+            return false
+        }
+        if layerNormWeightCount != this.hiddenSize or layerNormBiasCount != this.hiddenSize {
+            return false
+        }
+        let expectedBytes = 56
+            + (wordIdCount + wordDeltaCount) * 4
+            + (positionIdCount + positionDeltaCount) * 4
+            + (tokenTypeIdCount + tokenTypeDeltaCount) * 4
+            + (layerNormWeightCount + layerNormBiasCount) * 4
+        if bytes.length() < expectedBytes {
+            return false
+        }
+        var offset = 56
+        let wordIds = embeddingReadIntArrayLe(bytes, offset, wordIdCount, this.wordRows)
+        if wordIds.length() != wordIdCount {
+            return false
+        }
+        offset = offset + wordIdCount * 4
+        let wordValues = denseZeros(wordDeltaCount)
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, offset, wordDeltaCount, wordValues) {
+            return false
+        }
+        offset = offset + wordDeltaCount * 4
+        let positionIds = embeddingReadIntArrayLe(bytes, offset, positionIdCount, this.positionRows)
+        if positionIds.length() != positionIdCount {
+            return false
+        }
+        offset = offset + positionIdCount * 4
+        let positionValues = denseZeros(positionDeltaCount)
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, offset, positionDeltaCount, positionValues) {
+            return false
+        }
+        offset = offset + positionDeltaCount * 4
+        let tokenTypeIds = embeddingReadIntArrayLe(bytes, offset, tokenTypeIdCount, this.tokenTypeRows)
+        if tokenTypeIds.length() != tokenTypeIdCount {
+            return false
+        }
+        offset = offset + tokenTypeIdCount * 4
+        let tokenTypeValues = denseZeros(tokenTypeDeltaCount)
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, offset, tokenTypeDeltaCount, tokenTypeValues) {
+            return false
+        }
+        offset = offset + tokenTypeDeltaCount * 4
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, offset, layerNormWeightCount, this.layerNormWeightDelta) {
+            return false
+        }
+        offset = offset + layerNormWeightCount * 4
+        if not f32ArrayCopyFromLittleEndianBytes(bytes, offset, layerNormBiasCount, this.layerNormBiasDelta) {
+            return false
+        }
+        this.wordRowIds = wordIds
+        this.wordDelta = wordValues
+        this.wordM = denseZeros(this.wordDelta.length())
+        this.wordV = denseZeros(this.wordDelta.length())
+        this.positionRowIds = positionIds
+        this.positionDelta = positionValues
+        this.positionM = denseZeros(this.positionDelta.length())
+        this.positionV = denseZeros(this.positionDelta.length())
+        this.tokenTypeRowIds = tokenTypeIds
+        this.tokenTypeDelta = tokenTypeValues
+        this.tokenTypeM = denseZeros(this.tokenTypeDelta.length())
+        this.tokenTypeV = denseZeros(this.tokenTypeDelta.length())
+        this.stepCount = fileStep
+        this.loaded = true
+        return true
+    }
+
+    fun saveBinarySidecar(path: String) r: Bool {
+        let bytes = Array<Int>()
+        denseAppendStringBytes(bytes, "SED1")
+        denseAppendI32Le(bytes, this.hiddenSize)
+        denseAppendI32Le(bytes, this.wordRows)
+        denseAppendI32Le(bytes, this.positionRows)
+        denseAppendI32Le(bytes, this.tokenTypeRows)
+        denseAppendI32Le(bytes, this.stepCount)
+        denseAppendI32Le(bytes, this.wordRowIds.length())
+        denseAppendI32Le(bytes, this.wordDelta.length())
+        denseAppendI32Le(bytes, this.positionRowIds.length())
+        denseAppendI32Le(bytes, this.positionDelta.length())
+        denseAppendI32Le(bytes, this.tokenTypeRowIds.length())
+        denseAppendI32Le(bytes, this.tokenTypeDelta.length())
+        denseAppendI32Le(bytes, this.layerNormWeightDelta.length())
+        denseAppendI32Le(bytes, this.layerNormBiasDelta.length())
+        embeddingAppendIntArrayLe(bytes, this.wordRowIds)
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.wordDelta) {
+            return false
+        }
+        embeddingAppendIntArrayLe(bytes, this.positionRowIds)
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.positionDelta) {
+            return false
+        }
+        embeddingAppendIntArrayLe(bytes, this.tokenTypeRowIds)
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.tokenTypeDelta) {
+            return false
+        }
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.layerNormWeightDelta) {
+            return false
+        }
+        if not f32ArrayAppendLittleEndianBytes(bytes, this.layerNormBiasDelta) {
+            return false
+        }
+        return writeBytes(denseDeltaBinarySidecarPath(path), bytes)
     }
 
     fun toJson() r: String {
@@ -292,6 +433,31 @@ class MiniLMEmbeddingDeltas {
 
 fun miniLMEmbeddingDeltasPath(outputDir: String) r: String {
     return outputDir + "/minilm_embedding_deltas.json"
+}
+
+fun embeddingAppendIntArrayLe(bytes: Array<Int>, values: Array<Int>) r: Void {
+    var i = 0
+    while i < values.length() {
+        denseAppendI32Le(bytes, values[i])
+        i = i + 1
+    }
+}
+
+fun embeddingReadIntArrayLe(bytes: Array<Int>, offset: Int, count: Int, maxValue: Int) r: Array<Int> {
+    let values = Array<Int>()
+    if offset < 0 or count < 0 {
+        return values
+    }
+    var i = 0
+    while i < count {
+        let value = denseReadI32Le(bytes, offset + i * 4)
+        if value < 0 or value >= maxValue {
+            return Array<Int>()
+        }
+        values.push(value)
+        i = i + 1
+    }
+    return values
 }
 
 fun embeddingParseRowIds(text: String, key: String, maxRows: Int) r: Array<Int> {
