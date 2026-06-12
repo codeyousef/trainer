@@ -5,7 +5,7 @@ import embedding_delta.{miniLMEmbeddingDeltasPath}
 import encoder.{Encoder}
 import io_utils.{writeAtomicText}
 import jsonl.{TripletExample, readTripletsLimited}
-import math_utils.{cosine, relu, deterministicShuffleIndices}
+import math_utils.{cosine, relu, deterministicShuffleIndices, normalize}
 import parameter_registry.{MiniLMParameterRegistry, writeMiniLMParameterRegistry}
 
 class TrainResult {
@@ -124,13 +124,16 @@ fun trainAdapterTriplet(item: TripletExample, encoder: Encoder, parameterRegistr
             minilmLoss = encoder.minilmLayerAdapter.updateTriplet(miniQ, miniP, miniN, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
         }
     }
-    let rawQ = encoder.encodeLayerInput(item.queryText)
-    let rawP = encoder.encodeLayerInput(item.positiveChunkText)
-    let rawN = encoder.encodeLayerInput(item.hardNegativeChunkText)
+    let rawMeanQ = encoder.encodeRawMean(item.queryText)
+    let rawMeanP = encoder.encodeRawMean(item.positiveChunkText)
+    let rawMeanN = encoder.encodeRawMean(item.hardNegativeChunkText)
+    let rawQ = normalize(rawMeanQ)
+    let rawP = normalize(rawMeanP)
+    let rawN = normalize(rawMeanN)
     let layerLoss = encoder.layerAdapter.updateTriplet(rawQ, rawP, rawN, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
-    let q = encoder.encodeBase(item.queryText)
-    let p = encoder.encodeBase(item.positiveChunkText)
-    let n = encoder.encodeBase(item.hardNegativeChunkText)
+    let q = normalize(encoder.layerAdapter.apply(rawMeanQ))
+    let p = normalize(encoder.layerAdapter.apply(rawMeanP))
+    let n = normalize(encoder.layerAdapter.apply(rawMeanN))
     let adapterLoss = encoder.adapter.updateTriplet(q, p, n, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
     return denseLoss + minilmLoss + layerLoss + adapterLoss
 }
