@@ -1,4 +1,4 @@
-import io.file.{exists, readText}
+import io.file.{exists, readBytes, readText}
 import str.string.{splitWhitespace}
 
 class TokenBatch {
@@ -25,6 +25,7 @@ class Tokenizer {
     var tokenizerConfigLoaded: Bool
     var specialTokensLoaded: Bool
     var vocabSignal: Int
+    var vocabStyle: Int
     var vocabTokens: Array<String>
     var vocabIds: Array<Int>
     var clsId: Int
@@ -35,7 +36,7 @@ class Tokenizer {
 
     static fun load(path: String, maxLength: Int) r: Tokenizer {
         var loaded = false
-        var tokenizerText = ""
+        let tokenizerBytes = Array<Int>()
         let baseDir = parentDir(path)
         let vocabPath = baseDir + "/vocab.txt"
         let hasVocabTxt = exists(vocabPath)
@@ -43,8 +44,13 @@ class Tokenizer {
             loaded = true
         } else if exists(path) {
             println("trainer: reading tokenizer.json")
-            tokenizerText = readText(path)
-            loaded = tokenizerText.length() > 0
+            let loadedBytes = readBytes(path)
+            var bi = 0
+            while bi < loadedBytes.length() {
+                tokenizerBytes.push(loadedBytes[bi])
+                bi = bi + 1
+            }
+            loaded = tokenizerBytes.length() > 0
         }
         println("trainer: reading tokenizer metadata")
         let tokenizerConfig = readText(baseDir + "/tokenizer_config.json")
@@ -72,14 +78,15 @@ class Tokenizer {
             parseTokenizerVocabTxt(readText(vocabPath), vocabTokens, vocabIds)
         } else {
             println("trainer: parsing tokenizer vocab")
-            parseTokenizerVocab(tokenizerText, vocabTokens, vocabIds)
+            parseTokenizerVocabBytes(tokenizerBytes, vocabTokens, vocabIds)
         }
+        let vocabStyle = if tokenizerVocabIsArrayBytes(tokenizerBytes) { 2 } else { detectTokenizerVocabStyle("", vocabTokens) }
         let clsId = findVocabId(vocabTokens, vocabIds, cls, stableTokenId(cls))
         let sepId = findVocabId(vocabTokens, vocabIds, sep, stableTokenId(sep))
         let padId = findVocabId(vocabTokens, vocabIds, pad, stableTokenId(pad))
         let unkId = findVocabId(vocabTokens, vocabIds, unk, stableTokenId(unk))
         let maskId = findVocabId(vocabTokens, vocabIds, mask, stableTokenId(mask))
-        println("trainer: tokenizer ready vocab=" + vocabTokens.length().toString())
+        println("trainer: tokenizer ready vocab=" + vocabTokens.length().toString() + " style=" + vocabStyle.toString())
         return Tokenizer{
             tokenizerPath: path,
             loaded: loaded,
@@ -93,6 +100,7 @@ class Tokenizer {
             tokenizerConfigLoaded: tokenizerConfig.length() > 0,
             specialTokensLoaded: specialTokens.length() > 0,
             vocabSignal: vocabTokens.length(),
+            vocabStyle: vocabStyle,
             vocabTokens: vocabTokens,
             vocabIds: vocabIds,
             clsId: clsId,
@@ -110,7 +118,7 @@ class Tokenizer {
         tokens.push(this.clsToken)
         var i = 0
         while i < raw.length() and tokens.length() < this.maxLength - 1 {
-            appendWordPieces(tokens, raw[i], this.vocabTokens, this.unkToken, this.maxLength - 1)
+            appendTokenizerPieces(tokens, raw[i], this.vocabTokens, this.unkToken, this.maxLength - 1, this.vocabStyle)
             i = i + 1
         }
         tokens.push(this.sepToken)
@@ -209,7 +217,7 @@ fun tokenizerStringEquals(a: String, b: String) r: Bool {
     }
     var i = 0
     while i < a.length() {
-        if a.byteAt(i) != b.byteAt(i) {
+        if a.charAt(i) != b.charAt(i) {
             return false
         }
         i = i + 1
@@ -326,6 +334,60 @@ fun tokenizerSkipWs(text: String, pos: Int) r: Int {
     return i
 }
 
+fun tokenizerFindKeyColonBytes(bytes: Array<Int>, key: String) r: Int {
+    var i = 0
+    while i < bytes.length() {
+        if bytes[i] == 34 and tokenizerBytesMatchString(bytes, i + 1, key) {
+            var j = i + key.length() + 2
+            while j < bytes.length() and bytes[j] != 58 {
+                j = j + 1
+            }
+            if j < bytes.length() {
+                return j + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun tokenizerVocabIsArrayBytes(bytes: Array<Int>) r: Bool {
+    let pos = tokenizerFindKeyColonBytes(bytes, "vocab")
+    if pos < 0 {
+        return false
+    }
+    let i = tokenizerSkipWsBytes(bytes, pos)
+    return i < bytes.length() and bytes[i] == 91
+}
+
+fun tokenizerBytesMatchString(bytes: Array<Int>, offset: Int, text: String) r: Bool {
+    if offset < 0 or offset + text.length() > bytes.length() {
+        return false
+    }
+    var i = 0
+    while i < text.length() {
+        if bytes[offset + i] != text.byteAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun tokenizerSkipWsBytes(bytes: Array<Int>, pos: Int) r: Int {
+    var i = pos
+    while i < bytes.length() {
+        let ch = bytes[i]
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
 fun countNeedles(text: String, needle: String) r: Int {
     if needle.length() == 0 {
         return 0
@@ -349,6 +411,107 @@ fun parseTokenizerVocab(text: String, tokens: Array<String>, ids: Array<Int>) r:
         return 0
     }
     var i = tokenizerSkipWs(text, pos)
+    if i >= text.length() {
+        return 0
+    }
+    if text.charAt(i) == 123 {
+        return parseTokenizerVocabObject(text, i, tokens, ids)
+    }
+    if text.charAt(i) == 91 {
+        return parseTokenizerUnigramVocabArray(text, i, tokens, ids)
+    }
+    return 0
+}
+
+fun parseTokenizerVocabBytes(bytes: Array<Int>, tokens: Array<String>, ids: Array<Int>) r: Int {
+    let pos = tokenizerFindKeyColonBytes(bytes, "vocab")
+    if pos < 0 {
+        return 0
+    }
+    var i = tokenizerSkipWsBytes(bytes, pos)
+    if i >= bytes.length() {
+        return 0
+    }
+    if bytes[i] == 123 {
+        return parseTokenizerVocabObjectBytes(bytes, i, tokens, ids)
+    }
+    if bytes[i] == 91 {
+        return parseTokenizerUnigramVocabArrayBytes(bytes, i, tokens, ids)
+    }
+    return 0
+}
+
+fun parseTokenizerVocabObjectBytes(bytes: Array<Int>, start: Int, tokens: Array<String>, ids: Array<Int>) r: Int {
+    var i = start
+    if i >= bytes.length() or bytes[i] != 123 {
+        return 0
+    }
+    i = i + 1
+    var count = 0
+    while i < bytes.length() {
+        i = tokenizerSkipWsBytes(bytes, i)
+        if i >= bytes.length() or bytes[i] == 125 {
+            return count
+        }
+        if bytes[i] != 34 {
+            i = tokenizerSkipJsonValueBytes(bytes, i)
+        } else {
+            let token = tokenizerReadQuotedBytes(bytes, i)
+            i = tokenizerAfterQuotedBytes(bytes, i)
+            i = tokenizerSkipWsBytes(bytes, i)
+            if i < bytes.length() and bytes[i] == 58 {
+                i = tokenizerSkipWsBytes(bytes, i + 1)
+                let id = tokenizerParseIntBytes(bytes, i)
+                tokens.push(token)
+                ids.push(id)
+                count = count + 1
+                i = tokenizerAfterIntBytes(bytes, i)
+            }
+        }
+        i = tokenizerSkipWsBytes(bytes, i)
+        if i < bytes.length() and bytes[i] == 44 {
+            i = i + 1
+        }
+    }
+    return count
+}
+
+fun parseTokenizerUnigramVocabArrayBytes(bytes: Array<Int>, start: Int, tokens: Array<String>, ids: Array<Int>) r: Int {
+    var i = start
+    if i >= bytes.length() or bytes[i] != 91 {
+        return 0
+    }
+    i = i + 1
+    var id = 0
+    var count = 0
+    while i < bytes.length() {
+        i = tokenizerSkipWsBytes(bytes, i)
+        if i >= bytes.length() or bytes[i] == 93 {
+            return count
+        }
+        if bytes[i] == 91 {
+            var j = tokenizerSkipWsBytes(bytes, i + 1)
+            if j < bytes.length() and bytes[j] == 34 {
+                let token = tokenizerReadQuotedBytes(bytes, j)
+                tokens.push(token)
+                ids.push(id)
+                count = count + 1
+            }
+            i = tokenizerSkipJsonValueBytes(bytes, i)
+            id = id + 1
+        } else {
+            i = tokenizerSkipJsonValueBytes(bytes, i)
+        }
+        i = tokenizerSkipWsBytes(bytes, i)
+        if i < bytes.length() and bytes[i] == 44 {
+            i = i + 1
+        }
+    }
+    return count
+}
+
+fun parseTokenizerVocabObject(text: String, start: Int, tokens: Array<String>, ids: Array<Int>) r: Int {
+    var i = start
     if i >= text.length() or text.charAt(i) != 123 {
         return 0
     }
@@ -373,6 +536,40 @@ fun parseTokenizerVocab(text: String, tokens: Array<String>, ids: Array<Int>) r:
                 count = count + 1
                 i = tokenizerAfterInt(text, i)
             }
+        }
+        i = tokenizerSkipWs(text, i)
+        if i < text.length() and text.charAt(i) == 44 {
+            i = i + 1
+        }
+    }
+    return count
+}
+
+fun parseTokenizerUnigramVocabArray(text: String, start: Int, tokens: Array<String>, ids: Array<Int>) r: Int {
+    var i = start
+    if i >= text.length() or text.charAt(i) != 91 {
+        return 0
+    }
+    i = i + 1
+    var id = 0
+    var count = 0
+    while i < text.length() {
+        i = tokenizerSkipWs(text, i)
+        if i >= text.length() or text.charAt(i) == 93 {
+            return count
+        }
+        if text.charAt(i) == 91 {
+            var j = tokenizerSkipWs(text, i + 1)
+            if j < text.length() and text.charAt(j) == 34 {
+                let token = tokenizerReadQuoted(text, j)
+                tokens.push(token)
+                ids.push(id)
+                count = count + 1
+            }
+            i = tokenizerSkipJsonValue(text, i)
+            id = id + 1
+        } else {
+            i = tokenizerSkipJsonValue(text, i)
         }
         i = tokenizerSkipWs(text, i)
         if i < text.length() and text.charAt(i) == 44 {
@@ -433,6 +630,69 @@ fun vocabContains(tokens: Array<String>, token: String) r: Bool {
     return false
 }
 
+fun detectTokenizerVocabStyle(text: String, tokens: Array<String>) r: Int {
+    if tokenizerJsonStringEquals(text, "type", "Unigram") {
+        return 2
+    }
+    if tokenizerUsesMetaspace(tokens) {
+        return 2
+    }
+    return 1
+}
+
+fun tokenizerJsonStringEquals(text: String, key: String, expected: String) r: Bool {
+    let value = findJsonString(text, key, "")
+    if value.length() == 0 {
+        return false
+    }
+    return tokenizerStringEquals(value, expected)
+}
+
+fun tokenizerUsesMetaspace(tokens: Array<String>) r: Bool {
+    var i = 0
+    while i < tokens.length() and i < 512 {
+        if tokenLooksMetaspacePrefixed(tokens[i]) {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+fun tokenLooksMetaspacePrefixed(token: String) r: Bool {
+    if token.length() == 0 {
+        return false
+    }
+    if token.charAt(0) == 9601 {
+        return true
+    }
+    if token.length() >= 3 and token.charAt(0) == 226 and token.charAt(1) == 150 and token.charAt(2) == 129 {
+        return true
+    }
+    if token.length() >= 3 and token.byteAt(0) == 226 and token.byteAt(1) == 150 and token.byteAt(2) == 129 {
+        return true
+    }
+    return false
+}
+
+fun startsWithTokenizerString(text: String, prefix: String) r: Bool {
+    if prefix.length() == 0 {
+        return true
+    }
+    if text.length() < prefix.length() {
+        return false
+    }
+    return tokenizerStringEquals(text.substring(0, prefix.length()), prefix)
+}
+
+fun appendTokenizerPieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int, style: Int) r: Void {
+    if style == 2 {
+        appendMetaspacePieces(out, word, vocabTokens, unkToken, limit)
+        return
+    }
+    appendWordPieces(out, word, vocabTokens, unkToken, limit)
+}
+
 fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
     if out.length() >= limit {
         return
@@ -478,22 +738,152 @@ fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String
     }
 }
 
-fun tokenizerReadQuoted(text: String, start: Int) r: String {
-    var fast = start + 1
-    while fast < text.length() {
-        let ch = text.charAt(fast)
-        if ch == 34 {
-            return text.substring(start + 1, fast)
+fun appendMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
+    if out.length() >= limit {
+        return
+    }
+    if vocabTokens.length() == 0 {
+        out.push(word)
+        return
+    }
+    appendGreedyMetaspacePieces(out, word, vocabTokens, unkToken, limit)
+}
+
+fun appendGreedyMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
+    var start = 0
+    var failed = false
+    let pieces = Array<String>()
+    while start < word.length() and not failed {
+        var end = word.length()
+        var matched = ""
+        while end > start and matched.length() == 0 {
+            matched = findMetaspaceVocabPiece(vocabTokens, word, start, end, start == 0)
+            if matched.length() == 0 {
+                end = end - 1
+            }
         }
-        if ch == 92 {
-            return tokenizerReadQuotedEscaped(text, start)
+        if matched.length() == 0 {
+            failed = true
+        } else {
+            pieces.push(matched)
+            start = end
         }
-        fast = fast + 1
+    }
+    if failed or pieces.length() == 0 {
+        out.push(unkToken)
+        return
+    }
+    var i = 0
+    while i < pieces.length() and out.length() < limit {
+        out.push(pieces[i])
+        i = i + 1
+    }
+}
+
+fun findMetaspaceVocabPiece(vocabTokens: Array<String>, word: String, start: Int, end: Int, firstPiece: Bool) r: String {
+    var i = 0
+    while i < vocabTokens.length() {
+        if firstPiece {
+            if tokenMatchesMetaspaceSlice(vocabTokens[i], word, start, end) {
+                return vocabTokens[i]
+            }
+        } else {
+            if tokenMatchesPlainSlice(vocabTokens[i], word, start, end) {
+                return vocabTokens[i]
+            }
+        }
+        i = i + 1
     }
     return ""
 }
 
-fun tokenizerReadQuotedEscaped(text: String, start: Int) r: String {
+fun tokenMatchesMetaspaceSlice(token: String, word: String, start: Int, end: Int) r: Bool {
+    let pieceLength = end - start
+    if pieceLength <= 0 {
+        return false
+    }
+    let charOffset = metaspaceCharOffset(token)
+    if charOffset <= 0 {
+        return false
+    }
+    if token.length() != pieceLength + 1 and token.length() != pieceLength + 3 and token.length() != pieceLength + 6 {
+        return false
+    }
+    var i = 0
+    while i < pieceLength {
+        if token.charAt(i + charOffset) != word.charAt(start + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun metaspaceCharOffset(token: String) r: Int {
+    if token.length() == 0 {
+        return 0
+    }
+    if token.charAt(0) == 9601 {
+        return 1
+    }
+    if token.length() >= 3 and token.charAt(0) == 226 and token.charAt(1) == 150 and token.charAt(2) == 129 {
+        return 3
+    }
+    if token.length() >= 3 and token.byteAt(0) == 226 and token.byteAt(1) == 150 and token.byteAt(2) == 129 {
+        return 3
+    }
+    return 0
+}
+
+fun tokenMatchesPlainSlice(token: String, word: String, start: Int, end: Int) r: Bool {
+    let pieceLength = end - start
+    if pieceLength <= 0 or token.length() != pieceLength {
+        return false
+    }
+    var i = 0
+    while i < pieceLength {
+        if token.charAt(i) != word.charAt(start + i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun appendGreedyPieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
+    var start = 0
+    var failed = false
+    let pieces = Array<String>()
+    while start < word.length() and not failed {
+        var end = word.length()
+        var matched = ""
+        while end > start and matched.length() == 0 {
+            let piece = word.substring(start, end)
+            if vocabContains(vocabTokens, piece) {
+                matched = piece
+            } else {
+                end = end - 1
+            }
+        }
+        if matched.length() == 0 {
+            failed = true
+        } else {
+            pieces.push(matched)
+            start = end
+        }
+    }
+    if failed or pieces.length() == 0 {
+        out.push(unkToken)
+        return
+    }
+    var i = 0
+    while i < pieces.length() and out.length() < limit {
+        out.push(pieces[i])
+        i = i + 1
+    }
+}
+
+fun tokenizerReadQuoted(text: String, start: Int) r: String {
     var out = ""
     var i = start + 1
     while i < text.length() {
@@ -518,6 +908,53 @@ fun tokenizerReadQuotedEscaped(text: String, start: Int) r: String {
     return out
 }
 
+fun tokenizerReadQuotedBytes(bytes: Array<Int>, start: Int) r: String {
+    var out = ""
+    var i = start + 1
+    while i < bytes.length() {
+        let ch = bytes[i]
+        if ch == 34 {
+            return out
+        }
+        if ch == 92 {
+            i = i + 1
+            if i < bytes.length() {
+                let esc = bytes[i]
+                if esc == 110 { out = out + "\n" }
+                else if esc == 114 { out = out + "\r" }
+                else if esc == 116 { out = out + "\t" }
+                else if esc == 117 {
+                    if i + 4 < bytes.length() {
+                        let cp = tokenizerParseHex4Bytes(bytes, i + 1)
+                        out = out + String.fromCharCode(cp)
+                        i = i + 4
+                    }
+                }
+                else { out = out + String.fromCharCode(esc) }
+            }
+        } else {
+            out = out + String.fromCharCode(ch)
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun tokenizerAfterQuotedBytes(bytes: Array<Int>, start: Int) r: Int {
+    var i = start + 1
+    while i < bytes.length() {
+        let ch = bytes[i]
+        if ch == 34 {
+            return i + 1
+        }
+        if ch == 92 {
+            i = i + 1
+        }
+        i = i + 1
+    }
+    return i
+}
+
 fun tokenizerAfterQuoted(text: String, start: Int) r: Int {
     var i = start + 1
     while i < text.length() {
@@ -528,6 +965,32 @@ fun tokenizerAfterQuoted(text: String, start: Int) r: Int {
         if ch == 92 {
             i = i + 1
         }
+        i = i + 1
+    }
+    return i
+}
+
+fun tokenizerParseIntBytes(bytes: Array<Int>, start: Int) r: Int {
+    var sign = 1
+    var i = start
+    if i < bytes.length() and bytes[i] == 45 {
+        sign = -1
+        i = i + 1
+    }
+    var out = 0
+    while i < bytes.length() and bytes[i] >= 48 and bytes[i] <= 57 {
+        out = out * 10 + (bytes[i] - 48)
+        i = i + 1
+    }
+    return out * sign
+}
+
+fun tokenizerAfterIntBytes(bytes: Array<Int>, start: Int) r: Int {
+    var i = start
+    if i < bytes.length() and bytes[i] == 45 {
+        i = i + 1
+    }
+    while i < bytes.length() and bytes[i] >= 48 and bytes[i] <= 57 {
         i = i + 1
     }
     return i
@@ -557,6 +1020,60 @@ fun tokenizerAfterInt(text: String, start: Int) r: Int {
         i = i + 1
     }
     return i
+}
+
+fun tokenizerSkipJsonValueBytes(bytes: Array<Int>, start: Int) r: Int {
+    var i = start
+    var depth = 0
+    var inString = false
+    while i < bytes.length() {
+        let ch = bytes[i]
+        if inString {
+            if ch == 92 {
+                i = i + 1
+            } else if ch == 34 {
+                inString = false
+            }
+        } else {
+            if ch == 34 {
+                inString = true
+            } else if ch == 123 or ch == 91 {
+                depth = depth + 1
+            } else if ch == 125 or ch == 93 {
+                if depth == 0 {
+                    return i
+                }
+                depth = depth - 1
+            } else if ch == 44 and depth == 0 {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    return i
+}
+
+fun tokenizerParseHex4Bytes(bytes: Array<Int>, start: Int) r: Int {
+    var out = 0
+    var i = 0
+    while i < 4 and start + i < bytes.length() {
+        out = out * 16 + tokenizerHexValue(bytes[start + i])
+        i = i + 1
+    }
+    return out
+}
+
+fun tokenizerHexValue(ch: Int) r: Int {
+    if ch >= 48 and ch <= 57 {
+        return ch - 48
+    }
+    if ch >= 65 and ch <= 70 {
+        return ch - 55
+    }
+    if ch >= 97 and ch <= 102 {
+        return ch - 87
+    }
+    return 0
 }
 
 fun tokenizerSkipJsonValue(text: String, start: Int) r: Int {

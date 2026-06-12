@@ -3,11 +3,11 @@ import trainer.calibration.{DomainThreshold, thresholdsJson}
 import trainer.encoder.{Encoder}
 import trainer.io.file.{deleteFile, exists}
 import trainer.io_utils.{writeAtomicText}
-import trainer.jsonl.{PairExample}
+import trainer.jsonl.{PairExample, TripletExample}
 import trainer.miner.{MiningEmbeddingMatrix, buildPositiveEmbeddingMatrix, buildPositiveEmbeddingMatrixBackend, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
 import trainer.pipeline.{Pipeline}
 import trainer.tokenizer.{Tokenizer}
-import trainer.training.{batchesPerEpoch, effectiveBatchSize}
+import trainer.training.{batchesPerEpoch, countTrainableTriplets, effectiveBatchSize}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
@@ -103,6 +103,10 @@ fun main() -> Int {
     expect(topIdx[1] == 12, "top k second candidate retained")
     expect(effectiveBatchSize(64, 3) == 3, "small fixtures clamp effective batch")
     expect(batchesPerEpoch(130, 64) == 2, "drop final partial batch")
+    let trainableFixture = Array<TripletExample>()
+    trainableFixture.push(TripletExample.new("q", "p", "", "d", "s"))
+    trainableFixture.push(TripletExample.new("q2", "p2", "n2", "d", "s2"))
+    expect(countTrainableTriplets(trainableFixture) == 1, "trainable triplet count ignores empty negatives")
 
     let miningPairs = Array<PairExample>()
     miningPairs.push(PairExample.new("alpha question", "alpha answer", "alpha", "one"))

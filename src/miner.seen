@@ -33,6 +33,22 @@ class MiningEmbeddingMatrix {
 
 fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
     let pairs = readSourcePairs(cfg)
+    if pairs.length() <= 1 {
+        let singleOut = Array<TripletExample>()
+        var singleIndex = 0
+        while singleIndex < pairs.length() {
+            singleOut.push(TripletExample.new(
+                pairs[singleIndex].queryText,
+                pairs[singleIndex].positiveChunkText,
+                "",
+                pairs[singleIndex].domain,
+                pairs[singleIndex].source
+            ))
+            singleIndex = singleIndex + 1
+        }
+        writeAtomicText(cfg.minedJsonlPath, tripletsToJsonl(singleOut))
+        return MineResult.new(singleOut.length(), cfg.minedJsonlPath)
+    }
     let positiveMatrix = buildPositiveEmbeddingMatrixBackend(pairs, encoder, cfg.backend)
     let out = Array<TripletExample>()
     var i = 0

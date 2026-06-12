@@ -63,6 +63,27 @@ fun main() -> Int {
     let vocabIds = vocabTokenizer.tokenIds("hello world")
     expect(vocabIds[0] == 2 and vocabIds[1] == 5 and vocabIds[2] == 6, "vocab txt tokenizer ids")
 
+    let unigramDir = "/tmp/seen_trainer_tokenizer_unigram"
+    let marker = String.fromCharCode(9601)
+    writeAtomicText(unigramDir + "/tokenizer.json",
+        "{\"model\":{\"type\":\"Unigram\",\"unk_id\":3,\"vocab\":["
+        + "[\"<s>\",0.0],"
+        + "[\"<pad>\",0.0],"
+        + "[\"</s>\",0.0],"
+        + "[\"<unk>\",0.0],"
+        + "[\"" + marker + "hello\",-1.0],"
+        + "[\"" + marker + "world\",-1.0]"
+        + "]}}")
+    writeAtomicText(unigramDir + "/tokenizer_config.json",
+        "{\"do_lower_case\":true,\"cls_token\":\"<s>\",\"sep_token\":\"</s>\",\"pad_token\":\"<pad>\",\"unk_token\":\"<unk>\",\"mask_token\":\"<unk>\"}")
+    let unigramTokenizer = Tokenizer.load(unigramDir + "/tokenizer.json", 5)
+    expect(unigramTokenizer.loaded, "unigram tokenizer loaded")
+    expect(unigramTokenizer.vocabSignal == 6, "unigram tokenizer count")
+    expect(unigramTokenizer.vocabStyle == 2, "unigram tokenizer style")
+    let unigramIds = unigramTokenizer.tokenIds("Hello world")
+    expect(unigramIds[0] == 0 and unigramIds[1] == 4 and unigramIds[2] == 5, "unigram tokenizer ids")
+    expect(unigramIds[3] == 2 and unigramIds[4] == 1, "unigram tokenizer sep and pad")
+
     let sourceDir = "/tmp/seen_trainer_source_adapter"
     writeAtomicText(sourceDir + "/pairs.csv",
         "Instruction,RESPONSE,DOMAIN,SOURCE\n"

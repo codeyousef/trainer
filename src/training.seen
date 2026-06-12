@@ -22,12 +22,23 @@ class TrainResult {
 fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLMParameterRegistry) r: TrainResult {
     let trainPath = if cfg.minedJsonlPath.length() > 0 { cfg.minedJsonlPath } else { cfg.trainJsonlPath }
     let items = readTripletsLimited(trainPath, cfg.maxTrainTriplets)
+    let trainableItems = countTrainableTriplets(items)
     let batchSize = effectiveBatchSize(cfg.batchSize, items.length())
     let batches = batchesPerEpoch(items.length(), batchSize)
     let examplesPerEpoch = batches * batchSize
     var finalLoss = 0.0
     var epoch = 0
-    while epoch < cfg.epochs {
+    if trainableItems <= 0 and items.length() > 0 {
+        println("trainer: no trainable triplets with hard negatives; skipping epochs")
+    }
+    if trainableItems <= 0 {
+        let path = cfg.outputModelDir + "/training_config.json"
+        let trainingJson = trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch, encoder.modelEmbeddings.layers)
+        writeAtomicText(path, trainingJson)
+        writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry)
+        return TrainResult.new(items.length(), 0, finalLoss, path)
+    }
+    while epoch < cfg.epochs and trainableItems > 0 {
         let order = deterministicShuffleIndices(items.length(), cfg.seed + epoch)
         var lossSum = 0.0
         var count = 0
@@ -87,6 +98,18 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
     writeAtomicText(path, trainingJson)
     writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry)
     return TrainResult.new(items.length(), cfg.epochs, finalLoss, path)
+}
+
+fun countTrainableTriplets(items: Array<TripletExample>) r: Int {
+    var count = 0
+    var i = 0
+    while i < items.length() {
+        if items[i].hardNegativeChunkText.length() > 0 {
+            count = count + 1
+        }
+        i = i + 1
+    }
+    return count
 }
 
 fun effectiveBatchSize(requested: Int, itemCount: Int) r: Int {
