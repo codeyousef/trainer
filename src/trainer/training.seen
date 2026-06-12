@@ -56,7 +56,7 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
         println("trainer: epoch " + (epoch + 1).toString() + " loss " + finalLoss.toString())
         epoch = epoch + 1
     }
-    if encoder.hasMiniLMDenseAdapterTarget() {
+    if cfg.trainMiniLMDeltas and encoder.hasMiniLMDenseAdapterTarget() {
         if encoder.hasMiniLMAllLayerDeltaTarget() {
             encoder.minilmLayerDeltas.saveAll(cfg.outputModelDir)
         }
@@ -112,7 +112,7 @@ fun trainAdapterTriplet(item: TripletExample, encoder: Encoder, parameterRegistr
         return 0.0
     }
     var denseLoss = 0.0
-    if encoder.hasMiniLMDenseAdapterTarget() {
+    if cfg.trainMiniLMDeltas and encoder.hasMiniLMDenseAdapterTarget() {
         denseLoss = encoder.updateMiniLMDenseAdapterTriplet(item.queryText, item.positiveChunkText, item.hardNegativeChunkText, parameterRegistry, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
     }
     var minilmLoss = 0.0
@@ -155,6 +155,7 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"pooling\": \"mean\",\n"
         + "  \"backend\": \"" + cfg.backend + "\",\n"
         + "  \"resume_output_artifacts\": " + cfg.resumeOutputArtifacts.toString() + ",\n"
+        + "  \"train_minilm_deltas\": " + cfg.trainMiniLMDeltas.toString() + ",\n"
         + "  \"examples\": " + count.toString() + ",\n"
         + "  \"max_train_triplets\": " + cfg.maxTrainTriplets.toString() + ",\n"
         + "  \"bounded_training_dataset\": " + (cfg.maxTrainTriplets > 0).toString() + ",\n"

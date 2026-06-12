@@ -38,6 +38,7 @@ class TrainerConfig {
     var weightLoadCapElements: Int
     var parameterRegistryLoadCapElements: Int
     var trainAllMiniLMLayers: Bool
+    var trainMiniLMDeltas: Bool
     var maxMiniLMLayers: Int
     var cacheMiniLMTensors: Bool
     var resumeOutputArtifacts: Bool
@@ -85,6 +86,7 @@ class TrainerConfig {
             weightLoadCapElements: 0,
             parameterRegistryLoadCapElements: -1,
             trainAllMiniLMLayers: true,
+            trainMiniLMDeltas: true,
             maxMiniLMLayers: 0,
             cacheMiniLMTensors: false,
             resumeOutputArtifacts: false,
@@ -201,6 +203,7 @@ fun readConfig(path: String) r: TrainerConfig {
     cfg.weightLoadCapElements = configInt(text, "weight_load_cap_elements", cfg.weightLoadCapElements)
     cfg.parameterRegistryLoadCapElements = configInt(text, "parameter_registry_load_cap_elements", cfg.parameterRegistryLoadCapElements)
     cfg.trainAllMiniLMLayers = configBool(text, "train_all_minilm_layers", cfg.trainAllMiniLMLayers)
+    cfg.trainMiniLMDeltas = configBool(text, "train_minilm_deltas", cfg.trainMiniLMDeltas)
     cfg.maxMiniLMLayers = configInt(text, "max_minilm_layers", cfg.maxMiniLMLayers)
     cfg.cacheMiniLMTensors = configBool(text, "cache_minilm_tensors", cfg.cacheMiniLMTensors)
     cfg.resumeOutputArtifacts = configBool(text, "resume_output_artifacts", cfg.resumeOutputArtifacts)

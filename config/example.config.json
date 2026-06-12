@@ -36,6 +36,7 @@
   "weight_load_cap_elements": 0,
   "parameter_registry_load_cap_elements": -1,
   "train_all_minilm_layers": true,
+  "train_minilm_deltas": true,
   "max_minilm_layers": 0,
   "cache_minilm_tensors": false,
   "resume_output_artifacts": false,

@@ -81,6 +81,7 @@ fun main() -> Int {
         + "\"max_eval_triplets\":5,"
         + "\"parameter_registry_load_cap_elements\":7,"
         + "\"train_all_minilm_layers\":false,"
+        + "\"train_minilm_deltas\":false,"
         + "\"max_minilm_layers\":1,"
         + "\"cache_minilm_tensors\":true,"
         + "\"resume_output_artifacts\":true,"
@@ -94,6 +95,7 @@ fun main() -> Int {
     expect(cfg.maxEvalTriplets == 5, "max eval triplets config")
     expect(cfg.parameterRegistryLoadCapElements == 7, "registry cap config")
     expect(not cfg.trainAllMiniLMLayers, "train all layers config")
+    expect(not cfg.trainMiniLMDeltas, "train minilm deltas config")
     expect(cfg.maxMiniLMLayers == 1, "max minilm layers config")
     expect(cfg.cacheMiniLMTensors, "cache minilm tensors config")
     expect(cfg.resumeOutputArtifacts, "resume output artifacts config")
