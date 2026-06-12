@@ -1,7 +1,7 @@
 import adapter.{adapterClamp, adapterContains, adapterPowFloat, adapterSqrtApprox}
 import dense_lora.{denseBoolText, denseCopyArrayInto, denseCountArray, denseParseArray, denseParseIntValue, denseZeros}
-import io.file.{exists, readText}
-import io_utils.{writeAtomicText}
+import io.file.{ensureParentDirectories, exists, readText}
+import str.string.{StringBuilder}
 
 class MiniLMEmbeddingDeltas {
     var hiddenSize: Int
@@ -221,26 +221,56 @@ class MiniLMEmbeddingDeltas {
     fun save(path: String) r: Bool {
         this.path = path
         this.loaded = true
-        return writeAtomicText(path, this.toJson())
+        let builder = this.toJsonBuilder()
+        ensureParentDirectories(path)
+        return builder.writeToFile(path)
     }
 
     fun toJson() r: String {
-        var out = "{\n"
-            + "  \"format\": \"seen-minilm-embedding-deltas-v1\",\n"
-            + "  \"hidden_size\": " + this.hiddenSize.toString() + ",\n"
-            + "  \"word_rows\": " + this.wordRows.toString() + ",\n"
-            + "  \"position_rows\": " + this.positionRows.toString() + ",\n"
-            + "  \"token_type_rows\": " + this.tokenTypeRows.toString() + ",\n"
-            + "  \"word_row_ids\": " + embeddingIntArrayJson(this.wordRowIds) + ",\n"
-            + "  \"word_delta\": " + embeddingFloatArrayJson(this.wordDelta) + ",\n"
-            + "  \"position_row_ids\": " + embeddingIntArrayJson(this.positionRowIds) + ",\n"
-            + "  \"position_delta\": " + embeddingFloatArrayJson(this.positionDelta) + ",\n"
-            + "  \"token_type_row_ids\": " + embeddingIntArrayJson(this.tokenTypeRowIds) + ",\n"
-            + "  \"token_type_delta\": " + embeddingFloatArrayJson(this.tokenTypeDelta) + ",\n"
-            + "  \"layernorm_weight_delta\": " + embeddingFloatArrayJson(this.layerNormWeightDelta) + ",\n"
-            + "  \"layernorm_bias_delta\": " + embeddingFloatArrayJson(this.layerNormBiasDelta) + "\n"
-            + "}\n"
-        return out
+        return this.toJsonBuilder().toString()
+    }
+
+    fun toJsonBuilder() r: StringBuilder {
+        let builder = StringBuilder.new()
+        builder.append("{\n")
+        builder.append("  \"format\": \"seen-minilm-embedding-deltas-v1\",\n")
+        builder.append("  \"hidden_size\": ")
+        builder.append(this.hiddenSize.toString())
+        builder.append(",\n")
+        builder.append("  \"word_rows\": ")
+        builder.append(this.wordRows.toString())
+        builder.append(",\n")
+        builder.append("  \"position_rows\": ")
+        builder.append(this.positionRows.toString())
+        builder.append(",\n")
+        builder.append("  \"token_type_rows\": ")
+        builder.append(this.tokenTypeRows.toString())
+        builder.append(",\n")
+        builder.append("  \"word_row_ids\": ")
+        appendEmbeddingIntArrayJson(builder, this.wordRowIds)
+        builder.append(",\n")
+        builder.append("  \"word_delta\": ")
+        appendEmbeddingFloatArrayJson(builder, this.wordDelta)
+        builder.append(",\n")
+        builder.append("  \"position_row_ids\": ")
+        appendEmbeddingIntArrayJson(builder, this.positionRowIds)
+        builder.append(",\n")
+        builder.append("  \"position_delta\": ")
+        appendEmbeddingFloatArrayJson(builder, this.positionDelta)
+        builder.append(",\n")
+        builder.append("  \"token_type_row_ids\": ")
+        appendEmbeddingIntArrayJson(builder, this.tokenTypeRowIds)
+        builder.append(",\n")
+        builder.append("  \"token_type_delta\": ")
+        appendEmbeddingFloatArrayJson(builder, this.tokenTypeDelta)
+        builder.append(",\n")
+        builder.append("  \"layernorm_weight_delta\": ")
+        appendEmbeddingFloatArrayJson(builder, this.layerNormWeightDelta)
+        builder.append(",\n")
+        builder.append("  \"layernorm_bias_delta\": ")
+        appendEmbeddingFloatArrayJson(builder, this.layerNormBiasDelta)
+        builder.append("\n}\n")
+        return builder
     }
 
     fun trainableRows() r: Int {
@@ -437,27 +467,39 @@ fun embeddingGradNorm(values: Array<Float>) r: Float {
 }
 
 fun embeddingIntArrayJson(values: Array<Int>) r: String {
-    var out = "["
-    var i = 0
-    while i < values.length() {
-        if i > 0 {
-            out = out + ", "
-        }
-        out = out + values[i].toString()
-        i = i + 1
-    }
-    return out + "]"
+    let builder = StringBuilder.new()
+    appendEmbeddingIntArrayJson(builder, values)
+    return builder.toString()
 }
 
 fun embeddingFloatArrayJson(values: Array<Float>) r: String {
-    var out = "["
+    let builder = StringBuilder.new()
+    appendEmbeddingFloatArrayJson(builder, values)
+    return builder.toString()
+}
+
+fun appendEmbeddingIntArrayJson(builder: StringBuilder, values: Array<Int>) r: Void {
+    builder.append("[")
     var i = 0
     while i < values.length() {
         if i > 0 {
-            out = out + ", "
+            builder.append(", ")
         }
-        out = out + values[i].toString()
+        builder.append(values[i].toString())
         i = i + 1
     }
-    return out + "]"
+    builder.append("]")
+}
+
+fun appendEmbeddingFloatArrayJson(builder: StringBuilder, values: Array<Float>) r: Void {
+    builder.append("[")
+    var i = 0
+    while i < values.length() {
+        if i > 0 {
+            builder.append(", ")
+        }
+        builder.append(values[i].toString())
+        i = i + 1
+    }
+    builder.append("]")
 }

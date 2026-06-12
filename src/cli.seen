@@ -1,7 +1,13 @@
 import env.env.{args}
-import config.{TrainerConfig, readConfig, writeTrainerConfigJson}
+import config.{TrainerConfig, readConfig, resolvedMiniLMLayers, writeTrainerConfigJson}
+import io.file.{readText}
+import io_utils.{writeAtomicText}
+import jsonl.{readTripletsLimited, tripletToJson}
+import math_utils.{deterministicShuffleIndices}
+import model.{readBertConfig}
 import pipeline.{Pipeline}
 import process.process.{runCommand, shellQuote}
+import training.{batchesPerEpoch, effectiveBatchSize, trainingConfigJson}
 
 fun trainerMain() r: Int {
     let argv = args()
@@ -19,7 +25,16 @@ fun trainerMain() r: Int {
     let configPath = parseConfigArg(argv)
     let cfg = readConfig(configPath)
     if command == "run-all" {
+        if shouldRunAllInProcess(cfg) {
+            return runAllInProcess(cfg)
+        }
         return runAllIsolated(argv[0], cfg, configPath)
+    }
+    if command == "train" {
+        let splitCode = maybeRunSplitTrain(argv[0], cfg)
+        if splitCode >= 0 {
+            return splitCode
+        }
     }
 
     let pipeline = Pipeline.new(cfg)
@@ -79,6 +94,35 @@ fun runAllIsolated(executable: String, cfg: TrainerConfig, configPath: String) r
     return 0
 }
 
+fun shouldRunAllInProcess(cfg: TrainerConfig) r: Bool {
+    if not cfg.trainMiniLMDeltas or not cfg.trainAllMiniLMLayers {
+        return false
+    }
+    return cappedAtMost(cfg.maxMinedTriplets, 2)
+        and cappedAtMost(cfg.maxTrainTriplets, 2)
+        and cappedAtMost(cfg.maxCalibrationTriplets, 2)
+        and cappedAtMost(cfg.maxEvalTriplets, 2)
+}
+
+fun cappedAtMost(value: Int, cap: Int) r: Bool {
+    return value > 0 and value <= cap
+}
+
+fun runAllInProcess(cfg: TrainerConfig) r: Int {
+    println("trainer: run-all small full-delta in-process")
+    let pipeline = Pipeline.new(cfg)
+    println("trainer: backend " + cfg.backend + " requires_gpu " + cfg.backendGpu.toString())
+    let backendReady = pipeline.prepareBackend()
+    if backendReady == false {
+        return 2
+    }
+    let modelSummary = pipeline.bundle.summary()
+    var modelLine = "trainer: model "
+    modelLine = modelLine + modelSummary
+    println(modelLine)
+    return pipeline.runAll()
+}
+
 fun runTrainerStage(executable: String, command: String, configPath: String) r: Bool {
     println("trainer: run-all stage " + command)
     let cmd = shellQuote(executable) + " " + command + " --config " + shellQuote(configPath)
@@ -91,6 +135,185 @@ fun runTrainerStage(executable: String, command: String, configPath: String) r: 
     }
     println("trainer: run-all stage failed: " + command)
     return false
+}
+
+fun maybeRunSplitTrain(executable: String, cfg: TrainerConfig) r: Int {
+    if not cfg.trainMiniLMDeltas or not cfg.trainAllMiniLMLayers or cfg.epochs <= 0 {
+        return -1
+    }
+    let trainPath = if cfg.minedJsonlPath.length() > 0 { cfg.minedJsonlPath } else { cfg.trainJsonlPath }
+    let items = readTripletsLimited(trainPath, cfg.maxTrainTriplets)
+    if items.length() <= 2 {
+        return -1
+    }
+
+    println("trainer: split full-delta train into " + items.length().toString() + " isolated item stages")
+    let originalTrainPath = cfg.trainJsonlPath
+    let originalMinedPath = cfg.minedJsonlPath
+    let originalEpochs = cfg.epochs
+    let originalBatchSize = cfg.batchSize
+    let originalMaxTrain = cfg.maxTrainTriplets
+    let originalResume = cfg.resumeOutputArtifacts
+
+    var firstStage = true
+    var trained = 0
+    var lossSum = 0.0
+    var epoch = 0
+    while epoch < originalEpochs {
+        let order = deterministicShuffleIndices(items.length(), cfg.seed + epoch)
+        var offset = 0
+        while offset < items.length() {
+            let item = items[order[offset]]
+            if item.hardNegativeChunkText.length() > 0 {
+                let prefix = cfg.outputModelDir + "/train_split_epoch_" + epoch.toString() + "_item_" + offset.toString()
+                let itemPath = prefix + ".jsonl"
+                let itemConfigPath = prefix + ".config.json"
+                if not writeAtomicText(itemPath, tripletToJson(item) + "\n") {
+                    println("trainer: failed to write split train item: " + itemPath)
+                    restoreSplitTrainConfig(cfg, originalTrainPath, originalMinedPath, originalEpochs, originalBatchSize, originalMaxTrain)
+                    return 1
+                }
+                cfg.trainJsonlPath = itemPath
+                cfg.minedJsonlPath = itemPath
+                cfg.epochs = 1
+                cfg.batchSize = 1
+                cfg.maxTrainTriplets = 1
+                let resumeStage = if firstStage { originalResume } else { true }
+                if not writeTrainerConfigJson(itemConfigPath, cfg, resumeStage) {
+                    println("trainer: failed to write split train config: " + itemConfigPath)
+                    restoreSplitTrainConfig(cfg, originalTrainPath, originalMinedPath, originalEpochs, originalBatchSize, originalMaxTrain)
+                    return 1
+                }
+                if not runTrainerStage(executable, "train", itemConfigPath) {
+                    restoreSplitTrainConfig(cfg, originalTrainPath, originalMinedPath, originalEpochs, originalBatchSize, originalMaxTrain)
+                    return 1
+                }
+                lossSum = lossSum + readTrainingFinalLoss(cfg.outputModelDir + "/training_config.json")
+                trained = trained + 1
+                firstStage = false
+            }
+            offset = offset + 1
+        }
+        epoch = epoch + 1
+    }
+
+    restoreSplitTrainConfig(cfg, originalTrainPath, originalMinedPath, originalEpochs, originalBatchSize, originalMaxTrain)
+    let finalLoss = if trained > 0 { lossSum / trained.toFloat() } else { 0.0 }
+    let batchSize = effectiveBatchSize(originalBatchSize, items.length())
+    let batches = batchesPerEpoch(items.length(), batchSize)
+    let examplesPerEpoch = batches * batchSize
+    let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
+    let runtimeLayers = resolvedMiniLMLayers(cfg, modelMeta.layers)
+    let trainingJson = trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch, runtimeLayers)
+    writeAtomicText(cfg.outputModelDir + "/training_config.json", trainingJson)
+    println("trainer: final loss " + finalLoss.toString())
+    return 0
+}
+
+fun restoreSplitTrainConfig(cfg: TrainerConfig, trainPath: String, minedPath: String, epochs: Int, batchSize: Int, maxTrain: Int) r: Void {
+    cfg.trainJsonlPath = trainPath
+    cfg.minedJsonlPath = minedPath
+    cfg.epochs = epochs
+    cfg.batchSize = batchSize
+    cfg.maxTrainTriplets = maxTrain
+}
+
+fun readTrainingFinalLoss(path: String) r: Float {
+    let text = readText(path)
+    return cliJsonFloat(text, "final_loss", 0.0)
+}
+
+fun cliJsonFloat(text: String, key: String, fallback: Float) r: Float {
+    let pos = cliFindKeyColon(text, key)
+    if pos < 0 {
+        return fallback
+    }
+    var i = cliSkipWs(text, pos)
+    let start = i
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if (ch >= 48 and ch <= 57) or ch == 45 or ch == 43 or ch == 46 or ch == 69 or ch == 101 {
+            i = i + 1
+        } else {
+            break
+        }
+    }
+    if i <= start {
+        return fallback
+    }
+    return cliParseFloat(text.substring(start, i))
+}
+
+fun cliFindKeyColon(text: String, key: String) r: Int {
+    let needle = "\"" + key + "\""
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if cliMatchesAt(text, i, needle) {
+            i = i + needle.length()
+            while i < text.length() and text.charAt(i) != 58 {
+                i = i + 1
+            }
+            if i < text.length() {
+                return i + 1
+            }
+            return -1
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun cliMatchesAt(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun cliSkipWs(text: String, pos: Int) r: Int {
+    var i = pos
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 32 or ch == 9 or ch == 10 or ch == 13 {
+            i = i + 1
+        } else {
+            return i
+        }
+    }
+    return i
+}
+
+fun cliParseFloat(text: String) r: Float {
+    var sign = 1.0
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1.0
+        i = 1
+    } else if text.length() > 0 and text.charAt(0) == 43 {
+        i = 1
+    }
+    var value = 0.0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10.0 + (text.charAt(i) - 48).toFloat()
+        i = i + 1
+    }
+    if i < text.length() and text.charAt(i) == 46 {
+        i = i + 1
+        var scale = 0.1
+        while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+            value = value + (text.charAt(i) - 48).toFloat() * scale
+            scale = scale * 0.1
+            i = i + 1
+        }
+    }
+    return value * sign
 }
 
 fun parseConfigArg(argv: Array<String>) r: String {

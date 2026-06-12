@@ -68,21 +68,24 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
         epoch = epoch + 1
     }
     if cfg.trainMiniLMDeltas and encoder.hasMiniLMDenseAdapterTarget() and finalLoss > 0.0 {
-        if encoder.hasMiniLMAllLayerDeltaTarget() {
-            encoder.minilmLayerDeltas.saveAll(cfg.outputModelDir)
-        }
+        let allLayerMode = encoder.hasMiniLMAllLayerDeltaTarget()
         if encoder.hasMiniLMEmbeddingDeltaTarget() {
             encoder.minilmEmbeddingDeltas.save(miniLMEmbeddingDeltasPath(cfg.outputModelDir))
         }
-        encoder.minilmDenseAdapter.save(cfg.minilmDenseAdapterPath())
-        encoder.minilmDenseDelta.save(cfg.minilmDenseDeltaPath())
-        encoder.minilmIntermediateDelta.saveIntermediate(cfg.minilmIntermediateDeltaPath())
-        encoder.minilmQueryDelta.saveAs(cfg.minilmQueryDeltaPath(), "seen-minilm-attention-query-delta-v1")
-        encoder.minilmKeyDelta.saveAs(cfg.minilmKeyDeltaPath(), "seen-minilm-attention-key-delta-v1")
-        encoder.minilmValueDelta.saveAs(cfg.minilmValueDeltaPath(), "seen-minilm-attention-value-delta-v1")
-        encoder.minilmAttentionDenseDelta.saveAs(cfg.minilmAttentionDenseDeltaPath(), "seen-minilm-attention-output-dense-delta-v1")
-        encoder.minilmAttentionLayerNormDelta.saveAttentionOutput(cfg.minilmAttentionLayerNormDeltaPath())
-        encoder.minilmLayerNormDelta.save(cfg.minilmLayerNormDeltaPath())
+        if allLayerMode {
+            encoder.minilmLayerDeltas.saveAll(cfg.outputModelDir)
+        }
+        if not allLayerMode {
+            encoder.minilmDenseAdapter.save(cfg.minilmDenseAdapterPath())
+            encoder.minilmDenseDelta.save(cfg.minilmDenseDeltaPath())
+            encoder.minilmIntermediateDelta.saveIntermediate(cfg.minilmIntermediateDeltaPath())
+            encoder.minilmQueryDelta.saveAs(cfg.minilmQueryDeltaPath(), "seen-minilm-attention-query-delta-v1")
+            encoder.minilmKeyDelta.saveAs(cfg.minilmKeyDeltaPath(), "seen-minilm-attention-key-delta-v1")
+            encoder.minilmValueDelta.saveAs(cfg.minilmValueDeltaPath(), "seen-minilm-attention-value-delta-v1")
+            encoder.minilmAttentionDenseDelta.saveAs(cfg.minilmAttentionDenseDeltaPath(), "seen-minilm-attention-output-dense-delta-v1")
+            encoder.minilmAttentionLayerNormDelta.saveAttentionOutput(cfg.minilmAttentionLayerNormDeltaPath())
+            encoder.minilmLayerNormDelta.save(cfg.minilmLayerNormDeltaPath())
+        }
         if cfg.copyBaseArtifacts {
             let baseUpdate = writeDirectBaseWeightUpdateArtifact(cfg, encoder.modelEmbeddings.layers, encoder.embeddingDim, encoder.modelEmbeddings.intermediateSize)
             if baseUpdate.anyMaterialized() {
