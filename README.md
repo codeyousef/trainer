@@ -42,9 +42,9 @@ MiniLM backward tail gradients now thread the configured backend into dense proj
 gradients for FFN/output/attention paths, reusing `Tensor.matmul` through the dense-gradient
 helpers. GELU backward keeps derivative evaluation on the scalar reference path while dispatching
 the derivative-gradient product through the existing elementwise GPU kernel when `backend` is
-`gpu`; attention softmax forward/backward now routes through Tensor softmax, elementwise, and
-row-reduction kernels for GPU configs, and Q/K/V attention-gradient products route through
-Tensor matmul/scale while attention-score construction still remains scalar reference code.
+`gpu`; attention score construction, softmax, context projection, and Q/K/V attention-gradient
+products now route through Tensor matmul/scale/softmax/elementwise/reduction kernels for GPU
+configs.
 These paths retain scalar fallbacks for shape diagnostics and tests.
 
 ## Model Outputs
