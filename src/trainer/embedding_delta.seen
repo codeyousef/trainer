@@ -180,6 +180,44 @@ class MiniLMEmbeddingDeltas {
         return true
     }
 
+    fun applyBaseParameterGradients(wordBase: Array<Float>, positionBase: Array<Float>, tokenTypeBase: Array<Float>, layerNormWeightBase: Array<Float>, layerNormBiasBase: Array<Float>, wordGradRows: Array<Int>, wordGrad: Array<Float>, positionGradRows: Array<Int>, positionGrad: Array<Float>, tokenTypeGradRows: Array<Int>, tokenTypeGrad: Array<Float>, gradLayerNormWeight: Array<Float>, gradLayerNormBias: Array<Float>, lr: Float, weightDecay: Float, gradClip: Float) r: Bool {
+        if wordGrad.length() != wordGradRows.length() * this.hiddenSize {
+            return false
+        }
+        if positionGrad.length() != positionGradRows.length() * this.hiddenSize {
+            return false
+        }
+        if tokenTypeGrad.length() != tokenTypeGradRows.length() * this.hiddenSize {
+            return false
+        }
+        if gradLayerNormWeight.length() != this.hiddenSize or gradLayerNormBias.length() != this.hiddenSize {
+            return false
+        }
+        var norm = embeddingGradNorm(wordGrad)
+        norm = norm + embeddingGradNorm(positionGrad)
+        norm = norm + embeddingGradNorm(tokenTypeGrad)
+        norm = norm + embeddingGradNorm(gradLayerNormWeight)
+        norm = norm + embeddingGradNorm(gradLayerNormBias)
+        norm = adapterSqrtApprox(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        this.stepCount = this.stepCount + 1
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - adapterPowFloat(beta1, this.stepCount)
+        let beta2Correction = 1.0 - adapterPowFloat(beta2, this.stepCount)
+        embeddingApplyTableBaseParameterGradients(this.wordRowIds, this.wordDelta, this.wordM, this.wordV, this.wordRows, this.hiddenSize, wordBase, wordGradRows, wordGrad, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyTableBaseParameterGradients(this.positionRowIds, this.positionDelta, this.positionM, this.positionV, this.positionRows, this.hiddenSize, positionBase, positionGradRows, positionGrad, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyTableBaseParameterGradients(this.tokenTypeRowIds, this.tokenTypeDelta, this.tokenTypeM, this.tokenTypeV, this.tokenTypeRows, this.hiddenSize, tokenTypeBase, tokenTypeGradRows, tokenTypeGrad, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyVectorBaseParameterGradients(this.layerNormWeightDelta, this.layerNormWeightM, this.layerNormWeightV, layerNormWeightBase, 1.0, gradLayerNormWeight, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        embeddingApplyVectorBaseParameterGradients(this.layerNormBiasDelta, this.layerNormBiasM, this.layerNormBiasV, layerNormBiasBase, 0.0, gradLayerNormBias, scale, lr, weightDecay, beta1, beta2, beta1Correction, beta2Correction, eps)
+        this.loaded = true
+        return true
+    }
+
     fun save(path: String) r: Bool {
         this.path = path
         this.loaded = true
@@ -318,6 +356,33 @@ fun embeddingApplyTableGradients(rowIds: Array<Int>, values: Array<Float>, m: Ar
     }
 }
 
+fun embeddingApplyTableBaseParameterGradients(rowIds: Array<Int>, values: Array<Float>, m: Array<Float>, v: Array<Float>, tableRows: Int, hiddenSize: Int, baseValues: Array<Float>, gradRows: Array<Int>, gradValues: Array<Float>, scale: Float, lr: Float, weightDecay: Float, beta1: Float, beta2: Float, beta1Correction: Float, beta2Correction: Float, eps: Float) r: Void {
+    var gSlot = 0
+    while gSlot < gradRows.length() {
+        let row = gradRows[gSlot]
+        let slot = embeddingEnsureRow(rowIds, values, m, v, tableRows, hiddenSize, row)
+        if slot >= 0 {
+            var d = 0
+            while d < hiddenSize {
+                let gradIdx = gSlot * hiddenSize + d
+                let idx = slot * hiddenSize + d
+                let g = gradValues[gradIdx] * scale
+                m[idx] = beta1 * m[idx] + (1.0 - beta1) * g
+                v[idx] = beta2 * v[idx] + (1.0 - beta2) * g * g
+                let mHat = m[idx] / beta1Correction
+                let vHat = v[idx] / beta2Correction
+                let base = embeddingBaseTableValue(baseValues, row, d, hiddenSize, 0.0)
+                var next = base + values[idx]
+                next = next - lr * weightDecay * next
+                next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+                values[idx] = adapterClamp(next - base, -2.0, 2.0)
+                d = d + 1
+            }
+        }
+        gSlot = gSlot + 1
+    }
+}
+
 fun embeddingApplyVectorGradients(values: Array<Float>, m: Array<Float>, v: Array<Float>, gradValues: Array<Float>, scale: Float, lr: Float, weightDecay: Float, beta1: Float, beta2: Float, beta1Correction: Float, beta2Correction: Float, eps: Float) r: Void {
     var i = 0
     while i < values.length() and i < gradValues.length() {
@@ -331,6 +396,34 @@ fun embeddingApplyVectorGradients(values: Array<Float>, m: Array<Float>, v: Arra
         values[i] = adapterClamp(next, -2.0, 2.0)
         i = i + 1
     }
+}
+
+fun embeddingApplyVectorBaseParameterGradients(values: Array<Float>, m: Array<Float>, v: Array<Float>, baseValues: Array<Float>, baseDefault: Float, gradValues: Array<Float>, scale: Float, lr: Float, weightDecay: Float, beta1: Float, beta2: Float, beta1Correction: Float, beta2Correction: Float, eps: Float) r: Void {
+    var i = 0
+    while i < values.length() and i < gradValues.length() {
+        let g = gradValues[i] * scale
+        m[i] = beta1 * m[i] + (1.0 - beta1) * g
+        v[i] = beta2 * v[i] + (1.0 - beta2) * g * g
+        let mHat = m[i] / beta1Correction
+        let vHat = v[i] / beta2Correction
+        var base = baseDefault
+        if i < baseValues.length() {
+            base = baseValues[i]
+        }
+        var next = base + values[i]
+        next = next - lr * weightDecay * next
+        next = next - lr * mHat / (adapterSqrtApprox(vHat) + eps)
+        values[i] = adapterClamp(next - base, -2.0, 2.0)
+        i = i + 1
+    }
+}
+
+fun embeddingBaseTableValue(values: Array<Float>, row: Int, dim: Int, hiddenSize: Int, fallback: Float) r: Float {
+    let idx = row * hiddenSize + dim
+    if idx >= 0 and idx < values.length() {
+        return values[idx]
+    }
+    return fallback
 }
 
 fun embeddingGradNorm(values: Array<Float>) r: Float {

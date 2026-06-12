@@ -38,7 +38,7 @@ falls back to the same scalar top-k and domain/source exclusion semantics.
 
 ## Model Outputs
 
-The package step writes SentenceTransformer-compatible files plus Seen manifests. When local MiniLM safetensors are loaded, training updates sparse embedding rows, embedding LayerNorm, and all ready encoder layer surfaces. Dense and LayerNorm layer surfaces now apply AdamW to the loaded safetensors base value plus the Seen delta, then persist the resulting delta so it can be materialized into `seen_trained_base_model.safetensors`.
+The package step writes SentenceTransformer-compatible files plus Seen manifests. When local MiniLM safetensors are loaded, training updates sparse embedding rows, embedding LayerNorm, and all ready encoder layer surfaces. These trainable base surfaces apply AdamW to the loaded safetensors base value plus the Seen delta, then persist the resulting delta so it can be materialized into `seen_trained_base_model.safetensors`.
 
 Safetensors metadata is inspected through header reads, tensor loads use byte-range reads, and materialization patches tensor-sized slices or sparse rows instead of loading the whole model file into a Seen byte array.
 

@@ -398,7 +398,16 @@ class MiniLMEmbeddings {
         accumulateEmbeddingTraceGrad(info, qTrace, gradQ, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
         accumulateEmbeddingTraceGrad(info, pTrace, gradP, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
         accumulateEmbeddingTraceGrad(info, nTrace, gradN, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
-        embeddingDeltas.applyGradients(gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
+        let wordBase = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        let positionBase = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", this.maxLoadElements)
+        let tokenTypeBase = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
+        let normWeightBase = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", this.maxLoadElements)
+        let normBiasBase = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", this.maxLoadElements)
+        if wordBase.ok and positionBase.ok and tokenTypeBase.ok and normWeightBase.ok and normBiasBase.ok {
+            embeddingDeltas.applyBaseParameterGradients(wordBase.values, positionBase.values, tokenTypeBase.values, normWeightBase.values, normBiasBase.values, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
+        } else {
+            embeddingDeltas.applyGradients(gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
+        }
         return loss
     }
 

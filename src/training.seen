@@ -216,6 +216,8 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"minilm_embedding_delta_surfaces\": [\"embeddings.word_embeddings.sparse_rows\", \"embeddings.position_embeddings.sparse_rows\", \"embeddings.token_type_embeddings.sparse_rows\", \"embeddings.LayerNorm\"],\n"
         + "  \"minilm_embedding_delta_gradient\": \"sparse_embedding_rows_and_embedding_layernorm_through_delta_aware_all_ready_transformer_layers_to_mean_pool\",\n"
         + "  \"minilm_embedding_delta_optimizer\": \"adamw\",\n"
+        + "  \"minilm_embedding_delta_update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
+        + "  \"minilm_embedding_delta_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
         + "  \"minilm_embedding_delta_path\": \"" + miniLMEmbeddingDeltasPath(cfg.outputModelDir) + "\",\n"
         + "  \"direct_base_weight_update_artifact\": \"" + directBaseWeightsPath(cfg) + "\",\n"
         + "  \"direct_base_weight_update_manifest\": \"" + cfg.outputModelDir + "/seen_base_weight_update_manifest.json\",\n"

@@ -7,6 +7,14 @@ fun expect(condition: Bool, message: String) r: Void {
     }
 }
 
+fun closeEnough(value: Float, expected: Float) r: Bool {
+    let diff = value - expected
+    if diff < 0.0 {
+        return (0.0 - diff) < 0.0001
+    }
+    return diff < 0.0001
+}
+
 fun main() -> Int {
     let delta = MiniLMEmbeddingDeltas.identity(4, 32, 8, 2)
     let wordRows = Array<Int>()
@@ -62,6 +70,58 @@ fun main() -> Int {
     expect(loaded.loaded, "embedding deltas load")
     expect(loaded.wordRowIds.length() == 1 and loaded.wordRowIds[0] == 5, "loaded word row")
     expect(loaded.wordDeltaAt(5, 0) < 0.0, "loaded word delta")
+
+    let baseAware = MiniLMEmbeddingDeltas.identity(2, 3, 2, 1)
+    let baseWord = Array<Float>()
+    baseWord.push(0.0)
+    baseWord.push(0.0)
+    baseWord.push(2.0)
+    baseWord.push(-1.0)
+    baseWord.push(0.5)
+    baseWord.push(0.25)
+    let basePosition = Array<Float>()
+    basePosition.push(0.5)
+    basePosition.push(-0.5)
+    basePosition.push(1.0)
+    basePosition.push(1.0)
+    let baseTokenType = Array<Float>()
+    baseTokenType.push(3.0)
+    baseTokenType.push(-2.0)
+    let baseLnWeight = Array<Float>()
+    baseLnWeight.push(1.5)
+    baseLnWeight.push(0.5)
+    let baseLnBias = Array<Float>()
+    baseLnBias.push(0.4)
+    baseLnBias.push(-0.2)
+    let zeroWordRows = Array<Int>()
+    zeroWordRows.push(1)
+    let zeroPositionRows = Array<Int>()
+    zeroPositionRows.push(0)
+    let zeroTypeRows = Array<Int>()
+    zeroTypeRows.push(0)
+    let zeroWordGrad = Array<Float>()
+    zeroWordGrad.push(0.0)
+    zeroWordGrad.push(0.0)
+    let zeroPositionGrad = Array<Float>()
+    zeroPositionGrad.push(0.0)
+    zeroPositionGrad.push(0.0)
+    let zeroTypeGrad = Array<Float>()
+    zeroTypeGrad.push(0.0)
+    zeroTypeGrad.push(0.0)
+    let zeroLn = Array<Float>()
+    zeroLn.push(0.0)
+    zeroLn.push(0.0)
+    expect(baseAware.applyBaseParameterGradients(baseWord, basePosition, baseTokenType, baseLnWeight, baseLnBias, zeroWordRows, zeroWordGrad, zeroPositionRows, zeroPositionGrad, zeroTypeRows, zeroTypeGrad, zeroLn, zeroLn, 0.1, 0.1, 0.0), "apply base-aware embedding gradients")
+    expect(closeEnough(baseAware.wordDeltaAt(1, 0), -0.02), "word base decay delta")
+    expect(closeEnough(baseAware.wordDeltaAt(1, 1), 0.01), "negative word base decay delta")
+    expect(closeEnough(baseAware.positionDeltaAt(0, 0), -0.005), "position base decay delta")
+    expect(closeEnough(baseAware.positionDeltaAt(0, 1), 0.005), "negative position base decay delta")
+    expect(closeEnough(baseAware.tokenTypeDeltaAt(0, 0), -0.03), "token type base decay delta")
+    expect(closeEnough(baseAware.tokenTypeDeltaAt(0, 1), 0.02), "negative token type base decay delta")
+    expect(closeEnough(baseAware.layerNormWeightDelta[0], -0.015), "embedding layernorm base weight decay")
+    expect(closeEnough(baseAware.layerNormWeightDelta[1], -0.005), "embedding layernorm second base weight decay")
+    expect(closeEnough(baseAware.layerNormBiasDelta[0], -0.004), "embedding layernorm base bias decay")
+    expect(closeEnough(baseAware.layerNormBiasDelta[1], 0.002), "embedding layernorm negative base bias decay")
     println("PASS test_embedding_delta")
     return 0
 }

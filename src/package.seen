@@ -422,6 +422,8 @@ fun minilmEmbeddingDeltasManifestJson(cfg: TrainerConfig, materialized: Bool) r:
         + "  \"adapter_type\": \"minilm_sparse_embedding_rows_and_embedding_layernorm_delta\",\n"
         + "  \"adapter_gradient\": \"sparse_embedding_rows_and_embedding_layernorm_through_delta_aware_all_ready_transformer_layers_to_mean_pool\",\n"
         + "  \"adapter_optimizer\": \"adamw\",\n"
+        + "  \"update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
+        + "  \"optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
         + "  \"surface_names\": [\"embeddings.word_embeddings.sparse_rows\", \"embeddings.position_embeddings.sparse_rows\", \"embeddings.token_type_embeddings.sparse_rows\", \"embeddings.LayerNorm\"],\n"
         + "  \"packaged_safetensors_path\": \"" + packagedWeightsPath(cfg) + "\",\n"
         + "  \"base_safetensors_rewritten\": " + materialized.toString() + "\n"
