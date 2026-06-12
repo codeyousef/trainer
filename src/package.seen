@@ -18,7 +18,7 @@ class PackageResult {
     }
 }
 
-fun writeModelPackage(cfg: TrainerConfig) r: PackageResult {
+fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegistry) r: PackageResult {
     var files = 0
     let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
     if cfg.copyBaseArtifacts {
@@ -68,8 +68,11 @@ fun writeModelPackage(cfg: TrainerConfig) r: PackageResult {
     if writeMiniLMWeightMap(cfg.outputModelDir + "/minilm_weight_map.json", weightMap) {
         files = files + 1
     }
-    let parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
-    if writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry) {
+    var packageRegistry = parameterRegistry
+    if parameterRegistry.optimizerUpdates <= 0 {
+        packageRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
+    }
+    if writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", packageRegistry) {
         files = files + 1
     }
     if writeSeenWeightsManifest(cfg.outputModelDir + "/model.safetensors.manifest.json", cfg.embeddingDim, weights, packageWeightsManifestNote(denseDeltaMaterialized, intermediateDeltaMaterialized, queryDeltaMaterialized, keyDeltaMaterialized, valueDeltaMaterialized, attentionDenseDeltaMaterialized, attentionLayerNormDeltaMaterialized, layerNormDeltaMaterialized, allLayerDeltaMaterialized, embeddingDeltaMaterialized)) {

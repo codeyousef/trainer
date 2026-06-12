@@ -1,5 +1,6 @@
 import json.builder.{escapeJsonString}
 import io_utils.{writeAtomicText}
+import math.math.{sqrt}
 import minilm_weights.{mwFindCandidateIndex}
 import safetensors.{SafeTensorInfo, loadTensorF32, tensorCols, tensorRows}
 import tensor.{Parameter}
@@ -118,6 +119,9 @@ class MiniLMParameterRegistry {
     var parameterCount: Int
     var gradBufferCount: Int
     var momentBufferCount: Int
+    var optimizerSteps: Int
+    var optimizerUpdates: Int
+    var optimizerFallbacks: Int
     var firstMissing: String
     var firstLoadError: String
     var slots: Array<MiniLMParameterSlot>
@@ -141,6 +145,9 @@ class MiniLMParameterRegistry {
             parameterCount: 0,
             gradBufferCount: 0,
             momentBufferCount: 0,
+            optimizerSteps: 0,
+            optimizerUpdates: 0,
+            optimizerFallbacks: 0,
             firstMissing: "",
             firstLoadError: "",
             slots: Array<MiniLMParameterSlot>(),
@@ -299,12 +306,137 @@ class MiniLMParameterRegistry {
             + " minilm_parameter_values=" + this.parameterCount.toString()
             + " minilm_parameter_grad_buffers=" + this.gradBufferCount.toString()
             + " minilm_parameter_moment_buffers=" + this.momentBufferCount.toString()
+            + " minilm_parameter_registry_optimizer_updates=" + this.optimizerUpdates.toString()
             + " minilm_parameter_registry_backend=" + this.backend
     }
 
     fun slotsJson() r: String {
         return this.slotsJsonText
     }
+
+    fun findSlot(logicalName: String) r: Int {
+        var i = 0
+        while i < this.slots.length() {
+            if this.slots[i].logicalName == logicalName {
+                return i
+            }
+            i = i + 1
+        }
+        return -1
+    }
+
+    fun loadedParameterIndex(logicalName: String, expectedElements: Int) r: Int {
+        let slotIndex = this.findSlot(logicalName)
+        if slotIndex < 0 {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return -1
+        }
+        let slot = this.slots[slotIndex]
+        if not slot.loaded or slot.parameterIndex < 0 or slot.parameterIndex >= this.parameters.length() {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return -1
+        }
+        if expectedElements > 0 and slot.elements != expectedElements {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return -1
+        }
+        if this.parameters[slot.parameterIndex].value.length() != slot.elements {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return -1
+        }
+        return slot.parameterIndex
+    }
+
+    fun applyDenseBaseAdamW(logicalWeightName: String, logicalBiasName: String, baseWeight: Array<Float>, baseBias: Array<Float>, weightDelta: Array<Float>, biasDelta: Array<Float>, weightM: Array<Float>, weightV: Array<Float>, biasM: Array<Float>, biasV: Array<Float>, gradWeight: Array<Float>, gradBias: Array<Float>, stepCount: Int, lr: Float, weightDecay: Float, gradClip: Float, weightBaseDefault: Float, biasBaseDefault: Float) r: Bool {
+        if gradWeight.length() != weightDelta.length() or gradBias.length() != biasDelta.length() {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        if weightM.length() != weightDelta.length() or weightV.length() != weightDelta.length() or biasM.length() != biasDelta.length() or biasV.length() != biasDelta.length() {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        let weightIndex = this.loadedParameterIndex(logicalWeightName, weightDelta.length())
+        let biasIndex = this.loadedParameterIndex(logicalBiasName, biasDelta.length())
+        if weightIndex < 0 or biasIndex < 0 {
+            return false
+        }
+        var norm = 0.0
+        var i = 0
+        while i < gradWeight.length() {
+            norm = norm + gradWeight[i] * gradWeight[i]
+            i = i + 1
+        }
+        i = 0
+        while i < gradBias.length() {
+            norm = norm + gradBias[i] * gradBias[i]
+            i = i + 1
+        }
+        norm = sqrt(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        let safeStep = if stepCount > 0 { stepCount } else { 1 }
+        this.applyVectorBaseAdamWAt(weightIndex, baseWeight, weightBaseDefault, weightDelta, weightM, weightV, gradWeight, scale, safeStep, lr, weightDecay)
+        this.applyVectorBaseAdamWAt(biasIndex, baseBias, biasBaseDefault, biasDelta, biasM, biasV, gradBias, scale, safeStep, lr, weightDecay)
+        if safeStep > this.optimizerSteps {
+            this.optimizerSteps = safeStep
+        }
+        this.optimizerUpdates = this.optimizerUpdates + 2
+        return true
+    }
+
+    fun applyVectorBaseAdamWAt(parameterIndex: Int, baseValues: Array<Float>, baseDefault: Float, delta: Array<Float>, momentM: Array<Float>, momentV: Array<Float>, grad: Array<Float>, scale: Float, stepCount: Int, lr: Float, weightDecay: Float) r: Void {
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - registryPowFloat(beta1, stepCount)
+        let beta2Correction = 1.0 - registryPowFloat(beta2, stepCount)
+        var i = 0
+        while i < delta.length() {
+            var base = baseDefault
+            if i < baseValues.length() {
+                base = baseValues[i]
+            }
+            let g = grad[i] * scale
+            this.parameters[parameterIndex].value[i] = base + delta[i]
+            this.parameters[parameterIndex].grad[i] = g
+            this.parameters[parameterIndex].m[i] = beta1 * this.parameters[parameterIndex].m[i] + (1.0 - beta1) * g
+            this.parameters[parameterIndex].v[i] = beta2 * this.parameters[parameterIndex].v[i] + (1.0 - beta2) * g * g
+            let mHat = this.parameters[parameterIndex].m[i] / beta1Correction
+            let vHat = this.parameters[parameterIndex].v[i] / beta2Correction
+            var next = this.parameters[parameterIndex].value[i]
+            next = next - lr * weightDecay * next
+            next = next - lr * mHat / (sqrt(vHat) + eps)
+            let nextDelta = registryClamp(next - base, -2.0, 2.0)
+            delta[i] = nextDelta
+            momentM[i] = this.parameters[parameterIndex].m[i]
+            momentV[i] = this.parameters[parameterIndex].v[i]
+            this.parameters[parameterIndex].value[i] = base + nextDelta
+            i = i + 1
+        }
+    }
+}
+
+fun registryPowFloat(base: Float, exponent: Int) r: Float {
+    var out = 1.0
+    var i = 0
+    while i < exponent {
+        out = out * base
+        i = i + 1
+    }
+    return out
+}
+
+fun registryClamp(value: Float, minValue: Float, maxValue: Float) r: Float {
+    if value < minValue {
+        return minValue
+    }
+    if value > maxValue {
+        return maxValue
+    }
+    return value
 }
 
 fun miniLMParameterRegistryJson(registry: MiniLMParameterRegistry) r: String {
@@ -327,6 +459,9 @@ fun miniLMParameterRegistryJson(registry: MiniLMParameterRegistry) r: String {
         + "  \"parameter_objects\": " + registry.parameters.length().toString() + ",\n"
         + "  \"grad_buffer_count\": " + registry.gradBufferCount.toString() + ",\n"
         + "  \"moment_buffer_count\": " + registry.momentBufferCount.toString() + ",\n"
+        + "  \"optimizer_steps\": " + registry.optimizerSteps.toString() + ",\n"
+        + "  \"optimizer_updates\": " + registry.optimizerUpdates.toString() + ",\n"
+        + "  \"optimizer_fallbacks\": " + registry.optimizerFallbacks.toString() + ",\n"
         + "  \"all_required_found\": " + registry.allRequiredFound().toString() + ",\n"
         + "  \"all_required_loaded\": " + registry.allRequiredLoaded().toString() + ",\n"
         + "  \"first_missing\": " + escapeJsonString(registry.firstMissing) + ",\n"

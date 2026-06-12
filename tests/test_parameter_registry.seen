@@ -26,6 +26,16 @@ fun values(count: Int, start: Float) r: Array<Float> {
     return out
 }
 
+fun zeros(count: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var i = 0
+    while i < count {
+        out.push(0.0)
+        i = i + 1
+    }
+    return out
+}
+
 fun spec(name: String, rows: Int, cols: Int, start: Float) r: SafeTensorWriteSpec {
     return SafeTensorWriteSpec.new(name, rows, cols, values(rows * cols, start))
 }
@@ -80,6 +90,22 @@ fun main() -> Int {
     expect(registry.parameters[0].grad.length() == registry.parameters[0].value.length(), "registry grad mirrors value length")
     expect(registry.parameters[0].m.length() == registry.parameters[0].value.length(), "registry m mirrors value length")
     expect(registry.parameters[0].v.length() == registry.parameters[0].value.length(), "registry v mirrors value length")
+
+    let weightDelta = zeros(4)
+    let biasDelta = zeros(2)
+    let weightM = zeros(4)
+    let weightV = zeros(4)
+    let biasM = zeros(2)
+    let biasV = zeros(2)
+    let gradWeight = zeros(4)
+    let gradBias = zeros(2)
+    gradWeight[0] = 1.0
+    expect(registry.applyDenseBaseAdamW("layer.0.attention.query.weight", "layer.0.attention.query.bias", values(4, 6.0), values(2, 7.0), weightDelta, biasDelta, weightM, weightV, biasM, biasV, gradWeight, gradBias, 1, 0.1, 0.0, 0.0, 0.0, 0.0), "registry dense adamw bridge")
+    expect(registry.optimizerUpdates == 2, "registry optimizer update count")
+    expect(closeEnough(weightDelta[0], -0.1), "registry synced weight delta")
+    expect(closeEnough(weightM[0], 0.1), "registry synced first moment")
+    expect(closeEnough(registry.parameters[5].grad[0], 1.0), "registry parameter grad stored")
+    expect(closeEnough(registry.parameters[5].value[0], 5.9), "registry parameter value updated")
 
     let manifestPath = "/tmp/seen_trainer_parameter_registry/minilm_parameter_registry.json"
     expect(writeMiniLMParameterRegistry(manifestPath, registry), "write registry manifest")

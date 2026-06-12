@@ -5,6 +5,7 @@ import embedding_delta.{MiniLMEmbeddingDeltas}
 import math.math.{sqrt, exp}
 import math_utils.{gelu}
 import minilm_weights.{mwFindCandidateIndex}
+import parameter_registry.{MiniLMParameterRegistry}
 import safetensors.{SafeTensorInfo, isF32DType, tensorCols, tensorRows}
 import tensor.{Tensor}
 
@@ -419,7 +420,7 @@ class MiniLMEmbeddings {
         return loss
     }
 
-    fun updateAllLayerDeltasTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+    fun updateAllLayerDeltasTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, parameterRegistry: MiniLMParameterRegistry, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
         if this.readyLayers <= 0 {
             return 0.0
         }
@@ -439,7 +440,7 @@ class MiniLMEmbeddings {
             }
             layer = layer - 1
         }
-        applyMiniLMLayerBaseParameterGradients(info, layerDeltas, gradDeltas, this.readyLayers, this.maxLoadElements, lr, weightDecay, gradClip)
+        applyMiniLMLayerBaseParameterGradients(info, parameterRegistry, layerDeltas, gradDeltas, this.readyLayers, this.maxLoadElements, lr, weightDecay, gradClip)
         let embeddingLoss = this.updateEmbeddingDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, embeddingDeltas, layerDeltas, margin, lr, weightDecay, gradClip)
         if embeddingLoss > 0.0 {
             lossSum = lossSum + embeddingLoss
@@ -2311,7 +2312,7 @@ fun applyMiniLMLayerDeltaGradients(layerDeltas: MiniLMLayerDeltas, gradDeltas: M
     }
 }
 
-fun applyMiniLMLayerBaseParameterGradients(info: SafeTensorInfo, layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, readyLayers: Int, maxLoadElements: Int, lr: Float, weightDecay: Float, gradClip: Float) r: Void {
+fun applyMiniLMLayerBaseParameterGradients(info: SafeTensorInfo, parameterRegistry: MiniLMParameterRegistry, layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, readyLayers: Int, maxLoadElements: Int, lr: Float, weightDecay: Float, gradClip: Float) r: Void {
     var scale = 1.0
     if gradClip > 0.0 {
         let norm = miniLMLayerDeltaGradNorm(gradDeltas, readyLayers)
@@ -2325,18 +2326,39 @@ fun applyMiniLMLayerBaseParameterGradients(info: SafeTensorInfo, layerDeltas: Mi
     var layer = 0
     while layer < readyLayers and layer < layerDeltas.layers and layer < gradDeltas.layers {
         if layerDeltas.hasLayer(layer) and gradDeltas.hasLayer(layer) {
-            applyMiniLMLayerBaseParameterGradientsAt(info, layerDeltas, gradDeltas, layer, maxLoadElements, lr, weightDecay)
+            applyMiniLMLayerBaseParameterGradientsAt(info, parameterRegistry, layerDeltas, gradDeltas, layer, maxLoadElements, lr, weightDecay)
         }
         layer = layer + 1
     }
 }
 
-fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, layer: Int, maxLoadElements: Int, lr: Float, weightDecay: Float) r: Void {
+fun applyRegistryDenseDeltaOrFallback(parameterRegistry: MiniLMParameterRegistry, logicalWeightName: String, logicalBiasName: String, baseWeight: Array<Float>, baseBias: Array<Float>, delta: DenseDeltaAdapter, grad: DenseDeltaAdapter, lr: Float, weightDecay: Float) r: Void {
+    let step = delta.stepCount + 1
+    if parameterRegistry.applyDenseBaseAdamW(logicalWeightName, logicalBiasName, baseWeight, baseBias, delta.weightDelta, delta.biasDelta, delta.weightM, delta.weightV, delta.biasM, delta.biasV, grad.weightDelta, grad.biasDelta, step, lr, weightDecay, 0.0, 0.0, 0.0) {
+        delta.stepCount = step
+        delta.loaded = true
+    } else {
+        delta.applyBaseParameterGradients(baseWeight, baseBias, grad.weightDelta, grad.biasDelta, lr, weightDecay, 0.0)
+    }
+}
+
+fun applyRegistryLayerNormDeltaOrFallback(parameterRegistry: MiniLMParameterRegistry, logicalWeightName: String, logicalBiasName: String, baseWeight: Array<Float>, baseBias: Array<Float>, delta: LayerNormDeltaAdapter, grad: LayerNormDeltaAdapter, lr: Float, weightDecay: Float) r: Void {
+    let step = delta.stepCount + 1
+    if parameterRegistry.applyDenseBaseAdamW(logicalWeightName, logicalBiasName, baseWeight, baseBias, delta.weightDelta, delta.biasDelta, delta.weightM, delta.weightV, delta.biasM, delta.biasV, grad.weightDelta, grad.biasDelta, step, lr, weightDecay, 0.0, 1.0, 0.0) {
+        delta.stepCount = step
+        delta.loaded = true
+    } else {
+        delta.applyBaseParameterGradients(baseWeight, baseBias, grad.weightDelta, grad.biasDelta, lr, weightDecay, 0.0)
+    }
+}
+
+fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, parameterRegistry: MiniLMParameterRegistry, layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, layer: Int, maxLoadElements: Int, lr: Float, weightDecay: Float) r: Void {
     let prefix = "encoder.layer." + layer.toString() + "."
+    let logicalPrefix = "layer." + layer.toString() + "."
     let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
     let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
     if qWeight.ok and qBias.ok {
-        layerDeltas.queryDeltas[layer].applyBaseParameterGradients(qWeight.values, qBias.values, gradDeltas.queryDeltas[layer].weightDelta, gradDeltas.queryDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryDenseDeltaOrFallback(parameterRegistry, logicalPrefix + "attention.query.weight", logicalPrefix + "attention.query.bias", qWeight.values, qBias.values, layerDeltas.queryDeltas[layer], gradDeltas.queryDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.queryDeltas[layer].applyGradients(gradDeltas.queryDeltas[layer].weightDelta, gradDeltas.queryDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2344,7 +2366,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let kWeight = loadEmbeddingTensor(info, prefix + "attention.self.key.weight", maxLoadElements)
     let kBias = loadEmbeddingTensor(info, prefix + "attention.self.key.bias", maxLoadElements)
     if kWeight.ok and kBias.ok {
-        layerDeltas.keyDeltas[layer].applyBaseParameterGradients(kWeight.values, kBias.values, gradDeltas.keyDeltas[layer].weightDelta, gradDeltas.keyDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryDenseDeltaOrFallback(parameterRegistry, logicalPrefix + "attention.key.weight", logicalPrefix + "attention.key.bias", kWeight.values, kBias.values, layerDeltas.keyDeltas[layer], gradDeltas.keyDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.keyDeltas[layer].applyGradients(gradDeltas.keyDeltas[layer].weightDelta, gradDeltas.keyDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2352,7 +2374,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let vWeight = loadEmbeddingTensor(info, prefix + "attention.self.value.weight", maxLoadElements)
     let vBias = loadEmbeddingTensor(info, prefix + "attention.self.value.bias", maxLoadElements)
     if vWeight.ok and vBias.ok {
-        layerDeltas.valueDeltas[layer].applyBaseParameterGradients(vWeight.values, vBias.values, gradDeltas.valueDeltas[layer].weightDelta, gradDeltas.valueDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryDenseDeltaOrFallback(parameterRegistry, logicalPrefix + "attention.value.weight", logicalPrefix + "attention.value.bias", vWeight.values, vBias.values, layerDeltas.valueDeltas[layer], gradDeltas.valueDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.valueDeltas[layer].applyGradients(gradDeltas.valueDeltas[layer].weightDelta, gradDeltas.valueDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2360,7 +2382,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let attnWeight = loadEmbeddingTensor(info, prefix + "attention.output.dense.weight", maxLoadElements)
     let attnBias = loadEmbeddingTensor(info, prefix + "attention.output.dense.bias", maxLoadElements)
     if attnWeight.ok and attnBias.ok {
-        layerDeltas.attentionDenseDeltas[layer].applyBaseParameterGradients(attnWeight.values, attnBias.values, gradDeltas.attentionDenseDeltas[layer].weightDelta, gradDeltas.attentionDenseDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryDenseDeltaOrFallback(parameterRegistry, logicalPrefix + "attention.output.weight", logicalPrefix + "attention.output.bias", attnWeight.values, attnBias.values, layerDeltas.attentionDenseDeltas[layer], gradDeltas.attentionDenseDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.attentionDenseDeltas[layer].applyGradients(gradDeltas.attentionDenseDeltas[layer].weightDelta, gradDeltas.attentionDenseDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2368,7 +2390,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let attnLnWeight = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements)
     let attnLnBias = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements)
     if attnLnWeight.ok and attnLnBias.ok {
-        layerDeltas.attentionLayerNormDeltas[layer].applyBaseParameterGradients(attnLnWeight.values, attnLnBias.values, gradDeltas.attentionLayerNormDeltas[layer].weightDelta, gradDeltas.attentionLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryLayerNormDeltaOrFallback(parameterRegistry, logicalPrefix + "attention.layer_norm.weight", logicalPrefix + "attention.layer_norm.bias", attnLnWeight.values, attnLnBias.values, layerDeltas.attentionLayerNormDeltas[layer], gradDeltas.attentionLayerNormDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.attentionLayerNormDeltas[layer].applyGradients(gradDeltas.attentionLayerNormDeltas[layer].weightDelta, gradDeltas.attentionLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2376,7 +2398,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let intermediateWeight = loadEmbeddingTensor(info, prefix + "intermediate.dense.weight", maxLoadElements)
     let intermediateBias = loadEmbeddingTensor(info, prefix + "intermediate.dense.bias", maxLoadElements)
     if intermediateWeight.ok and intermediateBias.ok {
-        layerDeltas.intermediateDeltas[layer].applyBaseParameterGradients(intermediateWeight.values, intermediateBias.values, gradDeltas.intermediateDeltas[layer].weightDelta, gradDeltas.intermediateDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryDenseDeltaOrFallback(parameterRegistry, logicalPrefix + "intermediate.weight", logicalPrefix + "intermediate.bias", intermediateWeight.values, intermediateBias.values, layerDeltas.intermediateDeltas[layer], gradDeltas.intermediateDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.intermediateDeltas[layer].applyGradients(gradDeltas.intermediateDeltas[layer].weightDelta, gradDeltas.intermediateDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2384,7 +2406,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let outputWeight = loadEmbeddingTensor(info, prefix + "output.dense.weight", maxLoadElements)
     let outputBias = loadEmbeddingTensor(info, prefix + "output.dense.bias", maxLoadElements)
     if outputWeight.ok and outputBias.ok {
-        layerDeltas.outputDeltas[layer].applyBaseParameterGradients(outputWeight.values, outputBias.values, gradDeltas.outputDeltas[layer].weightDelta, gradDeltas.outputDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryDenseDeltaOrFallback(parameterRegistry, logicalPrefix + "output.weight", logicalPrefix + "output.bias", outputWeight.values, outputBias.values, layerDeltas.outputDeltas[layer], gradDeltas.outputDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.outputDeltas[layer].applyGradients(gradDeltas.outputDeltas[layer].weightDelta, gradDeltas.outputDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
@@ -2392,7 +2414,7 @@ fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: 
     let outputLnWeight = loadEmbeddingTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements)
     let outputLnBias = loadEmbeddingTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements)
     if outputLnWeight.ok and outputLnBias.ok {
-        layerDeltas.outputLayerNormDeltas[layer].applyBaseParameterGradients(outputLnWeight.values, outputLnBias.values, gradDeltas.outputLayerNormDeltas[layer].weightDelta, gradDeltas.outputLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+        applyRegistryLayerNormDeltaOrFallback(parameterRegistry, logicalPrefix + "output.layer_norm.weight", logicalPrefix + "output.layer_norm.bias", outputLnWeight.values, outputLnBias.values, layerDeltas.outputLayerNormDeltas[layer], gradDeltas.outputLayerNormDeltas[layer], lr, weightDecay)
     } else {
         layerDeltas.outputLayerNormDeltas[layer].applyGradients(gradDeltas.outputLayerNormDeltas[layer].weightDelta, gradDeltas.outputLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }

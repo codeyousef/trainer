@@ -29,7 +29,7 @@ class Pipeline {
     }
 
     fun train() r: TrainResult {
-        return trainEncoder(this.cfg, this.bundle.encoder)
+        return trainEncoder(this.cfg, this.bundle.encoder, this.bundle.parameterRegistry)
     }
 
     fun calibrate() r: Int {
@@ -42,7 +42,7 @@ class Pipeline {
     }
 
     fun packageModel() r: PackageResult {
-        return writeModelPackage(this.cfg)
+        return writeModelPackage(this.cfg, this.bundle.parameterRegistry)
     }
 
     fun runAll() r: Int {

@@ -3,6 +3,7 @@ import adapter.{ProjectionAdapter}
 import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas}
 import embedding_delta.{MiniLMEmbeddingDeltas}
 import minilm_embeddings.{MiniLMEmbeddings}
+import parameter_registry.{MiniLMParameterRegistry}
 import tokenizer.{Tokenizer, stableTokenId}
 
 class Encoder {
@@ -152,7 +153,7 @@ class Encoder {
         return Array<Float>()
     }
 
-    fun updateMiniLMDenseAdapterTriplet(queryText: String, positiveText: String, negativeText: String, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+    fun updateMiniLMDenseAdapterTriplet(queryText: String, positiveText: String, negativeText: String, parameterRegistry: MiniLMParameterRegistry, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
         if not this.hasMiniLMDenseAdapterTarget() {
             return 0.0
         }
@@ -163,7 +164,7 @@ class Encoder {
         let nIds = this.tokenizer.tokenIds(negativeText)
         let nMask = this.tokenizer.attentionMask(negativeText)
         if this.hasMiniLMAllLayerDeltaTarget() {
-            return this.modelEmbeddings.updateAllLayerDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, margin, lr, weightDecay, gradClip)
+            return this.modelEmbeddings.updateAllLayerDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, parameterRegistry, margin, lr, weightDecay, gradClip)
         }
         return this.modelEmbeddings.updateDenseAdapterTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, margin, lr, weightDecay, gradClip)
     }

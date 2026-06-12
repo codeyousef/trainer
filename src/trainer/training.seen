@@ -6,6 +6,7 @@ import encoder.{Encoder}
 import io_utils.{writeAtomicText}
 import jsonl.{TripletExample, readTriplets}
 import math_utils.{cosine, relu, deterministicShuffleIndices}
+import parameter_registry.{MiniLMParameterRegistry, writeMiniLMParameterRegistry}
 
 class TrainResult {
     var examples: Int
@@ -18,7 +19,7 @@ class TrainResult {
     }
 }
 
-fun trainEncoder(cfg: TrainerConfig, encoder: Encoder) r: TrainResult {
+fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLMParameterRegistry) r: TrainResult {
     let trainPath = if cfg.minedJsonlPath.length() > 0 { cfg.minedJsonlPath } else { cfg.trainJsonlPath }
     let items = readTriplets(trainPath)
     let batchSize = effectiveBatchSize(cfg.batchSize, items.length())
@@ -38,7 +39,7 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder) r: TrainResult {
             while offset < batchSize {
                 let orderIndex = batch * batchSize + offset
                 let item = items[order[orderIndex]]
-                let loss = trainAdapterTriplet(item, encoder, cfg)
+                let loss = trainAdapterTriplet(item, encoder, parameterRegistry, cfg)
                 batchLoss = batchLoss + loss
                 inBatch = inBatch + 1
                 offset = offset + 1
@@ -81,6 +82,7 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder) r: TrainResult {
     encoder.adapter.save(cfg.adapterPath())
     let path = cfg.outputModelDir + "/training_config.json"
     writeAtomicText(path, trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch))
+    writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry)
     return TrainResult.new(items.length(), cfg.epochs, finalLoss, path)
 }
 
@@ -102,13 +104,13 @@ fun batchesPerEpoch(itemCount: Int, batchSize: Int) r: Int {
     return itemCount / batchSize
 }
 
-fun trainAdapterTriplet(item: TripletExample, encoder: Encoder, cfg: TrainerConfig) r: Float {
+fun trainAdapterTriplet(item: TripletExample, encoder: Encoder, parameterRegistry: MiniLMParameterRegistry, cfg: TrainerConfig) r: Float {
     if item.hardNegativeChunkText.length() == 0 {
         return 0.0
     }
     var denseLoss = 0.0
     if encoder.hasMiniLMDenseAdapterTarget() {
-        denseLoss = encoder.updateMiniLMDenseAdapterTriplet(item.queryText, item.positiveChunkText, item.hardNegativeChunkText, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
+        denseLoss = encoder.updateMiniLMDenseAdapterTriplet(item.queryText, item.positiveChunkText, item.hardNegativeChunkText, parameterRegistry, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
     }
     var minilmLoss = 0.0
     if encoder.hasMiniLMLayerAdapterTarget() {
@@ -227,6 +229,7 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"base_weight_parameterization\": \"safetensors_base_plus_delta_parameters_materialized_into_base_weights\",\n"
         + "  \"safetensors_parameter_registry_path\": \"" + cfg.outputModelDir + "/minilm_parameter_registry.json\",\n"
         + "  \"safetensors_parameter_registry_buffers\": [\"value\", \"grad\", \"adam_m\", \"adam_v\"],\n"
+        + "  \"safetensors_parameter_registry_optimizer\": \"adamw_on_registry_parameter_buffers_then_delta_artifact_sync\",\n"
         + "  \"direct_base_parameter_optimizer\": \"adamw_on_loaded_safetensors_base_plus_seen_delta\",\n"
         + "  \"direct_base_weight_update_scope\": \"sparse_embeddings_embedding_layernorm_and_all_ready_minilm_layer_surfaces\",\n"
         + "  \"minilm_attention_output_dense_delta_trained\": true,\n"
