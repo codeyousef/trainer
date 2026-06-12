@@ -78,6 +78,60 @@ class Tensor {
         return out
     }
 
+    fun transpose() r: Tensor {
+        let out = Tensor.zeros(this.shape.cols, this.shape.rows, this.backend)
+        var row = 0
+        while row < this.shape.rows {
+            var col = 0
+            while col < this.shape.cols {
+                out.set(col, row, this.at(row, col))
+                col = col + 1
+            }
+            row = row + 1
+        }
+        return out
+    }
+
+    fun columnSums() r: Array<Float> {
+        if tensorGpuBackendEnabled(this.backend) and this.shape.rows > 0 and this.shape.cols > 0 {
+            let ones = tensorInitializedFloatArray(this.shape.rows, 1.0)
+            let onesTensor = Tensor.fromArray(1, this.shape.rows, ones, this.backend)
+            let sums = onesTensor.matmul(this)
+            if sums.values.length() == this.shape.cols {
+                return sums.values
+            }
+        }
+        let out = tensorInitializedFloatArray(this.shape.cols, 0.0)
+        var row = 0
+        while row < this.shape.rows {
+            var col = 0
+            while col < this.shape.cols {
+                out[col] = out[col] + this.at(row, col)
+                col = col + 1
+            }
+            row = row + 1
+        }
+        return out
+    }
+
+    fun denseInputGradient(weight: Tensor) r: Tensor {
+        if this.shape.cols != weight.shape.rows {
+            return Tensor.zeros(this.shape.rows, weight.shape.cols, this.backend)
+        }
+        return this.matmul(weight)
+    }
+
+    fun denseWeightGradient(input: Tensor) r: Tensor {
+        if this.shape.rows != input.shape.rows {
+            return Tensor.zeros(this.shape.cols, input.shape.cols, this.backend)
+        }
+        return this.transpose().matmul(input)
+    }
+
+    fun denseBiasGradient() r: Array<Float> {
+        return this.columnSums()
+    }
+
     fun add(other: Tensor) r: Tensor {
         if tensorGpuBackendEnabled(this.backend) {
             let gpu = tensorGpuBinary(this.values, other.values, this.shape.rows, this.shape.cols, "tensorElementwiseAdd")

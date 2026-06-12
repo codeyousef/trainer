@@ -1,4 +1,5 @@
 import trainer.gpu_tensor_ops.{tensorGpuBinary, tensorGpuMatmul}
+import trainer.tensor.{Tensor}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
@@ -37,6 +38,38 @@ fun main() -> Int {
     expect(approx(product.values[1], 22.0), "gpu matmul 01")
     expect(approx(product.values[2], 43.0), "gpu matmul 10")
     expect(approx(product.values[3], 50.0), "gpu matmul 11")
+
+    let gradVals = Array<Float>()
+    gradVals.push(1.0)
+    gradVals.push(2.0)
+    gradVals.push(3.0)
+    gradVals.push(4.0)
+    let weightVals = Array<Float>()
+    weightVals.push(0.5)
+    weightVals.push(1.0)
+    weightVals.push(1.5)
+    weightVals.push(2.0)
+    weightVals.push(2.5)
+    weightVals.push(3.0)
+    let gradOut = Tensor.fromArray(2, 2, gradVals, "gpu")
+    let denseWeight = Tensor.fromArray(2, 3, weightVals, "gpu")
+    let gradInput = gradOut.denseInputGradient(denseWeight)
+    expect(approx(gradInput.at(0, 0), 4.5), "gpu dense input grad 00")
+    expect(approx(gradInput.at(1, 2), 16.5), "gpu dense input grad 12")
+
+    let inputVals = Array<Float>()
+    inputVals.push(1.0)
+    inputVals.push(0.0)
+    inputVals.push(2.0)
+    inputVals.push(0.5)
+    inputVals.push(1.5)
+    inputVals.push(-1.0)
+    let denseInput = Tensor.fromArray(2, 3, inputVals, "gpu")
+    let gradWeight = gradOut.denseWeightGradient(denseInput)
+    expect(approx(gradWeight.at(0, 0), 2.5), "gpu dense weight grad 00")
+    expect(approx(gradWeight.at(1, 1), 6.0), "gpu dense weight grad 11")
+    let biasGrad = gradOut.denseBiasGradient()
+    expect(approx(biasGrad[0], 4.0) and approx(biasGrad[1], 6.0), "gpu dense bias grad")
     println("PASS test_gpu_tensor")
     return 0
 }

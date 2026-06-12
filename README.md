@@ -38,6 +38,9 @@ falls back to the same scalar top-k and domain/source exclusion semantics.
 Loaded MiniLM forward passes also thread the configured backend into Q/K/V, attention-output,
 intermediate, and output dense projections through Seen's `Tensor.matmul` dispatch while keeping
 the scalar path as the correctness reference.
+MiniLM backward tail gradients now thread the configured backend into dense projection input
+gradients for FFN/output/attention paths, reusing `Tensor.matmul` through the dense-gradient
+helpers while retaining scalar fallbacks for shape diagnostics and tests.
 
 ## Model Outputs
 

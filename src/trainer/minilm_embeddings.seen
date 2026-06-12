@@ -355,9 +355,9 @@ class MiniLMEmbeddings {
         let gradALNB = denseZeros(attentionLayerNormDelta.biasDelta.length())
         let gradLNW = denseZeros(layerNormDelta.weightDelta.length())
         let gradLNB = denseZeros(layerNormDelta.biasDelta.length())
-        accumulateDenseTraceGradWithTail(info, qTrace, gradQ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements)
-        accumulateDenseTraceGradWithTail(info, pTrace, gradP, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements)
-        accumulateDenseTraceGradWithTail(info, nTrace, gradN, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements)
+        accumulateDenseTraceGradWithTail(info, qTrace, gradQ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements, this.backend)
+        accumulateDenseTraceGradWithTail(info, pTrace, gradP, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements, this.backend)
+        accumulateDenseTraceGradWithTail(info, nTrace, gradN, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.maxLoadElements, this.backend)
         denseAdapter.applyGradients(gradA, gradB, lr, weightDecay, gradClip)
         denseDelta.applyGradients(gradDW, gradDB, lr, weightDecay, gradClip)
         intermediateDelta.applyGradients(gradIW, gradIB, lr, weightDecay, gradClip)
@@ -404,9 +404,9 @@ class MiniLMEmbeddings {
         let gradTokenType = Array<Float>()
         let gradLnW = denseZeros(this.hiddenSize)
         let gradLnB = denseZeros(this.hiddenSize)
-        accumulateEmbeddingTraceGrad(info, qTrace, gradQ, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
-        accumulateEmbeddingTraceGrad(info, pTrace, gradP, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
-        accumulateEmbeddingTraceGrad(info, nTrace, gradN, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers)
+        accumulateEmbeddingTraceGrad(info, qTrace, gradQ, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
+        accumulateEmbeddingTraceGrad(info, pTrace, gradP, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
+        accumulateEmbeddingTraceGrad(info, nTrace, gradN, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
         let wordBase = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", this.maxLoadElements)
         let positionBase = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", this.maxLoadElements)
         let tokenTypeBase = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
@@ -497,9 +497,9 @@ class MiniLMEmbeddings {
         let gradALNB = denseZeros(layerDeltas.attentionLayerNormDeltas[targetLayer].biasDelta.length())
         let gradLNW = denseZeros(layerDeltas.outputLayerNormDeltas[targetLayer].weightDelta.length())
         let gradLNB = denseZeros(layerDeltas.outputLayerNormDeltas[targetLayer].biasDelta.length())
-        accumulateDenseTraceGradWithLayerDeltaTail(info, qTrace, gradQ, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements)
-        accumulateDenseTraceGradWithLayerDeltaTail(info, pTrace, gradP, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements)
-        accumulateDenseTraceGradWithLayerDeltaTail(info, nTrace, gradN, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements)
+        accumulateDenseTraceGradWithLayerDeltaTail(info, qTrace, gradQ, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.backend)
+        accumulateDenseTraceGradWithLayerDeltaTail(info, pTrace, gradP, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.backend)
+        accumulateDenseTraceGradWithLayerDeltaTail(info, nTrace, gradN, denseAdapter, layerDeltas, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, targetLayer, this.readyLayers, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.backend)
         addFlatInPlace(gradDeltas.outputDeltas[targetLayer].weightDelta, gradDW)
         addFlatInPlace(gradDeltas.outputDeltas[targetLayer].biasDelta, gradDB)
         addFlatInPlace(gradDeltas.intermediateDeltas[targetLayer].weightDelta, gradIW)
@@ -1597,20 +1597,20 @@ fun layerNormDeltaEffectiveBias(base: Array<Float>, delta: LayerNormDeltaAdapter
     return out
 }
 
-fun accumulateDenseTraceGradWithTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, maxLoadElements: Int) r: Void {
+fun accumulateDenseTraceGradWithTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, maxLoadElements: Int, backend: String) r: Void {
     if targetLayer == readyLayers - 1 {
         accumulateDenseTraceGrad(trace, gradMean, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
         return
     }
     if targetLayer < readyLayers - 1 {
-        let gradRows = tailInputGradient(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, trace.inputDim, maxLoadElements, targetLayer + 1, readyLayers, gradMean)
+        let gradRows = tailInputGradientBackend(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, trace.inputDim, maxLoadElements, targetLayer + 1, readyLayers, gradMean, backend)
         if gradRows.length() == trace.seqLen * trace.hiddenSize {
             accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
         }
     }
 }
 
-fun accumulateDenseTraceGradWithLayerDeltaTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, layerDeltas: MiniLMLayerDeltas, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int) r: Void {
+fun accumulateDenseTraceGradWithLayerDeltaTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, layerDeltas: MiniLMLayerDeltas, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, backend: String) r: Void {
     if targetLayer < 0 or targetLayer >= readyLayers or not layerDeltas.hasLayer(targetLayer) {
         return
     }
@@ -1618,7 +1618,7 @@ fun accumulateDenseTraceGradWithLayerDeltaTail(info: SafeTensorInfo, trace: Mini
         accumulateDenseTraceGrad(trace, gradMean, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
         return
     }
-    let gradRows = tailInputGradientWithLayerDeltas(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer + 1, readyLayers, gradMean, layerDeltas)
+    let gradRows = tailInputGradientWithLayerDeltasBackend(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer + 1, readyLayers, gradMean, layerDeltas, backend)
     if gradRows.length() == trace.seqLen * trace.hiddenSize {
         accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
     }
@@ -1671,13 +1671,13 @@ fun accumulateDenseTraceGradRows(trace: MiniLMDenseTrace, gradRows: Array<Float>
     }
 }
 
-fun accumulateEmbeddingTraceGrad(info: SafeTensorInfo, trace: MiniLMEmbeddingTrace, gradMean: Array<Float>, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, gradWordRows: Array<Int>, gradWord: Array<Float>, gradPositionRows: Array<Int>, gradPosition: Array<Float>, gradTokenTypeRows: Array<Int>, gradTokenType: Array<Float>, gradLnW: Array<Float>, gradLnB: Array<Float>, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int) r: Void {
+fun accumulateEmbeddingTraceGrad(info: SafeTensorInfo, trace: MiniLMEmbeddingTrace, gradMean: Array<Float>, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, gradWordRows: Array<Int>, gradWord: Array<Float>, gradPositionRows: Array<Int>, gradPosition: Array<Float>, gradTokenTypeRows: Array<Int>, gradTokenType: Array<Float>, gradLnW: Array<Float>, gradLnB: Array<Float>, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, backend: String) r: Void {
     if not trace.ok or trace.seqLen <= 0 {
         return
     }
     var gradRows = Array<Float>()
     if readyLayers > 0 {
-        gradRows = tailInputGradientWithLayerDeltas(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, 0, readyLayers, gradMean, layerDeltas)
+        gradRows = tailInputGradientWithLayerDeltasBackend(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, 0, readyLayers, gradMean, layerDeltas, backend)
     } else {
         gradRows = meanGradRows(gradMean, trace.seqLen, trace.hiddenSize)
     }
@@ -1768,17 +1768,21 @@ fun accumulateEmbeddingLayerNormDeltaGrad(values: Array<Float>, gradOut: Array<F
 }
 
 fun tailInputGradient(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, readyLayers: Int, gradMean: Array<Float>) r: Array<Float> {
+    return tailInputGradientBackend(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, readyLayers, gradMean, "cpu")
+}
+
+fun tailInputGradientBackend(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, readyLayers: Int, gradMean: Array<Float>, backend: String) r: Array<Float> {
     if startLayer >= readyLayers {
         return meanGradRows(gradMean, seqLen, hiddenSize)
     }
     var gradRows = meanGradRows(gradMean, seqLen, hiddenSize)
     var layer = readyLayers - 1
     while layer >= startLayer {
-        let layerInput = tailLayerInputSequence(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, layer)
+        let layerInput = tailLayerInputSequenceBackend(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, layer, backend)
         if layerInput.length() != startSequence.length() {
             return Array<Float>()
         }
-        gradRows = transformerLayerInputGradient(info, layerInput, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows)
+        gradRows = transformerLayerInputGradientBackend(info, layerInput, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, backend)
         if gradRows.length() != startSequence.length() {
             return Array<Float>()
         }
@@ -1788,17 +1792,21 @@ fun tailInputGradient(info: SafeTensorInfo, startSequence: Array<Float>, seqLen:
 }
 
 fun tailInputGradientWithLayerDeltas(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, readyLayers: Int, gradMean: Array<Float>, layerDeltas: MiniLMLayerDeltas) r: Array<Float> {
+    return tailInputGradientWithLayerDeltasBackend(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, readyLayers, gradMean, layerDeltas, "cpu")
+}
+
+fun tailInputGradientWithLayerDeltasBackend(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, readyLayers: Int, gradMean: Array<Float>, layerDeltas: MiniLMLayerDeltas, backend: String) r: Array<Float> {
     if startLayer >= readyLayers {
         return meanGradRows(gradMean, seqLen, hiddenSize)
     }
     var gradRows = meanGradRows(gradMean, seqLen, hiddenSize)
     var layer = readyLayers - 1
     while layer >= startLayer {
-        let layerInput = tailLayerInputSequenceWithLayerDeltas(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, layer, layerDeltas)
+        let layerInput = tailLayerInputSequenceWithLayerDeltasBackend(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, layer, layerDeltas, backend)
         if layerInput.length() != startSequence.length() {
             return Array<Float>()
         }
-        gradRows = transformerLayerInputGradientWithLayerDeltas(info, layerInput, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, layerDeltas)
+        gradRows = transformerLayerInputGradientWithLayerDeltasBackend(info, layerInput, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, layerDeltas, backend)
         if gradRows.length() != startSequence.length() {
             return Array<Float>()
         }
@@ -1808,10 +1816,14 @@ fun tailInputGradientWithLayerDeltas(info: SafeTensorInfo, startSequence: Array<
 }
 
 fun tailLayerInputSequence(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, endLayer: Int) r: Array<Float> {
+    return tailLayerInputSequenceBackend(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, endLayer, "cpu")
+}
+
+fun tailLayerInputSequenceBackend(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, endLayer: Int, backend: String) r: Array<Float> {
     var out = startSequence
     var layer = startLayer
     while layer < endLayer {
-        let layerOut = applyEncoderLayer(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+        let layerOut = applyEncoderLayerBackend(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
         if layerOut.length() != out.length() {
             return Array<Float>()
         }
@@ -1822,14 +1834,18 @@ fun tailLayerInputSequence(info: SafeTensorInfo, startSequence: Array<Float>, se
 }
 
 fun tailLayerInputSequenceWithLayerDeltas(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, endLayer: Int, layerDeltas: MiniLMLayerDeltas) r: Array<Float> {
+    return tailLayerInputSequenceWithLayerDeltasBackend(info, startSequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, startLayer, endLayer, layerDeltas, "cpu")
+}
+
+fun tailLayerInputSequenceWithLayerDeltasBackend(info: SafeTensorInfo, startSequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, startLayer: Int, endLayer: Int, layerDeltas: MiniLMLayerDeltas, backend: String) r: Array<Float> {
     var out = startSequence
     var layer = startLayer
     while layer < endLayer {
         var layerOut = Array<Float>()
         if layerDeltas.hasLayer(layer) {
-            layerOut = applyEncoderLayerWithDenseAdapter(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+            layerOut = applyEncoderLayerWithDenseAdapterBackend(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
         } else {
-            layerOut = applyEncoderLayer(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer)
+            layerOut = applyEncoderLayerBackend(info, out, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
         }
         if layerOut.length() != out.length() {
             return Array<Float>()
@@ -1841,6 +1857,10 @@ fun tailLayerInputSequenceWithLayerDeltas(info: SafeTensorInfo, startSequence: A
 }
 
 fun transformerLayerInputGradient(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, gradRows: Array<Float>) r: Array<Float> {
+    return transformerLayerInputGradientBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, "cpu")
+}
+
+fun transformerLayerInputGradientBackend(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, gradRows: Array<Float>, backend: String) r: Array<Float> {
     let prefix = "encoder.layer." + layer.toString() + "."
     let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
     let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
@@ -1871,39 +1891,43 @@ fun transformerLayerInputGradient(info: SafeTensorInfo, sequence: Array<Float>, 
         return Array<Float>()
     }
 
-    let q = projectSequence(sequence, seqLen, hiddenSize, qWeight, qBias)
-    let k = projectSequence(sequence, seqLen, hiddenSize, kWeight, kBias)
-    let v = projectSequence(sequence, seqLen, hiddenSize, vWeight, vBias)
+    let q = projectSequenceLinearBackend(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, backend)
+    let k = projectSequenceLinearBackend(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, backend)
+    let v = projectSequenceLinearBackend(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, backend)
     let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
     if context.length() != sequence.length() {
         return Array<Float>()
     }
-    let attnDense = projectSequence(context, seqLen, hiddenSize, attnOutWeight, attnOutBias)
+    let attnDense = projectSequenceLinearBackend(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, backend)
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
     let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values)
-    let interPre = feedForwardPreActivation(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias)
+    let interPre = projectSequenceLinearBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, backend)
     let ffIntermediate = geluFlat(interPre)
-    let ffOutput = feedForwardOutput(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias)
+    let ffOutput = projectSequenceLinearBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, backend)
     let outputLnInput = addFlatRows(ffOutput, attnNorm, seqLen, hiddenSize)
 
     let gradOutput = gradRows
     let gradOutputLnInput = layerNormRowsInputGradient(outputLnInput, seqLen, hiddenSize, outputLnWeight.values, gradOutput)
-    let gradFfIntermediate = projectSequenceInputGradient(gradOutputLnInput, seqLen, intermediateSize, outputWeight)
+    let gradFfIntermediate = projectSequenceInputGradientBackend(gradOutputLnInput, seqLen, intermediateSize, outputWeight, backend)
     let gradInterPre = applyGeluGradient(interPre, gradFfIntermediate)
     let gradAttnNorm = copyFlat(gradOutputLnInput)
-    let gradAttnFromIntermediate = projectSequenceInputGradient(gradInterPre, seqLen, hiddenSize, intermediateWeight)
+    let gradAttnFromIntermediate = projectSequenceInputGradientBackend(gradInterPre, seqLen, hiddenSize, intermediateWeight, backend)
     addFlatInPlace(gradAttnNorm, gradAttnFromIntermediate)
     let gradAttnLnInput = layerNormRowsInputGradient(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, gradAttnNorm)
     let gradSequence = copyFlat(gradAttnLnInput)
-    let gradContext = projectSequenceInputGradient(gradAttnLnInput, seqLen, hiddenSize, attnOutWeight)
-    let gradAttentionInput = attentionSequenceInputGradient(q, k, v, gradContext, qWeight, kWeight, vWeight, seqLen, hiddenSize, attentionHeads)
+    let gradContext = projectSequenceInputGradientBackend(gradAttnLnInput, seqLen, hiddenSize, attnOutWeight, backend)
+    let gradAttentionInput = attentionSequenceInputGradientBackend(q, k, v, gradContext, qWeight, kWeight, vWeight, seqLen, hiddenSize, attentionHeads, backend)
     addFlatInPlace(gradSequence, gradAttentionInput)
     return gradSequence
 }
 
 fun transformerLayerInputGradientWithLayerDeltas(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, gradRows: Array<Float>, layerDeltas: MiniLMLayerDeltas) r: Array<Float> {
+    return transformerLayerInputGradientWithLayerDeltasBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, layerDeltas, "cpu")
+}
+
+fun transformerLayerInputGradientWithLayerDeltasBackend(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, gradRows: Array<Float>, layerDeltas: MiniLMLayerDeltas, backend: String) r: Array<Float> {
     if not layerDeltas.hasLayer(layer) {
-        return transformerLayerInputGradient(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows)
+        return transformerLayerInputGradientBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, gradRows, backend)
     }
     let prefix = "encoder.layer." + layer.toString() + "."
     let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
@@ -1943,34 +1967,34 @@ fun transformerLayerInputGradientWithLayerDeltas(info: SafeTensorInfo, sequence:
     let intermediateDelta = layerDeltas.intermediateDeltas[layer]
     let outputDelta = layerDeltas.outputDeltas[layer]
     let outputLayerNormDelta = layerDeltas.outputLayerNormDeltas[layer]
-    let q = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, qDelta, true)
-    let k = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, kDelta, true)
-    let v = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, vDelta, true)
+    let q = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, qDelta, true, backend)
+    let k = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, kDelta, true, backend)
+    let v = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, vDelta, true, backend)
     let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
     if context.length() != sequence.length() {
         return Array<Float>()
     }
-    let attnDense = projectSequenceWithDenseDelta(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attnDenseDelta, true)
+    let attnDense = projectSequenceWithDenseDeltaBackend(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attnDenseDelta, true, backend)
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
     let attnWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attnLayerNormDelta)
     let attnBias = layerNormDeltaEffectiveBias(attnLnBias.values, attnLayerNormDelta)
     let attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnWeight, attnBias)
-    let interPre = feedForwardPreActivationWithDenseDelta(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, true)
+    let interPre = feedForwardPreActivationWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, true, backend)
     let ffIntermediate = geluFlat(interPre)
-    let ffOutput = feedForwardOutputWithDenseAdapter(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), outputDelta, true)
+    let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), outputDelta, true, backend)
     let outputLnInput = addFlatRows(ffOutput, attnNorm, seqLen, hiddenSize)
     let effectiveOutputLnWeight = outputLayerNormDelta.effectiveWeight(outputLnWeight.values)
 
     let gradOutputLnInput = layerNormRowsInputGradient(outputLnInput, seqLen, hiddenSize, effectiveOutputLnWeight, gradRows)
-    let gradFfIntermediate = projectSequenceInputGradientWithDenseDelta(gradOutputLnInput, seqLen, intermediateSize, outputWeight, outputDelta)
+    let gradFfIntermediate = projectSequenceInputGradientWithDenseDeltaBackend(gradOutputLnInput, seqLen, intermediateSize, outputWeight, outputDelta, backend)
     let gradInterPre = applyGeluGradient(interPre, gradFfIntermediate)
     let gradAttnNorm = copyFlat(gradOutputLnInput)
-    let gradAttnFromIntermediate = projectSequenceInputGradientWithDenseDelta(gradInterPre, seqLen, hiddenSize, intermediateWeight, intermediateDelta)
+    let gradAttnFromIntermediate = projectSequenceInputGradientWithDenseDeltaBackend(gradInterPre, seqLen, hiddenSize, intermediateWeight, intermediateDelta, backend)
     addFlatInPlace(gradAttnNorm, gradAttnFromIntermediate)
     let gradAttnLnInput = layerNormRowsInputGradient(attnLnInput, seqLen, hiddenSize, attnWeight, gradAttnNorm)
     let gradSequence = copyFlat(gradAttnLnInput)
-    let gradContext = projectSequenceInputGradientWithDenseDelta(gradAttnLnInput, seqLen, hiddenSize, attnOutWeight, attnDenseDelta)
-    let gradAttentionInput = attentionSequenceInputGradientWithDeltas(q, k, v, gradContext, qWeight, kWeight, vWeight, qDelta, kDelta, vDelta, seqLen, hiddenSize, attentionHeads)
+    let gradContext = projectSequenceInputGradientWithDenseDeltaBackend(gradAttnLnInput, seqLen, hiddenSize, attnOutWeight, attnDenseDelta, backend)
+    let gradAttentionInput = attentionSequenceInputGradientWithDeltasBackend(q, k, v, gradContext, qWeight, kWeight, vWeight, qDelta, kDelta, vDelta, seqLen, hiddenSize, attentionHeads, backend)
     addFlatInPlace(gradSequence, gradAttentionInput)
     return gradSequence
 }
@@ -2041,6 +2065,26 @@ fun layerNormRowsInputGradient(values: Array<Float>, seqLen: Int, hiddenSize: In
 }
 
 fun projectSequenceInputGradient(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad) r: Array<Float> {
+    return projectSequenceInputGradientBackend(gradOutput, seqLen, inputSize, weight, "cpu")
+}
+
+fun projectSequenceInputGradientBackend(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad, backend: String) r: Array<Float> {
+    if seqLen <= 0 or inputSize <= 0 or not weight.ok {
+        return Array<Float>()
+    }
+    if gradOutput.length() < seqLen * weight.rows or weight.values.length() < weight.rows * weight.cols or weight.cols < inputSize {
+        return projectSequenceInputGradientScalar(gradOutput, seqLen, inputSize, weight)
+    }
+    let gradTensor = Tensor.fromArray(seqLen, weight.rows, gradOutput, backend)
+    let weightTensor = Tensor.fromArray(weight.rows, inputSize, denseWeightSlice(weight.values, weight.rows, weight.cols, inputSize), backend)
+    let gradInput = gradTensor.denseInputGradient(weightTensor)
+    if gradInput.values.length() == seqLen * inputSize {
+        return gradInput.values
+    }
+    return projectSequenceInputGradientScalar(gradOutput, seqLen, inputSize, weight)
+}
+
+fun projectSequenceInputGradientScalar(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad) r: Array<Float> {
     let out = zerosFloat(seqLen * inputSize)
     var row = 0
     while row < seqLen {
@@ -2061,6 +2105,27 @@ fun projectSequenceInputGradient(gradOutput: Array<Float>, seqLen: Int, inputSiz
 }
 
 fun projectSequenceInputGradientWithDenseDelta(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad, delta: DenseDeltaAdapter) r: Array<Float> {
+    return projectSequenceInputGradientWithDenseDeltaBackend(gradOutput, seqLen, inputSize, weight, delta, "cpu")
+}
+
+fun projectSequenceInputGradientWithDenseDeltaBackend(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad, delta: DenseDeltaAdapter, backend: String) r: Array<Float> {
+    if seqLen <= 0 or inputSize <= 0 or not weight.ok {
+        return Array<Float>()
+    }
+    if gradOutput.length() < seqLen * weight.rows or weight.values.length() < weight.rows * weight.cols or weight.cols < inputSize {
+        return projectSequenceInputGradientWithDenseDeltaScalar(gradOutput, seqLen, inputSize, weight, delta)
+    }
+    let gradTensor = Tensor.fromArray(seqLen, weight.rows, gradOutput, backend)
+    let effectiveWeight = effectiveDenseWeightSlice(weight.values, weight.rows, weight.cols, inputSize, delta)
+    let weightTensor = Tensor.fromArray(weight.rows, inputSize, effectiveWeight, backend)
+    let gradInput = gradTensor.denseInputGradient(weightTensor)
+    if gradInput.values.length() == seqLen * inputSize {
+        return gradInput.values
+    }
+    return projectSequenceInputGradientWithDenseDeltaScalar(gradOutput, seqLen, inputSize, weight, delta)
+}
+
+fun projectSequenceInputGradientWithDenseDeltaScalar(gradOutput: Array<Float>, seqLen: Int, inputSize: Int, weight: EmbeddingTensorLoad, delta: DenseDeltaAdapter) r: Array<Float> {
     let out = zerosFloat(seqLen * inputSize)
     var row = 0
     while row < seqLen {
@@ -2079,6 +2144,48 @@ fun projectSequenceInputGradientWithDenseDelta(gradOutput: Array<Float>, seqLen:
             }
             out[row * inputSize + i] = sum
             i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun denseWeightSlice(values: Array<Float>, rows: Int, cols: Int, inputSize: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < rows {
+        var col = 0
+        while col < inputSize {
+            var value = 0.0
+            let idx = row * cols + col
+            if idx >= 0 and idx < values.length() {
+                value = values[idx]
+            }
+            out.push(value)
+            col = col + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun effectiveDenseWeightSlice(values: Array<Float>, rows: Int, cols: Int, inputSize: Int, delta: DenseDeltaAdapter) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < rows {
+        var col = 0
+        while col < inputSize {
+            var value = 0.0
+            let sourceIdx = row * cols + col
+            if sourceIdx >= 0 and sourceIdx < values.length() {
+                value = values[sourceIdx]
+            }
+            let deltaIdx = row * inputSize + col
+            if deltaIdx >= 0 and deltaIdx < delta.weightDelta.length() {
+                value = value + delta.weightDelta[deltaIdx]
+            }
+            out.push(value)
+            col = col + 1
         }
         row = row + 1
     }
@@ -2110,6 +2217,10 @@ fun geluDerivativeApprox(x: Float) r: Float {
 }
 
 fun attentionSequenceInputGradient(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, seqLen: Int, hiddenSize: Int, attentionHeads: Int) r: Array<Float> {
+    return attentionSequenceInputGradientBackend(q, k, v, gradContext, qWeight, kWeight, vWeight, seqLen, hiddenSize, attentionHeads, "cpu")
+}
+
+fun attentionSequenceInputGradientBackend(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, seqLen: Int, hiddenSize: Int, attentionHeads: Int, backend: String) r: Array<Float> {
     if attentionHeads <= 0 or hiddenSize % attentionHeads != 0 {
         return Array<Float>()
     }
@@ -2183,15 +2294,19 @@ fun attentionSequenceInputGradient(q: Array<Float>, k: Array<Float>, v: Array<Fl
         token = token + 1
     }
 
-    let gradSequence = projectSequenceInputGradient(gradQ, seqLen, hiddenSize, qWeight)
-    let gradFromK = projectSequenceInputGradient(gradK, seqLen, hiddenSize, kWeight)
-    let gradFromV = projectSequenceInputGradient(gradV, seqLen, hiddenSize, vWeight)
+    let gradSequence = projectSequenceInputGradientBackend(gradQ, seqLen, hiddenSize, qWeight, backend)
+    let gradFromK = projectSequenceInputGradientBackend(gradK, seqLen, hiddenSize, kWeight, backend)
+    let gradFromV = projectSequenceInputGradientBackend(gradV, seqLen, hiddenSize, vWeight, backend)
     addFlatInPlace(gradSequence, gradFromK)
     addFlatInPlace(gradSequence, gradFromV)
     return gradSequence
 }
 
 fun attentionSequenceInputGradientWithDeltas(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, qDelta: DenseDeltaAdapter, kDelta: DenseDeltaAdapter, vDelta: DenseDeltaAdapter, seqLen: Int, hiddenSize: Int, attentionHeads: Int) r: Array<Float> {
+    return attentionSequenceInputGradientWithDeltasBackend(q, k, v, gradContext, qWeight, kWeight, vWeight, qDelta, kDelta, vDelta, seqLen, hiddenSize, attentionHeads, "cpu")
+}
+
+fun attentionSequenceInputGradientWithDeltasBackend(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, qDelta: DenseDeltaAdapter, kDelta: DenseDeltaAdapter, vDelta: DenseDeltaAdapter, seqLen: Int, hiddenSize: Int, attentionHeads: Int, backend: String) r: Array<Float> {
     if attentionHeads <= 0 or hiddenSize % attentionHeads != 0 {
         return Array<Float>()
     }
@@ -2265,9 +2380,9 @@ fun attentionSequenceInputGradientWithDeltas(q: Array<Float>, k: Array<Float>, v
         token = token + 1
     }
 
-    let gradSequence = projectSequenceInputGradientWithDenseDelta(gradQ, seqLen, hiddenSize, qWeight, qDelta)
-    let gradFromK = projectSequenceInputGradientWithDenseDelta(gradK, seqLen, hiddenSize, kWeight, kDelta)
-    let gradFromV = projectSequenceInputGradientWithDenseDelta(gradV, seqLen, hiddenSize, vWeight, vDelta)
+    let gradSequence = projectSequenceInputGradientWithDenseDeltaBackend(gradQ, seqLen, hiddenSize, qWeight, qDelta, backend)
+    let gradFromK = projectSequenceInputGradientWithDenseDeltaBackend(gradK, seqLen, hiddenSize, kWeight, kDelta, backend)
+    let gradFromV = projectSequenceInputGradientWithDenseDeltaBackend(gradV, seqLen, hiddenSize, vWeight, vDelta, backend)
     addFlatInPlace(gradSequence, gradFromK)
     addFlatInPlace(gradSequence, gradFromV)
     return gradSequence
