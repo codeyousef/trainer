@@ -43,8 +43,9 @@ gradients for FFN/output/attention paths, reusing `Tensor.matmul` through the de
 helpers. GELU backward keeps derivative evaluation on the scalar reference path while dispatching
 the derivative-gradient product through the existing elementwise GPU kernel when `backend` is
 `gpu`; attention softmax forward/backward now routes through Tensor softmax, elementwise, and
-row-reduction kernels for GPU configs while Q/K/V score-gradient loops remain scalar reference
-code. These paths retain scalar fallbacks for shape diagnostics and tests.
+row-reduction kernels for GPU configs, and Q/K/V attention-gradient products route through
+Tensor matmul/scale while attention-score construction still remains scalar reference code.
+These paths retain scalar fallbacks for shape diagnostics and tests.
 
 ## Model Outputs
 
