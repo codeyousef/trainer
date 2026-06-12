@@ -1,4 +1,4 @@
-import calibration.{DomainThreshold, calibrateThresholds, holdoutSplit, readCalibrationDataset, thresholdFor}
+import calibration.{DomainThreshold, calibrateThresholds, holdoutSplit, loadThresholds, readCalibrationDataset, thresholdFor}
 import config.{TrainerConfig}
 import encoder.{Encoder}
 import io.file.{exists}
@@ -60,6 +60,10 @@ fun readEvalDataset(cfg: TrainerConfig) r: Array<TripletExample> {
 }
 
 fun evalWithCalibration(cfg: TrainerConfig, encoder: Encoder) r: EvalResult {
+    let loadedThresholds = loadThresholds(cfg.thresholdsPath)
+    if loadedThresholds.length() > 0 {
+        return evaluate(cfg, encoder, loadedThresholds)
+    }
     let thresholds = calibrateThresholds(cfg, encoder)
     return evaluate(cfg, encoder, thresholds)
 }

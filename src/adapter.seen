@@ -1,5 +1,4 @@
-import io.file.{exists, readText}
-import io_utils.{writeAtomicText}
+import io.file.{appendText, ensureParentDirectories, exists, readText, writeText}
 
 class ProjectionAdapter {
     var dim: Int
@@ -282,7 +281,43 @@ class ProjectionAdapter {
     fun save(path: String) r: Bool {
         this.path = path
         this.loaded = true
-        return writeAtomicText(path, this.toJson())
+        return this.writeJson(path)
+    }
+
+    fun writeJson(path: String) r: Bool {
+        ensureParentDirectories(path)
+        if not writeText(path, "{\n") { return false }
+        if not appendText(path, "  \"format\": \"seen-trainable-low-rank-projection-adapter-v2\",\n") { return false }
+        if not appendText(path, "  \"dim\": ") { return false }
+        if not appendText(path, this.dim.toString()) { return false }
+        if not appendText(path, ",\n") { return false }
+        if not appendText(path, "  \"rank\": ") { return false }
+        if not appendText(path, this.rank.toString()) { return false }
+        if not appendText(path, ",\n") { return false }
+        if not appendText(path, "  \"values\": [") { return false }
+        if not this.appendFloatArrayJson(path, this.values) { return false }
+        if not appendText(path, "],\n") { return false }
+        if not appendText(path, "  \"mix_values\": [") { return false }
+        if not this.appendFloatArrayJson(path, this.mixValues) { return false }
+        if not appendText(path, "],\n") { return false }
+        if not appendText(path, "  \"rank_a\": [") { return false }
+        if not this.appendFloatArrayJson(path, this.rankA) { return false }
+        if not appendText(path, "],\n") { return false }
+        if not appendText(path, "  \"rank_b\": [") { return false }
+        if not this.appendFloatArrayJson(path, this.rankB) { return false }
+        return appendText(path, "]\n}\n")
+    }
+
+    fun appendFloatArrayJson(path: String, values: Array<Float>) r: Bool {
+        var i = 0
+        while i < values.length() {
+            if i > 0 {
+                if not appendText(path, ", ") { return false }
+            }
+            if not appendText(path, values[i].toString()) { return false }
+            i = i + 1
+        }
+        return true
     }
 
     fun toJson() r: String {

@@ -1,6 +1,6 @@
 import trainer.io_utils.{writeAtomicText}
 import trainer.jsonl.{parseTripletLine, readTripletsLimited, tripletToJson}
-import trainer.config.{readConfig}
+import trainer.config.{readConfig, writeTrainerConfigJson}
 import trainer.source_adapters.{readSourcePairs}
 import trainer.tokenizer.{Tokenizer}
 
@@ -120,6 +120,11 @@ fun main() -> Int {
     expect(cfg.maxMiniLMLayers == 1, "max minilm layers config")
     expect(cfg.cacheMiniLMTensors, "cache minilm tensors config")
     expect(cfg.resumeOutputArtifacts, "resume output artifacts config")
+    writeTrainerConfigJson(sourceDir + "/resume_config.json", cfg, true)
+    let resumeCfg = readConfig(sourceDir + "/resume_config.json")
+    expect(resumeCfg.resumeOutputArtifacts, "serialized resume config enables resume")
+    expect(resumeCfg.sourceDataPath == cfg.sourceDataPath, "serialized config preserves source path")
+    expect(resumeCfg.parameterRegistryLoadCapElements == 7, "serialized config preserves registry cap")
     let pairs = readSourcePairs(cfg)
     expect(pairs.length() == 1, "csv source adapter filter")
     expect(pairs[0].queryText == "How to reset?", "csv query column")

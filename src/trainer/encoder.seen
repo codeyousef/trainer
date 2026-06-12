@@ -141,6 +141,14 @@ class Encoder {
     }
 
     fun encodeMiniLMLayerInput(text: String) r: Array<Float> {
+        let layerMean = this.encodeMiniLMLayerMean(text)
+        if layerMean.length() == this.embeddingDim {
+            return normalize(layerMean)
+        }
+        return Array<Float>()
+    }
+
+    fun encodeMiniLMLayerMean(text: String) r: Array<Float> {
         if not this.hasMiniLMLayerAdapterTarget() {
             return Array<Float>()
         }
@@ -148,7 +156,7 @@ class Encoder {
         let mask = this.tokenizer.attentionMask(text)
         let layerMean = this.modelEmbeddings.encodeLayerMean(tokenIds, mask, this.minilmAdapterLayer)
         if layerMean.length() == this.embeddingDim {
-            return normalize(layerMean)
+            return layerMean
         }
         return Array<Float>()
     }

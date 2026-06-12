@@ -1,10 +1,10 @@
-import trainer.config.{readConfig}
-import trainer.calibration.{DomainThreshold, thresholdsJson}
+import trainer.config.{TrainerConfig, readConfig, writeTrainerConfigJson}
+import trainer.calibration.{DomainThreshold, loadThresholds, thresholdsJson}
 import trainer.encoder.{Encoder}
 import trainer.io.file.{deleteFile, exists}
 import trainer.io_utils.{writeAtomicText}
-import trainer.jsonl.{PairExample, TripletExample}
-import trainer.miner.{MiningEmbeddingMatrix, buildPositiveEmbeddingMatrix, buildPositiveEmbeddingMatrixBackend, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
+import trainer.jsonl.{PairExample, TripletExample, readTripletsLimited}
+import trainer.miner.{MiningEmbeddingMatrix, buildPositiveEmbeddingMatrix, buildPositiveEmbeddingMatrixBackend, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, mineHardNegatives, normalizedTopK}
 import trainer.pipeline.{Pipeline}
 import trainer.tokenizer.{Tokenizer}
 import trainer.training.{batchesPerEpoch, countTrainableTriplets, effectiveBatchSize}
@@ -125,10 +125,36 @@ fun main() -> Int {
     let gpuNeg = findNegativeIndexWithMatrix(miningPairs, 0, queryEmbedding, positiveMatrix, 3, "gpu")
     expect(gpuNeg == 2, "gpu mining path preserves fallback semantics")
 
+    let preMinedPath = "/tmp/seen_trainer_test/premined.jsonl"
+    let preMinedOut = "/tmp/seen_trainer_test/premined_mined.jsonl"
+    writeAtomicText(preMinedPath,
+        "{\"query_text\":\"kept query\",\"positive_chunk_text\":\"kept positive\",\"hard_negative_chunk_text\":\"kept negative\",\"domain\":\"d\",\"source\":\"s\"}\n"
+        + "{\"query_text\":\"second query\",\"positive_chunk_text\":\"second positive\",\"hard_negative_chunk_text\":\"second negative\",\"domain\":\"d2\",\"source\":\"s2\"}\n")
+    let preMinedSeedCfg = TrainerConfig.defaults()
+    preMinedSeedCfg.trainJsonlPath = preMinedPath
+    preMinedSeedCfg.minedJsonlPath = preMinedOut
+    preMinedSeedCfg.maxMinedTriplets = 1
+    preMinedSeedCfg.embeddingDim = 16
+    preMinedSeedCfg.maxSequenceLength = 16
+    preMinedSeedCfg.backend = "cpu"
+    writeTrainerConfigJson("/tmp/seen_trainer_test/premined_config.json", preMinedSeedCfg, false)
+    let preMinedCfg = readConfig("/tmp/seen_trainer_test/premined_config.json")
+    expect(preMinedCfg.minedJsonlPath == preMinedOut, "pre-mined mined path config")
+    let preMinedResult = mineHardNegatives(preMinedCfg, miningEncoder)
+    expect(preMinedResult.count == 1, "pre-mined mining count")
+    let preMinedRows = readTripletsLimited(preMinedOut, 0)
+    expect(preMinedRows.length() == 1, "pre-mined output row count")
+    expect(preMinedRows[0].hardNegativeChunkText == "kept negative", "pre-mined hard negative preserved")
+
     let escapedThresholds = Array<DomainThreshold>()
     escapedThresholds.push(DomainThreshold.new("quoted \"domain\" \\ source", 0.4, 1))
     let escapedThresholdJson = thresholdsJson(escapedThresholds)
     expect(stringContains(escapedThresholdJson, "\"quoted \\\"domain\\\" \\\\ source\""), "threshold domain json escaping")
+    writeAtomicText("/tmp/seen_trainer_test/threshold_load.json", escapedThresholdJson)
+    let loadedThresholds = loadThresholds("/tmp/seen_trainer_test/threshold_load.json")
+    expect(loadedThresholds.length() == 1, "threshold load count")
+    expect(loadedThresholds[0].domain == "quoted \"domain\" \\ source", "threshold load escaped domain")
+    expect(closeEnough(loadedThresholds[0].threshold, 0.4), "threshold load score")
 
     let dataPath = "/tmp/seen_trainer_test/train.jsonl"
     let cfgPath = "/tmp/seen_trainer_test/config.json"

@@ -1,6 +1,7 @@
 import env.env.{args}
-import config.{TrainerConfig, readConfig}
+import config.{TrainerConfig, readConfig, writeTrainerConfigJson}
 import pipeline.{Pipeline}
+import process.process.{runCommand, shellQuote}
 
 fun trainerMain() r: Int {
     let argv = args()
@@ -17,6 +18,10 @@ fun trainerMain() r: Int {
 
     let configPath = parseConfigArg(argv)
     let cfg = readConfig(configPath)
+    if command == "run-all" {
+        return runAllIsolated(argv[0], cfg, configPath)
+    }
+
     let pipeline = Pipeline.new(cfg)
 
     println("trainer: backend " + cfg.backend + " requires_gpu " + cfg.backendGpu.toString())
@@ -55,13 +60,37 @@ fun trainerMain() r: Int {
         println("trainer: package -> " + result.outputDir)
         return 0
     }
-    if command == "run-all" {
-        return pipeline.runAll()
-    }
-
     println("trainer: unknown command: " + command)
     printUsage()
     return 1
+}
+
+fun runAllIsolated(executable: String, cfg: TrainerConfig, configPath: String) r: Int {
+    let resumeConfigPath = cfg.outputModelDir + "/run_all_resume_config.json"
+    if not writeTrainerConfigJson(resumeConfigPath, cfg, true) {
+        println("trainer: failed to write run-all resume config: " + resumeConfigPath)
+        return 1
+    }
+    if not runTrainerStage(executable, "mine", configPath) { return 1 }
+    if not runTrainerStage(executable, "train", configPath) { return 1 }
+    if not runTrainerStage(executable, "calibrate", resumeConfigPath) { return 1 }
+    if not runTrainerStage(executable, "eval", resumeConfigPath) { return 1 }
+    if not runTrainerStage(executable, "package", resumeConfigPath) { return 1 }
+    return 0
+}
+
+fun runTrainerStage(executable: String, command: String, configPath: String) r: Bool {
+    println("trainer: run-all stage " + command)
+    let cmd = shellQuote(executable) + " " + command + " --config " + shellQuote(configPath)
+    let result = runCommand(cmd)
+    if result.output.length() > 0 {
+        println(result.output)
+    }
+    if result.success {
+        return true
+    }
+    println("trainer: run-all stage failed: " + command)
+    return false
 }
 
 fun parseConfigArg(argv: Array<String>) r: String {

@@ -139,17 +139,32 @@ fun trainAdapterTriplet(item: TripletExample, encoder: Encoder, parameterRegistr
         denseLoss = encoder.updateMiniLMDenseAdapterTriplet(item.queryText, item.positiveChunkText, item.hardNegativeChunkText, parameterRegistry, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
     }
     var minilmLoss = 0.0
+    var miniMeanQ = Array<Float>()
+    var miniMeanP = Array<Float>()
+    var miniMeanN = Array<Float>()
     if encoder.hasMiniLMLayerAdapterTarget() {
-        let miniQ = encoder.encodeMiniLMLayerInput(item.queryText)
-        let miniP = encoder.encodeMiniLMLayerInput(item.positiveChunkText)
-        let miniN = encoder.encodeMiniLMLayerInput(item.hardNegativeChunkText)
+        miniMeanQ = encoder.encodeMiniLMLayerMean(item.queryText)
+        miniMeanP = encoder.encodeMiniLMLayerMean(item.positiveChunkText)
+        miniMeanN = encoder.encodeMiniLMLayerMean(item.hardNegativeChunkText)
+        let miniQ = normalize(miniMeanQ)
+        let miniP = normalize(miniMeanP)
+        let miniN = normalize(miniMeanN)
         if miniQ.length() == encoder.embeddingDim and miniP.length() == encoder.embeddingDim and miniN.length() == encoder.embeddingDim {
             minilmLoss = encoder.minilmLayerAdapter.updateTriplet(miniQ, miniP, miniN, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
         }
     }
-    let rawMeanQ = encoder.encodeRawMean(item.queryText)
-    let rawMeanP = encoder.encodeRawMean(item.positiveChunkText)
-    let rawMeanN = encoder.encodeRawMean(item.hardNegativeChunkText)
+    var rawMeanQ = miniMeanQ
+    var rawMeanP = miniMeanP
+    var rawMeanN = miniMeanN
+    if cfg.trainMiniLMDeltas or rawMeanQ.length() != encoder.embeddingDim {
+        rawMeanQ = encoder.encodeRawMean(item.queryText)
+    }
+    if cfg.trainMiniLMDeltas or rawMeanP.length() != encoder.embeddingDim {
+        rawMeanP = encoder.encodeRawMean(item.positiveChunkText)
+    }
+    if cfg.trainMiniLMDeltas or rawMeanN.length() != encoder.embeddingDim {
+        rawMeanN = encoder.encodeRawMean(item.hardNegativeChunkText)
+    }
     let rawQ = normalize(rawMeanQ)
     let rawP = normalize(rawMeanP)
     let rawN = normalize(rawMeanN)

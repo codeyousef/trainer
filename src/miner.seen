@@ -2,7 +2,7 @@ import config.{TrainerConfig}
 import encoder.{Encoder}
 import gpu_tensor_ops.{tensorGpuBackendEnabled, tensorGpuTopKInnerProductIndices}
 import io_utils.{writeAtomicText}
-import jsonl.{PairExample, TripletExample, tripletsToJsonl}
+import jsonl.{PairExample, TripletExample, readTripletsLimited, tripletsToJsonl}
 import math_utils.{cosine}
 import source_adapters.{readSourcePairs}
 import tensor.{Tensor}
@@ -32,6 +32,13 @@ class MiningEmbeddingMatrix {
 }
 
 fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
+    let preMined = readPreMinedTriplets(cfg)
+    if preMined.length() > 0 {
+        if writeAtomicText(cfg.minedJsonlPath, tripletsToJsonl(preMined)) {
+            return MineResult.new(preMined.length(), cfg.minedJsonlPath)
+        }
+        return MineResult.new(0, cfg.minedJsonlPath)
+    }
     let pairs = readSourcePairs(cfg)
     if pairs.length() <= 1 {
         let singleOut = Array<TripletExample>()
@@ -82,6 +89,40 @@ fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
     }
     writeAtomicText(cfg.minedJsonlPath, tripletsToJsonl(out))
     return MineResult.new(out.length(), cfg.minedJsonlPath)
+}
+
+fun readPreMinedTriplets(cfg: TrainerConfig) r: Array<TripletExample> {
+    let out = Array<TripletExample>()
+    var path = cfg.trainJsonlPath
+    if cfg.sourceDataPath.length() > 0 {
+        path = cfg.sourceDataPath
+    }
+    if path.length() == 0 {
+        return out
+    }
+    let limit = preMinedTripletLimit(cfg)
+    let items = readTripletsLimited(path, limit)
+    let minLen = if cfg.minTextLength > 0 { cfg.minTextLength } else { 1 }
+    var i = 0
+    while i < items.length() {
+        if items[i].queryText.length() >= minLen
+            and items[i].positiveChunkText.length() >= minLen
+            and items[i].hardNegativeChunkText.length() >= minLen {
+            out.push(items[i])
+            if limit > 0 and out.length() >= limit {
+                return out
+            }
+        }
+        i = i + 1
+    }
+    return out
+}
+
+fun preMinedTripletLimit(cfg: TrainerConfig) r: Int {
+    if cfg.maxMinedTriplets > 0 {
+        return cfg.maxMinedTriplets
+    }
+    return cfg.maxSourcePairs
 }
 
 fun findNegativeIndex(pairs: Array<PairExample>, queryIndex: Int, encoder: Encoder, topK: Int) r: Int {

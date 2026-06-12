@@ -1,4 +1,5 @@
-import io.file.{readText}
+import io.file.{appendText, ensureParentDirectories, readText, writeText}
+import json.builder.{escapeJsonString}
 
 class TrainerConfig {
     var workspacePath: String
@@ -212,6 +213,93 @@ fun readConfig(path: String) r: TrainerConfig {
     cfg.backend = configString(text, "backend", cfg.backend)
     cfg.backendGpu = backendStringIsGpu(cfg.backend)
     return cfg
+}
+
+fun writeTrainerConfigJson(path: String, cfg: TrainerConfig, resumeOutputArtifacts: Bool) r: Bool {
+    ensureParentDirectories(path)
+    if not writeText(path, "{\n") { return false }
+    if not appendConfigStringField(path, "workspace_path", cfg.workspacePath, true) { return false }
+    if not appendConfigStringField(path, "base_model_path", cfg.baseModelPath, true) { return false }
+    if not appendConfigStringField(path, "train_jsonl_path", cfg.trainJsonlPath, true) { return false }
+    if not appendConfigStringField(path, "dev_jsonl_path", cfg.devJsonlPath, true) { return false }
+    if not appendConfigStringField(path, "test_jsonl_path", cfg.testJsonlPath, true) { return false }
+    if not appendConfigStringField(path, "source_data_path", cfg.sourceDataPath, true) { return false }
+    if not appendConfigStringField(path, "source_format", cfg.sourceFormat, true) { return false }
+    if not appendConfigStringField(path, "source_query_column", cfg.sourceQueryColumn, true) { return false }
+    if not appendConfigStringField(path, "source_positive_column", cfg.sourcePositiveColumn, true) { return false }
+    if not appendConfigStringField(path, "source_domain_column", cfg.sourceDomainColumn, true) { return false }
+    if not appendConfigStringField(path, "source_source_column", cfg.sourceSourceColumn, true) { return false }
+    if not appendConfigStringField(path, "output_model_dir", cfg.outputModelDir, true) { return false }
+    if not appendConfigStringField(path, "mined_jsonl_path", cfg.minedJsonlPath, true) { return false }
+    if not appendConfigStringField(path, "thresholds_path", cfg.thresholdsPath, true) { return false }
+    if not appendConfigStringField(path, "eval_results_path", cfg.evalResultsPath, true) { return false }
+    if not appendConfigIntField(path, "seed", cfg.seed, true) { return false }
+    if not appendConfigIntField(path, "batch_size", cfg.batchSize, true) { return false }
+    if not appendConfigIntField(path, "epochs", cfg.epochs, true) { return false }
+    if not appendConfigFloatField(path, "learning_rate", cfg.learningRate, true) { return false }
+    if not appendConfigFloatField(path, "weight_decay", cfg.weightDecay, true) { return false }
+    if not appendConfigFloatField(path, "margin", cfg.margin, true) { return false }
+    if not appendConfigFloatField(path, "grad_clip", cfg.gradClip, true) { return false }
+    if not appendConfigIntField(path, "max_sequence_length", cfg.maxSequenceLength, true) { return false }
+    if not appendConfigIntField(path, "embedding_dim", cfg.embeddingDim, true) { return false }
+    if not appendConfigIntField(path, "top_k", cfg.topK, true) { return false }
+    if not appendConfigFloatField(path, "threshold_percentile", cfg.thresholdPercentile, true) { return false }
+    if not appendConfigFloatField(path, "quality_margin", cfg.qualityMargin, true) { return false }
+    if not appendConfigIntField(path, "min_text_length", cfg.minTextLength, true) { return false }
+    if not appendConfigIntField(path, "max_source_pairs", cfg.maxSourcePairs, true) { return false }
+    if not appendConfigIntField(path, "max_mined_triplets", cfg.maxMinedTriplets, true) { return false }
+    if not appendConfigIntField(path, "max_train_triplets", cfg.maxTrainTriplets, true) { return false }
+    if not appendConfigIntField(path, "max_calibration_triplets", cfg.maxCalibrationTriplets, true) { return false }
+    if not appendConfigIntField(path, "max_eval_triplets", cfg.maxEvalTriplets, true) { return false }
+    if not appendConfigBoolField(path, "copy_base_artifacts", cfg.copyBaseArtifacts, true) { return false }
+    if not appendConfigIntField(path, "weight_load_cap_elements", cfg.weightLoadCapElements, true) { return false }
+    if not appendConfigIntField(path, "parameter_registry_load_cap_elements", cfg.parameterRegistryLoadCapElements, true) { return false }
+    if not appendConfigBoolField(path, "train_all_minilm_layers", cfg.trainAllMiniLMLayers, true) { return false }
+    if not appendConfigBoolField(path, "train_minilm_deltas", cfg.trainMiniLMDeltas, true) { return false }
+    if not appendConfigIntField(path, "max_minilm_layers", cfg.maxMiniLMLayers, true) { return false }
+    if not appendConfigBoolField(path, "cache_minilm_tensors", cfg.cacheMiniLMTensors, true) { return false }
+    if not appendConfigBoolField(path, "resume_output_artifacts", resumeOutputArtifacts, true) { return false }
+    if not appendConfigIntField(path, "minilm_adapter_layer", cfg.minilmAdapterLayer, true) { return false }
+    if not appendConfigIntField(path, "minilm_dense_adapter_layer", cfg.minilmDenseAdapterLayer, true) { return false }
+    if not appendConfigStringField(path, "backend", cfg.backend, false) { return false }
+    return appendText(path, "}\n")
+}
+
+fun appendConfigStringField(path: String, key: String, value: String, comma: Bool) r: Bool {
+    if not appendConfigKey(path, key) { return false }
+    if not appendText(path, escapeJsonString(value)) { return false }
+    return appendConfigComma(path, comma)
+}
+
+fun appendConfigIntField(path: String, key: String, value: Int, comma: Bool) r: Bool {
+    if not appendConfigKey(path, key) { return false }
+    if not appendText(path, value.toString()) { return false }
+    return appendConfigComma(path, comma)
+}
+
+fun appendConfigFloatField(path: String, key: String, value: Float, comma: Bool) r: Bool {
+    if not appendConfigKey(path, key) { return false }
+    if not appendText(path, value.toString()) { return false }
+    return appendConfigComma(path, comma)
+}
+
+fun appendConfigBoolField(path: String, key: String, value: Bool, comma: Bool) r: Bool {
+    if not appendConfigKey(path, key) { return false }
+    if not appendText(path, value.toString()) { return false }
+    return appendConfigComma(path, comma)
+}
+
+fun appendConfigKey(path: String, key: String) r: Bool {
+    if not appendText(path, "  \"") { return false }
+    if not appendText(path, key) { return false }
+    return appendText(path, "\": ")
+}
+
+fun appendConfigComma(path: String, comma: Bool) r: Bool {
+    if comma {
+        return appendText(path, ",\n")
+    }
+    return appendText(path, "\n")
 }
 
 fun resolvedParameterRegistryLoadCap(cfg: TrainerConfig) r: Int {
