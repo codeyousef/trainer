@@ -23,7 +23,7 @@ class ModelBundle {
         let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
         let tokenizer = Tokenizer.load(cfg.tokenizerPath(), cfg.maxSequenceLength)
         let weights = SafeTensorInfo.inspect(cfg.modelWeightsPath())
-        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements)
+        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
         var minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)

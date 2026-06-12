@@ -6,6 +6,7 @@ import math.math.{sqrt, exp}
 import math_utils.{gelu}
 import minilm_weights.{mwFindCandidateIndex}
 import safetensors.{SafeTensorInfo, isF32DType, tensorCols, tensorRows}
+import tensor.{Tensor}
 
 class MiniLMEmbeddings {
     var loaded: Bool
@@ -20,9 +21,14 @@ class MiniLMEmbeddings {
     var tokenTypeRows: Int
     var weightsPath: String
     var maxLoadElements: Int
+    var backend: String
     var error: String
 
     static fun empty(hiddenSize: Int, error: String) r: MiniLMEmbeddings {
+        return MiniLMEmbeddings.emptyWithBackend(hiddenSize, error, "cpu")
+    }
+
+    static fun emptyWithBackend(hiddenSize: Int, error: String, backend: String) r: MiniLMEmbeddings {
         return MiniLMEmbeddings{
             loaded: false,
             hiddenSize: hiddenSize,
@@ -36,37 +42,38 @@ class MiniLMEmbeddings {
             tokenTypeRows: 0,
             weightsPath: "",
             maxLoadElements: 0,
+            backend: backend,
             error: error
         }
     }
 
-    static fun load(info: SafeTensorInfo, hiddenSize: Int, layers: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int) r: MiniLMEmbeddings {
+    static fun load(info: SafeTensorInfo, hiddenSize: Int, layers: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, backend: String) r: MiniLMEmbeddings {
         if maxLoadElements <= 0 {
-            return MiniLMEmbeddings.empty(hiddenSize, "weight loading disabled by cap")
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "weight loading disabled by cap", backend)
         }
         if not info.validHeader {
-            return MiniLMEmbeddings.empty(hiddenSize, "safetensors header is not valid")
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "safetensors header is not valid", backend)
         }
 
         let word = validateEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements, hiddenSize, true)
         if word.length() > 0 {
-            return MiniLMEmbeddings.empty(hiddenSize, "word embeddings: " + word)
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "word embeddings: " + word, backend)
         }
         let position = validateEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements, hiddenSize, true)
         if position.length() > 0 {
-            return MiniLMEmbeddings.empty(hiddenSize, "position embeddings: " + position)
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "position embeddings: " + position, backend)
         }
         let tokenType = validateEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements, hiddenSize, true)
         if tokenType.length() > 0 {
-            return MiniLMEmbeddings.empty(hiddenSize, "token type embeddings: " + tokenType)
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "token type embeddings: " + tokenType, backend)
         }
         let normWeight = validateEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements, hiddenSize, false)
         if normWeight.length() > 0 {
-            return MiniLMEmbeddings.empty(hiddenSize, "layer norm weight: " + normWeight)
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "layer norm weight: " + normWeight, backend)
         }
         let normBias = validateEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements, hiddenSize, false)
         if normBias.length() > 0 {
-            return MiniLMEmbeddings.empty(hiddenSize, "layer norm bias: " + normBias)
+            return MiniLMEmbeddings.emptyWithBackend(hiddenSize, "layer norm bias: " + normBias, backend)
         }
 
         var readyLayers = 0
@@ -87,6 +94,7 @@ class MiniLMEmbeddings {
             tokenTypeRows: embeddingTensorRows(info, "embeddings.token_type_embeddings.weight"),
             weightsPath: info.path,
             maxLoadElements: maxLoadElements,
+            backend: backend,
             error: ""
         }
     }
@@ -151,9 +159,9 @@ class MiniLMEmbeddings {
         while layer < this.readyLayers {
             var layerOut = Array<Float>()
             if layerDeltas.hasLayer(layer) {
-                layerOut = applyEncoderLayerWithDenseAdapter(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true)
+                layerOut = applyEncoderLayerWithDenseAdapterBackend(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, this.backend)
             } else {
-                layerOut = applyEncoderLayer(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer)
+                layerOut = applyEncoderLayerBackend(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, this.backend)
             }
             if layerOut.length() == encoded.length() {
                 encoded = layerOut
@@ -219,7 +227,7 @@ class MiniLMEmbeddings {
         let denseTargetLayer = normalizeMiniLMDenseAdapterLayer(denseAdapterLayer, this.readyLayers)
         var layer = 0
         while layer < this.readyLayers {
-            let layerOut = applyEncoderLayerWithDenseAdapter(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, layer == denseTargetLayer)
+            let layerOut = applyEncoderLayerWithDenseAdapterBackend(info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, layer == denseTargetLayer, this.backend)
             if layerOut.length() == encoded.length() {
                 encoded = layerOut
                 if layer == targetLayer {
@@ -508,6 +516,7 @@ class MiniLMEmbeddings {
         var out = "model_embeddings_loaded=" + this.loaded.toString()
         out = out + " model_layer0_ready=" + this.layer0Ready.toString()
         out = out + " model_layers_ready=" + this.readyLayers.toString() + "/" + this.layers.toString()
+        out = out + " model_backend=" + this.backend
         out = out + " model_embedding_error=" + this.error
         return out
     }
@@ -835,7 +844,15 @@ fun applyEncoderLayer(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int,
     return applyEncoderLayerWithDenseAdapter(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, intermediateSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), false)
 }
 
+fun applyEncoderLayerBackend(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, backend: String) r: Array<Float> {
+    return applyEncoderLayerWithDenseAdapterBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, intermediateSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), false, backend)
+}
+
 fun applyEncoderLayerWithDenseAdapter(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool) r: Array<Float> {
+    return applyEncoderLayerWithDenseAdapterBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, applyDenseAdapter, "cpu")
+}
+
+fun applyEncoderLayerWithDenseAdapterBackend(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
     let prefix = "encoder.layer." + layer.toString() + "."
     let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
     let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
@@ -866,15 +883,15 @@ fun applyEncoderLayerWithDenseAdapter(info: SafeTensorInfo, sequence: Array<Floa
         return Array<Float>()
     }
 
-    let q = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, queryDelta, applyDenseAdapter)
-    let k = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, keyDelta, applyDenseAdapter)
-    let v = projectSequenceWithDenseDelta(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, valueDelta, applyDenseAdapter)
+    let q = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, qWeight, qBias, queryDelta, applyDenseAdapter, backend)
+    let k = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, kWeight, kBias, keyDelta, applyDenseAdapter, backend)
+    let v = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, valueDelta, applyDenseAdapter, backend)
     let context = attentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
     if context.length() != sequence.length() {
         return Array<Float>()
     }
 
-    let attnDense = projectSequenceWithDenseDelta(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attentionDenseDelta, applyDenseAdapter)
+    let attnDense = projectSequenceWithDenseDeltaBackend(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attentionDenseDelta, applyDenseAdapter, backend)
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
     var attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values)
     if applyDenseAdapter {
@@ -882,8 +899,8 @@ fun applyEncoderLayerWithDenseAdapter(info: SafeTensorInfo, sequence: Array<Floa
         let effectiveAttentionBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
         attnNorm = layerNormRows(attnLnInput, seqLen, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias)
     }
-    let ffIntermediate = feedForwardIntermediateWithDenseDelta(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, applyDenseAdapter)
-    let ffOutput = feedForwardOutputWithDenseAdapter(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, applyDenseAdapter)
+    let ffIntermediate = feedForwardIntermediateWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, applyDenseAdapter, backend)
+    let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, applyDenseAdapter, backend)
     if applyDenseAdapter {
         let effectiveWeight = layerNormDelta.effectiveWeight(outputLnWeight.values)
         let effectiveBias = layerNormDelta.effectiveBias(outputLnBias.values)
@@ -969,6 +986,72 @@ fun projectSequenceWithDenseDelta(sequence: Array<Float>, seqLen: Int, inputSize
             }
             out.push(value)
             i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun projectSequenceWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, inputSize: Int, outputSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseDelta: DenseDeltaAdapter, applyDelta: Bool, backend: String) r: Array<Float> {
+    let projected = projectSequenceLinearBackend(sequence, seqLen, inputSize, outputSize, weight, bias, backend)
+    if projected.length() != seqLen * outputSize {
+        return projectSequenceWithDenseDelta(sequence, seqLen, inputSize, outputSize, weight, bias, denseDelta, applyDelta)
+    }
+    if not applyDelta {
+        return projected
+    }
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, inputSize)
+        let delta = denseDelta.apply(input)
+        var i = 0
+        while i < outputSize {
+            var value = flatAt(projected, row, i, outputSize)
+            if i < delta.length() {
+                value = value + delta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun projectSequenceLinearBackend(sequence: Array<Float>, seqLen: Int, inputSize: Int, outputSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, backend: String) r: Array<Float> {
+    if seqLen <= 0 or inputSize <= 0 or outputSize <= 0 {
+        return Array<Float>()
+    }
+    if not weight.ok or not bias.ok {
+        return Array<Float>()
+    }
+    if sequence.length() < seqLen * inputSize or weight.rows < outputSize or weight.cols < inputSize or bias.values.length() < outputSize {
+        return Array<Float>()
+    }
+    let transposed = Array<Float>()
+    var inputCol = 0
+    while inputCol < inputSize {
+        var outputCol = 0
+        while outputCol < outputSize {
+            transposed.push(embeddingAt(weight.values, outputCol, inputCol, weight.cols))
+            outputCol = outputCol + 1
+        }
+        inputCol = inputCol + 1
+    }
+    let inputTensor = Tensor.fromArray(seqLen, inputSize, sequence, backend)
+    let weightTensor = Tensor.fromArray(inputSize, outputSize, transposed, backend)
+    let product = inputTensor.matmul(weightTensor)
+    if product.values.length() != seqLen * outputSize {
+        return Array<Float>()
+    }
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        var col = 0
+        while col < outputSize {
+            out.push(product.at(row, col) + embeddingAt(bias.values, 0, col, bias.cols))
+            col = col + 1
         }
         row = row + 1
     }
@@ -1087,6 +1170,11 @@ fun feedForwardIntermediateWithDenseDelta(sequence: Array<Float>, seqLen: Int, h
     return geluFlat(pre)
 }
 
+fun feedForwardIntermediateWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool, backend: String) r: Array<Float> {
+    let pre = feedForwardPreActivationWithDenseDeltaBackend(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, intermediateDelta, applyDelta, backend)
+    return geluFlat(pre)
+}
+
 fun feedForwardPreActivationWithDenseDelta(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool) r: Array<Float> {
     let out = Array<Float>()
     var row = 0
@@ -1108,6 +1196,10 @@ fun feedForwardPreActivationWithDenseDelta(sequence: Array<Float>, seqLen: Int, 
     return out
 }
 
+fun feedForwardPreActivationWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool, backend: String) r: Array<Float> {
+    return projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, intermediateDelta, applyDelta, backend)
+}
+
 fun feedForwardOutput(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
     return feedForwardOutputWithDenseAdapter(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), false)
 }
@@ -1123,6 +1215,37 @@ fun feedForwardOutputWithDenseAdapter(sequence: Array<Float>, seqLen: Int, inter
         var i = 0
         while i < hiddenSize and i < projected.length() {
             var value = projected[i]
+            if i < delta.length() {
+                value = value + delta[i]
+            }
+            if i < fullDelta.length() {
+                value = value + fullDelta[i]
+            }
+            out.push(value)
+            i = i + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun feedForwardOutputWithDenseAdapterBackend(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
+    let projected = projectSequenceLinearBackend(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, backend)
+    if projected.length() != seqLen * hiddenSize {
+        return feedForwardOutputWithDenseAdapter(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, denseAdapter, denseDelta, applyDenseAdapter)
+    }
+    if not applyDenseAdapter {
+        return projected
+    }
+    let out = Array<Float>()
+    var row = 0
+    while row < seqLen {
+        let input = rowVector(sequence, row, intermediateSize)
+        let delta = denseAdapter.apply(input)
+        let fullDelta = denseDelta.apply(input)
+        var i = 0
+        while i < hiddenSize {
+            var value = flatAt(projected, row, i, hiddenSize)
             if i < delta.length() {
                 value = value + delta[i]
             }

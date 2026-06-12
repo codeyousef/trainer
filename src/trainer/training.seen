@@ -150,6 +150,8 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"pooling\": \"mean\",\n"
         + "  \"backend\": \"" + cfg.backend + "\",\n"
         + "  \"backend_requires_gpu\": " + (cfg.backendGpu == 1).toString() + ",\n"
+        + "  \"minilm_forward_projection_backend\": \"" + cfg.backend + "\",\n"
+        + "  \"minilm_forward_projection_kernel\": \"tensorMatmul\",\n"
         + "  \"examples\": " + count.toString() + ",\n"
         + "  \"examples_per_epoch\": " + examplesPerEpoch.toString() + ",\n"
         + "  \"dropped_examples_per_epoch\": " + dropped.toString() + ",\n"

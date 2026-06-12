@@ -35,6 +35,9 @@ Source adapters can also normalize CSV/TSV/JSONL rows into `(query, positive)` p
 Hard-negative mining precomputes normalized positive embeddings once, then uses Seen's
 `tensorTopKInnerProduct` GPU kernel when `backend` is `gpu`; if dispatch is unavailable it
 falls back to the same scalar top-k and domain/source exclusion semantics.
+Loaded MiniLM forward passes also thread the configured backend into Q/K/V, attention-output,
+intermediate, and output dense projections through Seen's `Tensor.matmul` dispatch while keeping
+the scalar path as the correctness reference.
 
 ## Model Outputs
 
