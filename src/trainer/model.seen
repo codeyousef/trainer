@@ -32,21 +32,33 @@ class ModelBundle {
         println("trainer: loading MiniLM tensors")
         let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, runtimeLayers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend, cfg.cacheMiniLMTensors)
         println("trainer: preparing trainable adapters")
-        var minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
-        var minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
-        var minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)
-        var minilmQueryDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
-        var minilmKeyDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
-        var minilmValueDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
-        var minilmAttentionDenseDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
-        var minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
-        var minilmLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
+        var minilmDenseAdapter = DenseLoRAAdapter.identity(0, 0)
+        var minilmDenseDelta = DenseDeltaAdapter.identity(0, 0)
+        var minilmIntermediateDelta = DenseDeltaAdapter.identity(0, 0)
+        var minilmQueryDelta = DenseDeltaAdapter.identity(0, 0)
+        var minilmKeyDelta = DenseDeltaAdapter.identity(0, 0)
+        var minilmValueDelta = DenseDeltaAdapter.identity(0, 0)
+        var minilmAttentionDenseDelta = DenseDeltaAdapter.identity(0, 0)
+        var minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.identity(0)
+        var minilmLayerNormDelta = LayerNormDeltaAdapter.identity(0)
         var minilmLayerDeltas = MiniLMLayerDeltas.identity(0, modelMeta.hiddenSize, modelMeta.intermediateSize)
-        var minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.identity(modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
-        if cfg.trainAllMiniLMLayers {
-            minilmLayerDeltas = MiniLMLayerDeltas.identity(runtimeLayers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+        var minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.identity(0, 0, 0, 0)
+        if cfg.trainMiniLMDeltas {
+            minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
+            minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
+            minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)
+            minilmQueryDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmKeyDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmValueDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmAttentionDenseDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
+            minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
+            minilmLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
+            minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.identity(modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
+            if cfg.trainAllMiniLMLayers {
+                minilmLayerDeltas = MiniLMLayerDeltas.identity(runtimeLayers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+            }
         }
-        if embeddings.loaded and cfg.resumeOutputArtifacts {
+        if embeddings.loaded and cfg.resumeOutputArtifacts and cfg.trainMiniLMDeltas {
             println("trainer: resuming output artifacts")
             if not cfg.trainAllMiniLMLayers {
                 minilmDenseAdapter = DenseLoRAAdapter.load(cfg.minilmDenseAdapterPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)

@@ -100,10 +100,17 @@ fun readTriplets(path: String) r: Array<TripletExample> {
 }
 
 fun readTripletsLimited(path: String, maxItems: Int) r: Array<TripletExample> {
+    if maxItems <= 0 {
+        return readTripletsText(path, maxItems)
+    }
     let streamed = readTripletsStreamed(path, maxItems)
     if streamed.length() > 0 or maxItems > 0 {
         return streamed
     }
+    return readTripletsText(path, maxItems)
+}
+
+fun readTripletsText(path: String, maxItems: Int) r: Array<TripletExample> {
     let content = readText(path)
     let lines = split(content, "\n")
     let items = Array<TripletExample>()
@@ -133,10 +140,17 @@ fun readPairsWithMinLength(path: String, minTextLength: Int) r: Array<PairExampl
 }
 
 fun readPairsWithMinLengthLimited(path: String, minTextLength: Int, maxItems: Int) r: Array<PairExample> {
+    if maxItems <= 0 {
+        return readPairsText(path, minTextLength, maxItems)
+    }
     let streamed = readPairsStreamed(path, minTextLength, maxItems)
     if streamed.length() > 0 or maxItems > 0 {
         return streamed
     }
+    return readPairsText(path, minTextLength, maxItems)
+}
+
+fun readPairsText(path: String, minTextLength: Int, maxItems: Int) r: Array<PairExample> {
     let content = readText(path)
     let lines = split(content, "\n")
     let items = Array<PairExample>()

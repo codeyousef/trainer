@@ -14,15 +14,45 @@ class EmbeddingTensorLoad {
     var ok: Bool
     var rows: Int
     var cols: Int
+    var rowIds: Array<Int>
     var values: Array<Float>
     var error: String
 
     static fun success(rows: Int, cols: Int, values: Array<Float>) r: EmbeddingTensorLoad {
-        return EmbeddingTensorLoad{ ok: true, rows: rows, cols: cols, values: values, error: "" }
+        return EmbeddingTensorLoad{ ok: true, rows: rows, cols: cols, rowIds: Array<Int>(), values: values, error: "" }
+    }
+
+    static fun sparse(rows: Int, cols: Int, rowIds: Array<Int>, values: Array<Float>) r: EmbeddingTensorLoad {
+        return EmbeddingTensorLoad{ ok: true, rows: rows, cols: cols, rowIds: rowIds, values: values, error: "" }
     }
 
     static fun failure(error: String) r: EmbeddingTensorLoad {
-        return EmbeddingTensorLoad{ ok: false, rows: 0, cols: 0, values: Array<Float>(), error: error }
+        return EmbeddingTensorLoad{ ok: false, rows: 0, cols: 0, rowIds: Array<Int>(), values: Array<Float>(), error: error }
+    }
+
+    fun valueAt(row: Int, col: Int) r: Float {
+        if row < 0 or row >= this.rows or col < 0 or col >= this.cols {
+            return 0.0
+        }
+        if this.rowIds.length() == 0 {
+            let denseIndex = row * this.cols + col
+            if denseIndex >= 0 and denseIndex < this.values.length() {
+                return this.values[denseIndex]
+            }
+            return 0.0
+        }
+        var slot = 0
+        while slot < this.rowIds.length() {
+            if this.rowIds[slot] == row {
+                let sparseIndex = slot * this.cols + col
+                if sparseIndex >= 0 and sparseIndex < this.values.length() {
+                    return this.values[sparseIndex]
+                }
+                return 0.0
+            }
+            slot = slot + 1
+        }
+        return 0.0
     }
 }
 
@@ -169,7 +199,7 @@ class MiniLMForwardCache {
     }
 
     static fun load(info: SafeTensorInfo, readyLayers: Int, maxLoadElements: Int) r: MiniLMForwardCache {
-        let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements)
+        let word = loadEmbeddingTensorMetadata(info, "embeddings.word_embeddings.weight", maxLoadElements)
         if not word.ok { return MiniLMForwardCache.emptyWithError(word.error) }
         let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
         if not position.ok { return MiniLMForwardCache.emptyWithError(position.error) }
@@ -213,6 +243,33 @@ class MiniLMForwardCache {
             normWeight: normWeight,
             normBias: normBias,
             layers: cached,
+            error: ""
+        }
+    }
+
+    static fun loadEmbeddingsOnly(info: SafeTensorInfo, readyLayers: Int, maxLoadElements: Int) r: MiniLMForwardCache {
+        let word = loadEmbeddingTensorMetadata(info, "embeddings.word_embeddings.weight", maxLoadElements)
+        if not word.ok { return MiniLMForwardCache.emptyWithError(word.error) }
+        let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
+        if not position.ok { return MiniLMForwardCache.emptyWithError(position.error) }
+        let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+        if not tokenType.ok { return MiniLMForwardCache.emptyWithError(tokenType.error) }
+        let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+        if not normWeight.ok { return MiniLMForwardCache.emptyWithError(normWeight.error) }
+        let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements)
+        if not normBias.ok { return MiniLMForwardCache.emptyWithError(normBias.error) }
+
+        return MiniLMForwardCache{
+            ok: true,
+            embeddingsOk: true,
+            requestedLayers: readyLayers,
+            cachedLayers: 0,
+            word: word,
+            position: position,
+            tokenType: tokenType,
+            normWeight: normWeight,
+            normBias: normBias,
+            layers: Array<MiniLMEncoderLayerCache>(),
             error: ""
         }
     }
@@ -307,7 +364,7 @@ class MiniLMEmbeddings {
         }
         var cache = MiniLMForwardCache.empty()
         if cacheTensors {
-            cache = MiniLMForwardCache.load(info, readyLayers, maxLoadElements)
+            cache = MiniLMForwardCache.loadEmbeddingsOnly(info, readyLayers, maxLoadElements)
         }
 
         return MiniLMEmbeddings{
@@ -331,11 +388,11 @@ class MiniLMEmbeddings {
     }
 
     fun encodeMean(tokenIds: Array<Int>, mask: Array<Int>) r: Array<Float> {
-        return this.encodeMeanWithAdapters(tokenIds, mask, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.intermediateSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), -1, ProjectionAdapter.identity(this.hiddenSize), -1)
+        return this.encodeMeanWithAdapters(tokenIds, mask, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), -1, ProjectionAdapter.identity(this.hiddenSize), -1)
     }
 
     fun encodeMeanWithLayerAdapter(tokenIds: Array<Int>, mask: Array<Int>, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
-        return this.encodeMeanWithAdapters(tokenIds, mask, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.intermediateSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.intermediateSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), DenseDeltaAdapter.identity(this.hiddenSize, this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), LayerNormDeltaAdapter.identity(this.hiddenSize), -1, layerAdapter, adapterLayer)
+        return this.encodeMeanWithAdapters(tokenIds, mask, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), -1, layerAdapter, adapterLayer)
     }
 
     fun encodeMeanWithLayerDeltas(tokenIds: Array<Int>, mask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
@@ -343,7 +400,7 @@ class MiniLMEmbeddings {
         if not info.validHeader {
             return Array<Float>()
         }
-        let word = cachedEmbeddingTensor(this.cache, info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        let word = wordEmbeddingTensorForTokens(this.cache, info, tokenIds, mask, this.maxLoadElements)
         if not word.ok {
             return Array<Float>()
         }
@@ -412,7 +469,7 @@ class MiniLMEmbeddings {
         if not info.validHeader {
             return Array<Float>()
         }
-        let word = cachedEmbeddingTensor(this.cache, info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        let word = wordEmbeddingTensorForTokens(this.cache, info, tokenIds, mask, this.maxLoadElements)
         if not word.ok {
             return Array<Float>()
         }
@@ -480,7 +537,7 @@ class MiniLMEmbeddings {
         if this.readyLayers <= 0 {
             return Array<Float>()
         }
-        let word = cachedEmbeddingTensor(this.cache, info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        let word = wordEmbeddingTensorForTokens(this.cache, info, tokenIds, mask, this.maxLoadElements)
         if not word.ok {
             return Array<Float>()
         }
@@ -637,7 +694,7 @@ class MiniLMEmbeddings {
         accumulateEmbeddingTraceGrad(info, qTrace, gradQ, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
         accumulateEmbeddingTraceGrad(info, pTrace, gradP, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
         accumulateEmbeddingTraceGrad(info, nTrace, gradN, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
-        let wordBase = cachedEmbeddingTensor(this.cache, info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        let wordBase = wordEmbeddingTensorForRows(this.cache, info, gradWordRows, this.maxLoadElements)
         let positionBase = cachedEmbeddingTensor(this.cache, info, "embeddings.position_embeddings.weight", this.maxLoadElements)
         let tokenTypeBase = cachedEmbeddingTensor(this.cache, info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
         let normWeightBase = cachedEmbeddingTensor(this.cache, info, "embeddings.LayerNorm.weight", this.maxLoadElements)
@@ -1063,6 +1120,109 @@ fun loadEmbeddingTensor(info: SafeTensorInfo, canonicalName: String, maxLoadElem
     return EmbeddingTensorLoad.success(tensorRows(entry), tensorCols(entry), values)
 }
 
+fun loadEmbeddingTensorMetadata(info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int) r: EmbeddingTensorLoad {
+    let index = mwFindCandidateIndex(info, canonicalName)
+    if index < 0 {
+        return EmbeddingTensorLoad.failure("missing tensor " + canonicalName)
+    }
+    let entry = info.entries[index]
+    let validation = validateEmbeddingTensor(info, canonicalName, maxLoadElements, tensorCols(entry), true)
+    if validation.length() > 0 {
+        return EmbeddingTensorLoad.failure(validation)
+    }
+    return EmbeddingTensorLoad.sparse(tensorRows(entry), tensorCols(entry), Array<Int>(), Array<Float>())
+}
+
+fun wordEmbeddingTensorForTokens(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, maxLoadElements: Int) r: EmbeddingTensorLoad {
+    if cache.embeddingsOk and cache.word.ok and cache.word.values.length() > 0 {
+        return cache.word
+    }
+    let meta = if cache.embeddingsOk and cache.word.ok { cache.word } else { loadEmbeddingTensorMetadata(info, "embeddings.word_embeddings.weight", maxLoadElements) }
+    if not meta.ok {
+        return meta
+    }
+    let rowIds = Array<Int>()
+    var i = 0
+    while i < tokenIds.length() and i < mask.length() {
+        if mask[i] == 1 {
+            let row = positiveMod(tokenIds[i], meta.rows)
+            if not meIntArrayContains(rowIds, row) {
+                rowIds.push(row)
+            }
+        }
+        i = i + 1
+    }
+    return loadWordEmbeddingRows(info, rowIds, meta.rows, meta.cols, maxLoadElements)
+}
+
+fun wordEmbeddingTensorForRows(cache: MiniLMForwardCache, info: SafeTensorInfo, rows: Array<Int>, maxLoadElements: Int) r: EmbeddingTensorLoad {
+    if cache.embeddingsOk and cache.word.ok and cache.word.values.length() > 0 {
+        return cache.word
+    }
+    let meta = if cache.embeddingsOk and cache.word.ok { cache.word } else { loadEmbeddingTensorMetadata(info, "embeddings.word_embeddings.weight", maxLoadElements) }
+    if not meta.ok {
+        return meta
+    }
+    let rowIds = Array<Int>()
+    var i = 0
+    while i < rows.length() {
+        let row = positiveMod(rows[i], meta.rows)
+        if not meIntArrayContains(rowIds, row) {
+            rowIds.push(row)
+        }
+        i = i + 1
+    }
+    return loadWordEmbeddingRows(info, rowIds, meta.rows, meta.cols, maxLoadElements)
+}
+
+fun loadWordEmbeddingRows(info: SafeTensorInfo, rowIds: Array<Int>, rows: Int, cols: Int, maxLoadElements: Int) r: EmbeddingTensorLoad {
+    let index = mwFindCandidateIndex(info, "embeddings.word_embeddings.weight")
+    if index < 0 {
+        return EmbeddingTensorLoad.failure("missing tensor embeddings.word_embeddings.weight")
+    }
+    let entry = info.entries[index]
+    if not isF32DType(entry.dtype) {
+        return EmbeddingTensorLoad.failure("tensor dtype is not F32")
+    }
+    if tensorRows(entry) != rows or tensorCols(entry) != cols {
+        return EmbeddingTensorLoad.failure("embedding shape mismatch")
+    }
+    if rowIds.length() * cols > maxLoadElements {
+        return EmbeddingTensorLoad.failure("sparse row load exceeds cap")
+    }
+    let values = Array<Float>()
+    let dataBase = 8 + info.headerLength + entry.dataStart
+    var slot = 0
+    while slot < rowIds.length() {
+        let row = rowIds[slot]
+        if row < 0 or row >= rows {
+            return EmbeddingTensorLoad.failure("sparse row out of bounds")
+        }
+        let rowBytes = readBytesRange(info.path, dataBase + row * cols * 4, cols * 4)
+        if rowBytes.length() < cols * 4 {
+            return EmbeddingTensorLoad.failure("sparse row data is truncated")
+        }
+        var d = 0
+        while d < cols {
+            values.push(meReadF32Le(rowBytes, d * 4))
+            d = d + 1
+        }
+        slot = slot + 1
+    }
+    return EmbeddingTensorLoad.sparse(rows, cols, rowIds, values)
+}
+
+fun meIntArrayContains(values: Array<Int>, needle: Int) r: Bool {
+    var i = 0
+    while i < values.length() {
+        if values[i] == needle {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fun cachedEmbeddingTensor(cache: MiniLMForwardCache, info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int) r: EmbeddingTensorLoad {
     if cache.embeddingsOk {
         if canonicalName == "embeddings.word_embeddings.weight" {
@@ -1085,11 +1245,11 @@ fun cachedEmbeddingTensor(cache: MiniLMForwardCache, info: SafeTensorInfo, canon
 }
 
 fun applyEncoderLayer(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int) r: Array<Float> {
-    return applyEncoderLayerWithDenseAdapter(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, intermediateSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), false)
+    return applyEncoderLayerWithDenseAdapter(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), false)
 }
 
 fun applyEncoderLayerBackend(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, backend: String) r: Array<Float> {
-    return applyEncoderLayerWithDenseAdapterBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, intermediateSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), false, backend)
+    return applyEncoderLayerWithDenseAdapterBackend(info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), false, backend)
 }
 
 fun applyEncoderLayerWithDenseAdapter(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool) r: Array<Float> {
@@ -1109,7 +1269,7 @@ fun applyEncoderLayerMaybeCached(cache: MiniLMForwardCache, info: SafeTensorInfo
 }
 
 fun applyEncoderLayerMaybeCachedBase(cache: MiniLMForwardCache, info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, backend: String) r: Array<Float> {
-    return applyEncoderLayerMaybeCached(cache, info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, intermediateSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), DenseDeltaAdapter.identity(hiddenSize, hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), LayerNormDeltaAdapter.identity(hiddenSize), false, backend)
+    return applyEncoderLayerMaybeCached(cache, info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), false, backend)
 }
 
 fun applyEncoderLayerWithDenseAdapterCachedBackend(layerCache: MiniLMEncoderLayerCache, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
@@ -1177,7 +1337,7 @@ fun normalizeMiniLMDenseAdapterLayer(adapterLayer: Int, readyLayers: Int) r: Int
         return -1
     }
     if adapterLayer < 0 {
-        return readyLayers - 1
+        return -1
     }
     if adapterLayer >= readyLayers {
         return readyLayers - 1
@@ -1462,7 +1622,7 @@ fun residualLayerNormValuesBackend(values: Array<Float>, residual: Array<Float>,
 }
 
 fun feedForwardIntermediate(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
-    return feedForwardIntermediateWithDenseDelta(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, DenseDeltaAdapter.identity(hiddenSize, intermediateSize), false)
+    return feedForwardIntermediateWithDenseDelta(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, DenseDeltaAdapter.identity(0, 0), false)
 }
 
 fun feedForwardIntermediateWithDenseDelta(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool) r: Array<Float> {
@@ -1501,7 +1661,7 @@ fun feedForwardPreActivationWithDenseDeltaBackend(sequence: Array<Float>, seqLen
 }
 
 fun feedForwardOutput(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad) r: Array<Float> {
-    return feedForwardOutputWithDenseAdapter(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), DenseDeltaAdapter.identity(intermediateSize, hiddenSize), false)
+    return feedForwardOutputWithDenseAdapter(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), false)
 }
 
 fun feedForwardOutputWithDenseAdapter(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, applyDenseAdapter: Bool) r: Array<Float> {
@@ -1564,7 +1724,7 @@ fun denseAdapterTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds:
     if targetLayer < 0 or targetLayer >= readyLayers {
         return MiniLMDenseTrace.failure()
     }
-    let word = cachedEmbeddingTensor(cache, info, "embeddings.word_embeddings.weight", maxLoadElements)
+    let word = wordEmbeddingTensorForTokens(cache, info, tokenIds, mask, maxLoadElements)
     if not word.ok { return MiniLMDenseTrace.failure() }
     let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
     if not position.ok { return MiniLMDenseTrace.failure() }
@@ -1626,7 +1786,7 @@ fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensor
     if targetLayer < 0 or targetLayer >= readyLayers or not layerDeltas.hasLayer(targetLayer) {
         return MiniLMDenseTrace.failure()
     }
-    let word = cachedEmbeddingTensor(cache, info, "embeddings.word_embeddings.weight", maxLoadElements)
+    let word = wordEmbeddingTensorForTokens(cache, info, tokenIds, mask, maxLoadElements)
     if not word.ok { return MiniLMDenseTrace.failure() }
     let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
     if not position.ok { return MiniLMDenseTrace.failure() }
@@ -1695,7 +1855,7 @@ fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensor
 }
 
 fun embeddingDeltaTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, backend: String) r: MiniLMEmbeddingTrace {
-    let word = cachedEmbeddingTensor(cache, info, "embeddings.word_embeddings.weight", maxLoadElements)
+    let word = wordEmbeddingTensorForTokens(cache, info, tokenIds, mask, maxLoadElements)
     if not word.ok { return MiniLMEmbeddingTrace.failure() }
     let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
     if not position.ok { return MiniLMEmbeddingTrace.failure() }
@@ -3426,9 +3586,9 @@ fun encodeTokenWithTables(tokenId: Int, positionIndex: Int, hiddenSize: Int, wor
     let typeRow = 0
     var d = 0
     while d < hiddenSize {
-        raw.push(embeddingAt(word.values, wordRow, d, word.cols)
-            + embeddingAt(position.values, posRow, d, position.cols)
-            + embeddingAt(tokenType.values, typeRow, d, tokenType.cols))
+        raw.push(word.valueAt(wordRow, d)
+            + position.valueAt(posRow, d)
+            + tokenType.valueAt(typeRow, d))
         d = d + 1
     }
     return embeddingLayerNorm(raw, normWeight.values, normBias.values)
@@ -3446,11 +3606,11 @@ fun encodeTokenRawWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSi
     let typeRow = 0
     var d = 0
     while d < hiddenSize {
-        raw.push(embeddingAt(word.values, wordRow, d, word.cols)
+        raw.push(word.valueAt(wordRow, d)
             + embeddingDeltas.wordDeltaAt(wordRow, d)
-            + embeddingAt(position.values, posRow, d, position.cols)
+            + position.valueAt(posRow, d)
             + embeddingDeltas.positionDeltaAt(posRow, d)
-            + embeddingAt(tokenType.values, typeRow, d, tokenType.cols)
+            + tokenType.valueAt(typeRow, d)
             + embeddingDeltas.tokenTypeDeltaAt(typeRow, d))
         d = d + 1
     }
