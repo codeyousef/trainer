@@ -378,13 +378,36 @@ class MiniLMParameterRegistry {
             scale = gradClip / norm
         }
         let safeStep = if stepCount > 0 { stepCount } else { 1 }
-        this.applyVectorBaseAdamWAt(weightIndex, baseWeight, weightBaseDefault, weightDelta, weightM, weightV, gradWeight, scale, safeStep, lr, weightDecay)
-        this.applyVectorBaseAdamWAt(biasIndex, baseBias, biasBaseDefault, biasDelta, biasM, biasV, gradBias, scale, safeStep, lr, weightDecay)
-        if safeStep > this.optimizerSteps {
-            this.optimizerSteps = safeStep
+        this.applyDenseBaseAdamWScaledAt(weightIndex, biasIndex, baseWeight, baseBias, weightDelta, biasDelta, weightM, weightV, biasM, biasV, gradWeight, gradBias, scale, safeStep, lr, weightDecay, weightBaseDefault, biasBaseDefault)
+        return true
+    }
+
+    fun applyDenseBaseAdamWScaled(logicalWeightName: String, logicalBiasName: String, baseWeight: Array<Float>, baseBias: Array<Float>, weightDelta: Array<Float>, biasDelta: Array<Float>, weightM: Array<Float>, weightV: Array<Float>, biasM: Array<Float>, biasV: Array<Float>, gradWeight: Array<Float>, gradBias: Array<Float>, scale: Float, stepCount: Int, lr: Float, weightDecay: Float, weightBaseDefault: Float, biasBaseDefault: Float) r: Bool {
+        if gradWeight.length() != weightDelta.length() or gradBias.length() != biasDelta.length() {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        if weightM.length() != weightDelta.length() or weightV.length() != weightDelta.length() or biasM.length() != biasDelta.length() or biasV.length() != biasDelta.length() {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        let weightIndex = this.loadedParameterIndex(logicalWeightName, weightDelta.length())
+        let biasIndex = this.loadedParameterIndex(logicalBiasName, biasDelta.length())
+        if weightIndex < 0 or biasIndex < 0 {
+            return false
+        }
+        let safeStep = if stepCount > 0 { stepCount } else { 1 }
+        this.applyDenseBaseAdamWScaledAt(weightIndex, biasIndex, baseWeight, baseBias, weightDelta, biasDelta, weightM, weightV, biasM, biasV, gradWeight, gradBias, scale, safeStep, lr, weightDecay, weightBaseDefault, biasBaseDefault)
+        return true
+    }
+
+    fun applyDenseBaseAdamWScaledAt(weightIndex: Int, biasIndex: Int, baseWeight: Array<Float>, baseBias: Array<Float>, weightDelta: Array<Float>, biasDelta: Array<Float>, weightM: Array<Float>, weightV: Array<Float>, biasM: Array<Float>, biasV: Array<Float>, gradWeight: Array<Float>, gradBias: Array<Float>, scale: Float, stepCount: Int, lr: Float, weightDecay: Float, weightBaseDefault: Float, biasBaseDefault: Float) r: Void {
+        this.applyVectorBaseAdamWAt(weightIndex, baseWeight, weightBaseDefault, weightDelta, weightM, weightV, gradWeight, scale, stepCount, lr, weightDecay)
+        this.applyVectorBaseAdamWAt(biasIndex, baseBias, biasBaseDefault, biasDelta, biasM, biasV, gradBias, scale, stepCount, lr, weightDecay)
+        if stepCount > this.optimizerSteps {
+            this.optimizerSteps = stepCount
         }
         this.optimizerUpdates = this.optimizerUpdates + 2
-        return true
     }
 
     fun applyVectorBaseAdamWAt(parameterIndex: Int, baseValues: Array<Float>, baseDefault: Float, delta: Array<Float>, momentM: Array<Float>, momentV: Array<Float>, grad: Array<Float>, scale: Float, stepCount: Int, lr: Float, weightDecay: Float) r: Void {
@@ -417,6 +440,99 @@ class MiniLMParameterRegistry {
             i = i + 1
         }
     }
+
+    fun applyEmbeddingBaseAdamW(wordBase: Array<Float>, positionBase: Array<Float>, tokenTypeBase: Array<Float>, layerNormWeightBase: Array<Float>, layerNormBiasBase: Array<Float>, hiddenSize: Int, wordRows: Int, positionRows: Int, tokenTypeRows: Int, wordRowIds: Array<Int>, wordDelta: Array<Float>, wordM: Array<Float>, wordV: Array<Float>, positionRowIds: Array<Int>, positionDelta: Array<Float>, positionM: Array<Float>, positionV: Array<Float>, tokenTypeRowIds: Array<Int>, tokenTypeDelta: Array<Float>, tokenTypeM: Array<Float>, tokenTypeV: Array<Float>, layerNormWeightDelta: Array<Float>, layerNormWeightM: Array<Float>, layerNormWeightV: Array<Float>, layerNormBiasDelta: Array<Float>, layerNormBiasM: Array<Float>, layerNormBiasV: Array<Float>, wordGradRows: Array<Int>, wordGrad: Array<Float>, positionGradRows: Array<Int>, positionGrad: Array<Float>, tokenTypeGradRows: Array<Int>, tokenTypeGrad: Array<Float>, gradLayerNormWeight: Array<Float>, gradLayerNormBias: Array<Float>, stepCount: Int, lr: Float, weightDecay: Float, gradClip: Float) r: Bool {
+        if hiddenSize <= 0 {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        if wordGrad.length() != wordGradRows.length() * hiddenSize or positionGrad.length() != positionGradRows.length() * hiddenSize or tokenTypeGrad.length() != tokenTypeGradRows.length() * hiddenSize {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        if gradLayerNormWeight.length() != hiddenSize or gradLayerNormBias.length() != hiddenSize {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        if layerNormWeightDelta.length() != hiddenSize or layerNormBiasDelta.length() != hiddenSize {
+            this.optimizerFallbacks = this.optimizerFallbacks + 1
+            return false
+        }
+        let wordIndex = this.loadedParameterIndex("embeddings.word", wordBase.length())
+        let positionIndex = this.loadedParameterIndex("embeddings.position", positionBase.length())
+        let tokenTypeIndex = this.loadedParameterIndex("embeddings.token_type", tokenTypeBase.length())
+        let lnWeightIndex = this.loadedParameterIndex("embeddings.layer_norm.weight", layerNormWeightDelta.length())
+        let lnBiasIndex = this.loadedParameterIndex("embeddings.layer_norm.bias", layerNormBiasDelta.length())
+        if wordIndex < 0 or positionIndex < 0 or tokenTypeIndex < 0 or lnWeightIndex < 0 or lnBiasIndex < 0 {
+            return false
+        }
+        var norm = registryArraySquareSum(wordGrad)
+        norm = norm + registryArraySquareSum(positionGrad)
+        norm = norm + registryArraySquareSum(tokenTypeGrad)
+        norm = norm + registryArraySquareSum(gradLayerNormWeight)
+        norm = norm + registryArraySquareSum(gradLayerNormBias)
+        norm = sqrt(norm)
+        var scale = 1.0
+        if gradClip > 0.0 and norm > gradClip {
+            scale = gradClip / norm
+        }
+        let safeStep = if stepCount > 0 { stepCount } else { 1 }
+        this.applySparseTableBaseAdamWAt(wordIndex, wordRows, hiddenSize, wordBase, 0.0, wordRowIds, wordDelta, wordM, wordV, wordGradRows, wordGrad, scale, safeStep, lr, weightDecay)
+        this.applySparseTableBaseAdamWAt(positionIndex, positionRows, hiddenSize, positionBase, 0.0, positionRowIds, positionDelta, positionM, positionV, positionGradRows, positionGrad, scale, safeStep, lr, weightDecay)
+        this.applySparseTableBaseAdamWAt(tokenTypeIndex, tokenTypeRows, hiddenSize, tokenTypeBase, 0.0, tokenTypeRowIds, tokenTypeDelta, tokenTypeM, tokenTypeV, tokenTypeGradRows, tokenTypeGrad, scale, safeStep, lr, weightDecay)
+        this.applyVectorBaseAdamWAt(lnWeightIndex, layerNormWeightBase, 1.0, layerNormWeightDelta, layerNormWeightM, layerNormWeightV, gradLayerNormWeight, scale, safeStep, lr, weightDecay)
+        this.applyVectorBaseAdamWAt(lnBiasIndex, layerNormBiasBase, 0.0, layerNormBiasDelta, layerNormBiasM, layerNormBiasV, gradLayerNormBias, scale, safeStep, lr, weightDecay)
+        if safeStep > this.optimizerSteps {
+            this.optimizerSteps = safeStep
+        }
+        this.optimizerUpdates = this.optimizerUpdates + 5
+        return true
+    }
+
+    fun applySparseTableBaseAdamWAt(parameterIndex: Int, tableRows: Int, hiddenSize: Int, baseValues: Array<Float>, baseDefault: Float, rowIds: Array<Int>, delta: Array<Float>, momentM: Array<Float>, momentV: Array<Float>, gradRows: Array<Int>, gradValues: Array<Float>, scale: Float, stepCount: Int, lr: Float, weightDecay: Float) r: Void {
+        this.parameters[parameterIndex].zeroGrad()
+        let beta1 = 0.9
+        let beta2 = 0.999
+        let eps = 0.00000001
+        let beta1Correction = 1.0 - registryPowFloat(beta1, stepCount)
+        let beta2Correction = 1.0 - registryPowFloat(beta2, stepCount)
+        var gSlot = 0
+        while gSlot < gradRows.length() {
+            let row = gradRows[gSlot]
+            let sparseSlot = registryEnsureRow(rowIds, delta, momentM, momentV, tableRows, hiddenSize, row)
+            if sparseSlot >= 0 {
+                var d = 0
+                while d < hiddenSize {
+                    let gradIdx = gSlot * hiddenSize + d
+                    let sparseIdx = sparseSlot * hiddenSize + d
+                    let parameterIdx = row * hiddenSize + d
+                    if parameterIdx >= 0 and parameterIdx < this.parameters[parameterIndex].value.length() {
+                        var base = baseDefault
+                        if parameterIdx < baseValues.length() {
+                            base = baseValues[parameterIdx]
+                        }
+                        let g = gradValues[gradIdx] * scale
+                        this.parameters[parameterIndex].value[parameterIdx] = base + delta[sparseIdx]
+                        this.parameters[parameterIndex].grad[parameterIdx] = g
+                        this.parameters[parameterIndex].m[parameterIdx] = beta1 * this.parameters[parameterIndex].m[parameterIdx] + (1.0 - beta1) * g
+                        this.parameters[parameterIndex].v[parameterIdx] = beta2 * this.parameters[parameterIndex].v[parameterIdx] + (1.0 - beta2) * g * g
+                        let mHat = this.parameters[parameterIndex].m[parameterIdx] / beta1Correction
+                        let vHat = this.parameters[parameterIndex].v[parameterIdx] / beta2Correction
+                        var next = this.parameters[parameterIndex].value[parameterIdx]
+                        next = next - lr * weightDecay * next
+                        next = next - lr * mHat / (sqrt(vHat) + eps)
+                        let nextDelta = registryClamp(next - base, -2.0, 2.0)
+                        delta[sparseIdx] = nextDelta
+                        momentM[sparseIdx] = this.parameters[parameterIndex].m[parameterIdx]
+                        momentV[sparseIdx] = this.parameters[parameterIndex].v[parameterIdx]
+                        this.parameters[parameterIndex].value[parameterIdx] = base + nextDelta
+                    }
+                    d = d + 1
+                }
+            }
+            gSlot = gSlot + 1
+        }
+    }
 }
 
 fun registryPowFloat(base: Float, exponent: Int) r: Float {
@@ -437,6 +553,46 @@ fun registryClamp(value: Float, minValue: Float, maxValue: Float) r: Float {
         return maxValue
     }
     return value
+}
+
+fun registryArraySquareSum(values: Array<Float>) r: Float {
+    var out = 0.0
+    var i = 0
+    while i < values.length() {
+        out = out + values[i] * values[i]
+        i = i + 1
+    }
+    return out
+}
+
+fun registryFindRowSlot(rowIds: Array<Int>, row: Int) r: Int {
+    var i = 0
+    while i < rowIds.length() {
+        if rowIds[i] == row {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun registryEnsureRow(rowIds: Array<Int>, values: Array<Float>, m: Array<Float>, v: Array<Float>, tableRows: Int, hiddenSize: Int, row: Int) r: Int {
+    if row < 0 or row >= tableRows {
+        return -1
+    }
+    let existing = registryFindRowSlot(rowIds, row)
+    if existing >= 0 {
+        return existing
+    }
+    rowIds.push(row)
+    var d = 0
+    while d < hiddenSize {
+        values.push(0.0)
+        m.push(0.0)
+        v.push(0.0)
+        d = d + 1
+    }
+    return rowIds.length() - 1
 }
 
 fun miniLMParameterRegistryJson(registry: MiniLMParameterRegistry) r: String {

@@ -370,7 +370,7 @@ class MiniLMEmbeddings {
         return loss
     }
 
-    fun updateEmbeddingDeltasTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
+    fun updateEmbeddingDeltasTriplet(qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, parameterRegistry: MiniLMParameterRegistry, margin: Float, lr: Float, weightDecay: Float, gradClip: Float) r: Float {
         if this.readyLayers <= 0 or embeddingDeltas.hiddenSize != this.hiddenSize {
             return 0.0
         }
@@ -413,7 +413,13 @@ class MiniLMEmbeddings {
         let normWeightBase = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", this.maxLoadElements)
         let normBiasBase = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", this.maxLoadElements)
         if wordBase.ok and positionBase.ok and tokenTypeBase.ok and normWeightBase.ok and normBiasBase.ok {
-            embeddingDeltas.applyBaseParameterGradients(wordBase.values, positionBase.values, tokenTypeBase.values, normWeightBase.values, normBiasBase.values, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
+            let step = embeddingDeltas.stepCount + 1
+            if parameterRegistry.applyEmbeddingBaseAdamW(wordBase.values, positionBase.values, tokenTypeBase.values, normWeightBase.values, normBiasBase.values, this.hiddenSize, this.wordRows, this.positionRows, this.tokenTypeRows, embeddingDeltas.wordRowIds, embeddingDeltas.wordDelta, embeddingDeltas.wordM, embeddingDeltas.wordV, embeddingDeltas.positionRowIds, embeddingDeltas.positionDelta, embeddingDeltas.positionM, embeddingDeltas.positionV, embeddingDeltas.tokenTypeRowIds, embeddingDeltas.tokenTypeDelta, embeddingDeltas.tokenTypeM, embeddingDeltas.tokenTypeV, embeddingDeltas.layerNormWeightDelta, embeddingDeltas.layerNormWeightM, embeddingDeltas.layerNormWeightV, embeddingDeltas.layerNormBiasDelta, embeddingDeltas.layerNormBiasM, embeddingDeltas.layerNormBiasV, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, step, lr, weightDecay, gradClip) {
+                embeddingDeltas.stepCount = step
+                embeddingDeltas.loaded = true
+            } else {
+                embeddingDeltas.applyBaseParameterGradients(wordBase.values, positionBase.values, tokenTypeBase.values, normWeightBase.values, normBiasBase.values, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
+            }
         } else {
             embeddingDeltas.applyGradients(gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, lr, weightDecay, gradClip)
         }
@@ -441,7 +447,7 @@ class MiniLMEmbeddings {
             layer = layer - 1
         }
         applyMiniLMLayerBaseParameterGradients(info, parameterRegistry, layerDeltas, gradDeltas, this.readyLayers, this.maxLoadElements, lr, weightDecay, gradClip)
-        let embeddingLoss = this.updateEmbeddingDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, embeddingDeltas, layerDeltas, margin, lr, weightDecay, gradClip)
+        let embeddingLoss = this.updateEmbeddingDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, embeddingDeltas, layerDeltas, parameterRegistry, margin, lr, weightDecay, gradClip)
         if embeddingLoss > 0.0 {
             lossSum = lossSum + embeddingLoss
             count = count + 1
