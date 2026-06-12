@@ -67,7 +67,7 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
         println("trainer: epoch " + (epoch + 1).toString() + " loss " + finalLoss.toString())
         epoch = epoch + 1
     }
-    if cfg.trainMiniLMDeltas and encoder.hasMiniLMDenseAdapterTarget() {
+    if cfg.trainMiniLMDeltas and encoder.hasMiniLMDenseAdapterTarget() and finalLoss > 0.0 {
         if encoder.hasMiniLMAllLayerDeltaTarget() {
             encoder.minilmLayerDeltas.saveAll(cfg.outputModelDir)
         }

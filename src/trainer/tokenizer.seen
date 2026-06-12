@@ -12,6 +12,15 @@ class TokenBatch {
     }
 }
 
+class TokenizedText {
+    var ids: Array<Int>
+    var masks: Array<Int>
+
+    static fun new(ids: Array<Int>, masks: Array<Int>) r: TokenizedText {
+        return TokenizedText{ ids: ids, masks: masks }
+    }
+}
+
 class Tokenizer {
     var tokenizerPath: String
     var loaded: Bool
@@ -28,6 +37,8 @@ class Tokenizer {
     var vocabStyle: Int
     var vocabTokens: Array<String>
     var vocabIds: Array<Int>
+    var vocabBuckets: Array<Int>
+    var vocabNext: Array<Int>
     var clsId: Int
     var sepId: Int
     var padId: Int
@@ -36,7 +47,7 @@ class Tokenizer {
 
     static fun load(path: String, maxLength: Int) r: Tokenizer {
         var loaded = false
-        let tokenizerBytes = Array<Int>()
+        var tokenizerBytes = Array<Int>()
         let baseDir = parentDir(path)
         let vocabPath = baseDir + "/vocab.txt"
         let hasVocabTxt = exists(vocabPath)
@@ -44,12 +55,7 @@ class Tokenizer {
             loaded = true
         } else if exists(path) {
             println("trainer: reading tokenizer.json")
-            let loadedBytes = readBytes(path)
-            var bi = 0
-            while bi < loadedBytes.length() {
-                tokenizerBytes.push(loadedBytes[bi])
-                bi = bi + 1
-            }
+            tokenizerBytes = readBytes(path)
             loaded = tokenizerBytes.length() > 0
         }
         println("trainer: reading tokenizer metadata")
@@ -80,6 +86,8 @@ class Tokenizer {
             println("trainer: parsing tokenizer vocab")
             parseTokenizerVocabBytes(tokenizerBytes, vocabTokens, vocabIds)
         }
+        let vocabBuckets = buildVocabBuckets(vocabTokens)
+        let vocabNext = buildVocabNext(vocabTokens, vocabBuckets)
         let vocabStyle = if tokenizerVocabIsArrayBytes(tokenizerBytes) { 2 } else { detectTokenizerVocabStyle("", vocabTokens) }
         let clsId = findVocabId(vocabTokens, vocabIds, cls, stableTokenId(cls))
         let sepId = findVocabId(vocabTokens, vocabIds, sep, stableTokenId(sep))
@@ -103,6 +111,8 @@ class Tokenizer {
             vocabStyle: vocabStyle,
             vocabTokens: vocabTokens,
             vocabIds: vocabIds,
+            vocabBuckets: vocabBuckets,
+            vocabNext: vocabNext,
             clsId: clsId,
             sepId: sepId,
             padId: padId,
@@ -118,7 +128,7 @@ class Tokenizer {
         tokens.push(this.clsToken)
         var i = 0
         while i < raw.length() and tokens.length() < this.maxLength - 1 {
-            appendTokenizerPieces(tokens, raw[i], this.vocabTokens, this.unkToken, this.maxLength - 1, this.vocabStyle)
+            appendTokenizerPieces(tokens, raw[i], this.vocabTokens, this.vocabBuckets, this.vocabNext, this.unkToken, this.maxLength - 1, this.vocabStyle)
             i = i + 1
         }
         tokens.push(this.sepToken)
@@ -129,14 +139,7 @@ class Tokenizer {
     }
 
     fun tokenIds(text: String) r: Array<Int> {
-        let tokens = this.tokenize(text)
-        let ids = Array<Int>()
-        var i = 0
-        while i < tokens.length() {
-            ids.push(this.tokenIdForToken(tokens[i]))
-            i = i + 1
-        }
-        return ids
+        return this.tokenized(text).ids
     }
 
     fun tokenIdForToken(token: String) r: Int {
@@ -156,14 +159,20 @@ class Tokenizer {
             return this.maskId
         }
         let fallback = if this.vocabTokens.length() > 0 { this.unkId } else { stableTokenId(token) }
-        return findVocabId(this.vocabTokens, this.vocabIds, token, fallback)
+        return findVocabIdIndexed(this.vocabTokens, this.vocabIds, this.vocabBuckets, this.vocabNext, token, fallback)
     }
 
     fun attentionMask(text: String) r: Array<Int> {
+        return this.tokenized(text).masks
+    }
+
+    fun tokenized(text: String) r: TokenizedText {
         let tokens = this.tokenize(text)
+        let ids = Array<Int>()
         let mask = Array<Int>()
         var i = 0
         while i < tokens.length() {
+            ids.push(this.tokenIdForToken(tokens[i]))
             if tokenizerStringEquals(tokens[i], this.padToken) {
                 mask.push(0)
             } else {
@@ -171,7 +180,7 @@ class Tokenizer {
             }
             i = i + 1
         }
-        return mask
+        return TokenizedText.new(ids, mask)
     }
 
     fun batchTokenize(texts: Array<String>) r: TokenBatch {
@@ -179,16 +188,15 @@ class Tokenizer {
         let masks = Array<Int>()
         var i = 0
         while i < texts.length() {
-            let rowIds = this.tokenIds(texts[i])
-            let rowMask = this.attentionMask(texts[i])
+            let row = this.tokenized(texts[i])
             var j = 0
-            while j < rowIds.length() {
-                ids.push(rowIds[j])
+            while j < row.ids.length() {
+                ids.push(row.ids[j])
                 j = j + 1
             }
             j = 0
-            while j < rowMask.length() {
-                masks.push(rowMask[j])
+            while j < row.masks.length() {
+                masks.push(row.masks[j])
                 j = j + 1
             }
             i = i + 1
@@ -619,6 +627,102 @@ fun findVocabId(tokens: Array<String>, ids: Array<Int>, token: String, fallback:
     return fallback
 }
 
+fun findVocabIdIndexed(tokens: Array<String>, ids: Array<Int>, buckets: Array<Int>, next: Array<Int>, token: String, fallback: Int) r: Int {
+    let index = findVocabIndexIndexed(tokens, buckets, next, token)
+    if index >= 0 and index < ids.length() {
+        return ids[index]
+    }
+    return fallback
+}
+
+fun findVocabIndexIndexed(tokens: Array<String>, buckets: Array<Int>, next: Array<Int>, token: String) r: Int {
+    if buckets.length() == 0 {
+        return findVocabIndexLinear(tokens, token)
+    }
+    let bucket = tokenizerBucketFor(token, buckets.length())
+    var i = buckets[bucket]
+    while i >= 0 and i < tokens.length() {
+        if tokenizerStringEquals(tokens[i], token) {
+            return i
+        }
+        if i < next.length() {
+            i = next[i]
+        } else {
+            return -1
+        }
+    }
+    return -1
+}
+
+fun findVocabIndexLinear(tokens: Array<String>, token: String) r: Int {
+    var i = 0
+    while i < tokens.length() {
+        if tokenizerStringEquals(tokens[i], token) {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
+}
+
+fun buildVocabBuckets(tokens: Array<String>) r: Array<Int> {
+    let buckets = Array<Int>()
+    let bucketCount = tokenizerBucketCount(tokens.length())
+    var i = 0
+    while i < bucketCount {
+        buckets.push(-1)
+        i = i + 1
+    }
+    return buckets
+}
+
+fun buildVocabNext(tokens: Array<String>, buckets: Array<Int>) r: Array<Int> {
+    let next = Array<Int>()
+    var i = 0
+    while i < tokens.length() {
+        next.push(-1)
+        i = i + 1
+    }
+    i = 0
+    while i < tokens.length() and buckets.length() > 0 {
+        let bucket = tokenizerBucketFor(tokens[i], buckets.length())
+        next[i] = buckets[bucket]
+        buckets[bucket] = i
+        i = i + 1
+    }
+    return next
+}
+
+fun tokenizerBucketCount(tokenCount: Int) r: Int {
+    if tokenCount <= 0 {
+        return 0
+    }
+    if tokenCount < 2048 {
+        return 4096
+    }
+    if tokenCount < 32768 {
+        return 65536
+    }
+    return 262144
+}
+
+fun tokenizerBucketFor(token: String, bucketCount: Int) r: Int {
+    if bucketCount <= 0 {
+        return 0
+    }
+    var h = 2166136261
+    var i = 0
+    while i < token.length() {
+        h = h ^ token.byteAt(i)
+        h = h * 16777619
+        i = i + 1
+    }
+    if h < 0 {
+        h = 0 - h
+    }
+    return h % bucketCount
+}
+
 fun vocabContains(tokens: Array<String>, token: String) r: Bool {
     var i = 0
     while i < tokens.length() {
@@ -628,6 +732,10 @@ fun vocabContains(tokens: Array<String>, token: String) r: Bool {
         i = i + 1
     }
     return false
+}
+
+fun vocabContainsIndexed(tokens: Array<String>, buckets: Array<Int>, next: Array<Int>, token: String) r: Bool {
+    return findVocabIndexIndexed(tokens, buckets, next, token) >= 0
 }
 
 fun detectTokenizerVocabStyle(text: String, tokens: Array<String>) r: Int {
@@ -685,15 +793,15 @@ fun startsWithTokenizerString(text: String, prefix: String) r: Bool {
     return tokenizerStringEquals(text.substring(0, prefix.length()), prefix)
 }
 
-fun appendTokenizerPieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int, style: Int) r: Void {
+fun appendTokenizerPieces(out: Array<String>, word: String, vocabTokens: Array<String>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkToken: String, limit: Int, style: Int) r: Void {
     if style == 2 {
-        appendMetaspacePieces(out, word, vocabTokens, unkToken, limit)
+        appendMetaspacePieces(out, word, vocabTokens, vocabBuckets, vocabNext, unkToken, limit)
         return
     }
-    appendWordPieces(out, word, vocabTokens, unkToken, limit)
+    appendWordPieces(out, word, vocabTokens, vocabBuckets, vocabNext, unkToken, limit)
 }
 
-fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
+fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkToken: String, limit: Int) r: Void {
     if out.length() >= limit {
         return
     }
@@ -701,7 +809,7 @@ fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String
         out.push(word)
         return
     }
-    if vocabContains(vocabTokens, word) {
+    if vocabContainsIndexed(vocabTokens, vocabBuckets, vocabNext, word) {
         out.push(word)
         return
     }
@@ -714,7 +822,7 @@ fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String
         while end > start and matched.length() == 0 {
             let rawPiece = word.substring(start, end)
             let piece = if start == 0 { rawPiece } else { "##" + rawPiece }
-            if vocabContains(vocabTokens, piece) {
+            if vocabContainsIndexed(vocabTokens, vocabBuckets, vocabNext, piece) {
                 matched = piece
             } else {
                 end = end - 1
@@ -738,7 +846,7 @@ fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String
     }
 }
 
-fun appendMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
+fun appendMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<String>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkToken: String, limit: Int) r: Void {
     if out.length() >= limit {
         return
     }
@@ -746,10 +854,10 @@ fun appendMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<S
         out.push(word)
         return
     }
-    appendGreedyMetaspacePieces(out, word, vocabTokens, unkToken, limit)
+    appendGreedyMetaspacePieces(out, word, vocabTokens, vocabBuckets, vocabNext, unkToken, limit)
 }
 
-fun appendGreedyMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<String>, unkToken: String, limit: Int) r: Void {
+fun appendGreedyMetaspacePieces(out: Array<String>, word: String, vocabTokens: Array<String>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkToken: String, limit: Int) r: Void {
     var start = 0
     var failed = false
     let pieces = Array<String>()
@@ -757,7 +865,7 @@ fun appendGreedyMetaspacePieces(out: Array<String>, word: String, vocabTokens: A
         var end = word.length()
         var matched = ""
         while end > start and matched.length() == 0 {
-            matched = findMetaspaceVocabPiece(vocabTokens, word, start, end, start == 0)
+            matched = findMetaspaceVocabPiece(vocabTokens, vocabBuckets, vocabNext, word, start, end, start == 0)
             if matched.length() == 0 {
                 end = end - 1
             }
@@ -780,19 +888,21 @@ fun appendGreedyMetaspacePieces(out: Array<String>, word: String, vocabTokens: A
     }
 }
 
-fun findMetaspaceVocabPiece(vocabTokens: Array<String>, word: String, start: Int, end: Int, firstPiece: Bool) r: String {
-    var i = 0
-    while i < vocabTokens.length() {
-        if firstPiece {
-            if tokenMatchesMetaspaceSlice(vocabTokens[i], word, start, end) {
-                return vocabTokens[i]
-            }
-        } else {
-            if tokenMatchesPlainSlice(vocabTokens[i], word, start, end) {
-                return vocabTokens[i]
-            }
+fun findMetaspaceVocabPiece(vocabTokens: Array<String>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, word: String, start: Int, end: Int, firstPiece: Bool) r: String {
+    let rawPiece = word.substring(start, end)
+    if firstPiece {
+        let unicodePiece = String.fromCharCode(9601) + rawPiece
+        if vocabContainsIndexed(vocabTokens, vocabBuckets, vocabNext, unicodePiece) {
+            return unicodePiece
         }
-        i = i + 1
+        let bytePiece = String.fromCharCode(226) + String.fromCharCode(150) + String.fromCharCode(129) + rawPiece
+        if vocabContainsIndexed(vocabTokens, vocabBuckets, vocabNext, bytePiece) {
+            return bytePiece
+        }
+        return ""
+    }
+    if vocabContainsIndexed(vocabTokens, vocabBuckets, vocabNext, rawPiece) {
+        return rawPiece
     }
     return ""
 }

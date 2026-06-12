@@ -608,9 +608,9 @@ class MiniLMEmbeddings {
         if not info.validHeader {
             return 0.0
         }
-        let qTrace = embeddingDeltaTrace(info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas, this.backend)
-        let pTrace = embeddingDeltaTrace(info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas, this.backend)
-        let nTrace = embeddingDeltaTrace(info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas, this.backend)
+        let qTrace = embeddingDeltaTrace(this.cache, info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas, this.backend)
+        let pTrace = embeddingDeltaTrace(this.cache, info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas, this.backend)
+        let nTrace = embeddingDeltaTrace(this.cache, info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, embeddingDeltas, layerDeltas, this.backend)
         if not qTrace.ok or not pTrace.ok or not nTrace.ok {
             return 0.0
         }
@@ -637,11 +637,11 @@ class MiniLMEmbeddings {
         accumulateEmbeddingTraceGrad(info, qTrace, gradQ, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
         accumulateEmbeddingTraceGrad(info, pTrace, gradP, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
         accumulateEmbeddingTraceGrad(info, nTrace, gradN, embeddingDeltas, layerDeltas, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, this.backend)
-        let wordBase = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", this.maxLoadElements)
-        let positionBase = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", this.maxLoadElements)
-        let tokenTypeBase = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
-        let normWeightBase = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", this.maxLoadElements)
-        let normBiasBase = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", this.maxLoadElements)
+        let wordBase = cachedEmbeddingTensor(this.cache, info, "embeddings.word_embeddings.weight", this.maxLoadElements)
+        let positionBase = cachedEmbeddingTensor(this.cache, info, "embeddings.position_embeddings.weight", this.maxLoadElements)
+        let tokenTypeBase = cachedEmbeddingTensor(this.cache, info, "embeddings.token_type_embeddings.weight", this.maxLoadElements)
+        let normWeightBase = cachedEmbeddingTensor(this.cache, info, "embeddings.LayerNorm.weight", this.maxLoadElements)
+        let normBiasBase = cachedEmbeddingTensor(this.cache, info, "embeddings.LayerNorm.bias", this.maxLoadElements)
         if wordBase.ok and positionBase.ok and tokenTypeBase.ok and normWeightBase.ok and normBiasBase.ok {
             let step = embeddingDeltas.stepCount + 1
             if parameterRegistry.applyEmbeddingBaseAdamW(wordBase.values, positionBase.values, tokenTypeBase.values, normWeightBase.values, normBiasBase.values, this.hiddenSize, this.wordRows, this.positionRows, this.tokenTypeRows, embeddingDeltas.wordRowIds, embeddingDeltas.wordDelta, embeddingDeltas.wordM, embeddingDeltas.wordV, embeddingDeltas.positionRowIds, embeddingDeltas.positionDelta, embeddingDeltas.positionM, embeddingDeltas.positionV, embeddingDeltas.tokenTypeRowIds, embeddingDeltas.tokenTypeDelta, embeddingDeltas.tokenTypeM, embeddingDeltas.tokenTypeV, embeddingDeltas.layerNormWeightDelta, embeddingDeltas.layerNormWeightM, embeddingDeltas.layerNormWeightV, embeddingDeltas.layerNormBiasDelta, embeddingDeltas.layerNormBiasM, embeddingDeltas.layerNormBiasV, gradWordRows, gradWord, gradPositionRows, gradPosition, gradTokenTypeRows, gradTokenType, gradLnW, gradLnB, step, lr, weightDecay, gradClip) {
@@ -690,9 +690,9 @@ class MiniLMEmbeddings {
 
     fun accumulateLayerDeltasTripletGrad(info: SafeTensorInfo, qIds: Array<Int>, qMask: Array<Int>, pIds: Array<Int>, pMask: Array<Int>, nIds: Array<Int>, nMask: Array<Int>, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, gradDeltas: MiniLMLayerDeltas, targetLayer: Int, margin: Float) r: Float {
         let denseAdapter = DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize)
-        let qTrace = denseAdapterTraceWithLayerDeltas(info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas, this.backend)
-        let pTrace = denseAdapterTraceWithLayerDeltas(info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas, this.backend)
-        let nTrace = denseAdapterTraceWithLayerDeltas(info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas, this.backend)
+        let qTrace = denseAdapterTraceWithLayerDeltas(this.cache, info, qIds, qMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas, this.backend)
+        let pTrace = denseAdapterTraceWithLayerDeltas(this.cache, info, pIds, pMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas, this.backend)
+        let nTrace = denseAdapterTraceWithLayerDeltas(this.cache, info, nIds, nMask, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, this.readyLayers, targetLayer, layerDeltas, embeddingDeltas, this.backend)
         if not qTrace.ok or not pTrace.ok or not nTrace.ok {
             return 0.0
         }
@@ -1622,19 +1622,19 @@ fun denseAdapterTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds:
     return MiniLMDenseTrace.success(targetTrace.seqLen, targetTrace.inputDim, targetTrace.hiddenSize, targetTrace.intermediateInput, targetTrace.intermediatePreActivation, targetTrace.ffInput, targetTrace.attentionSequenceInput, targetTrace.attentionQ, targetTrace.attentionK, targetTrace.attentionV, targetTrace.attentionContext, targetTrace.attentionOutputDenseWeight, targetTrace.attentionLayerNormInput, targetTrace.attentionNormWeight, targetTrace.intermediateDenseWeight, targetTrace.layerNormInput, targetTrace.normWeight, targetTrace.normBias, targetTrace.outputDenseWeight, targetTrace.outputSequence, finalMean)
 }
 
-fun denseAdapterTraceWithLayerDeltas(info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, targetLayer: Int, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, backend: String) r: MiniLMDenseTrace {
+fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, targetLayer: Int, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, backend: String) r: MiniLMDenseTrace {
     if targetLayer < 0 or targetLayer >= readyLayers or not layerDeltas.hasLayer(targetLayer) {
         return MiniLMDenseTrace.failure()
     }
-    let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements)
+    let word = cachedEmbeddingTensor(cache, info, "embeddings.word_embeddings.weight", maxLoadElements)
     if not word.ok { return MiniLMDenseTrace.failure() }
-    let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
+    let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
     if not position.ok { return MiniLMDenseTrace.failure() }
-    let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    let tokenType = cachedEmbeddingTensor(cache, info, "embeddings.token_type_embeddings.weight", maxLoadElements)
     if not tokenType.ok { return MiniLMDenseTrace.failure() }
-    let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+    let normWeight = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.weight", maxLoadElements)
     if not normWeight.ok { return MiniLMDenseTrace.failure() }
-    let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements)
+    let normBias = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.bias", maxLoadElements)
     if not normBias.ok { return MiniLMDenseTrace.failure() }
 
     let sequence = Array<Float>()
@@ -1661,9 +1661,9 @@ fun denseAdapterTraceWithLayerDeltas(info: SafeTensorInfo, tokenIds: Array<Int>,
     while layer < targetLayer {
         var layerOut = Array<Float>()
         if layerDeltas.hasLayer(layer) {
-            layerOut = applyEncoderLayerWithDenseAdapterBackend(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
+            layerOut = applyEncoderLayerMaybeCached(cache, info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
         } else {
-            layerOut = applyEncoderLayerBackend(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
+            layerOut = applyEncoderLayerMaybeCachedBase(cache, info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
         }
         if layerOut.length() != encoded.length() {
             return MiniLMDenseTrace.failure()
@@ -1671,7 +1671,7 @@ fun denseAdapterTraceWithLayerDeltas(info: SafeTensorInfo, tokenIds: Array<Int>,
         encoded = layerOut
         layer = layer + 1
     }
-    let targetTrace = applyFinalDenseTrace(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], backend)
+    let targetTrace = applyFinalDenseTraceMaybeCached(cache, info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], backend)
     if not targetTrace.ok {
         return targetTrace
     }
@@ -1680,9 +1680,9 @@ fun denseAdapterTraceWithLayerDeltas(info: SafeTensorInfo, tokenIds: Array<Int>,
     while layer < readyLayers {
         var layerOut = Array<Float>()
         if layerDeltas.hasLayer(layer) {
-            layerOut = applyEncoderLayerWithDenseAdapterBackend(info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
+            layerOut = applyEncoderLayerMaybeCached(cache, info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
         } else {
-            layerOut = applyEncoderLayerBackend(info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
+            layerOut = applyEncoderLayerMaybeCachedBase(cache, info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
         }
         if layerOut.length() != tail.length() {
             return MiniLMDenseTrace.failure()
@@ -1694,16 +1694,16 @@ fun denseAdapterTraceWithLayerDeltas(info: SafeTensorInfo, tokenIds: Array<Int>,
     return MiniLMDenseTrace.success(targetTrace.seqLen, targetTrace.inputDim, targetTrace.hiddenSize, targetTrace.intermediateInput, targetTrace.intermediatePreActivation, targetTrace.ffInput, targetTrace.attentionSequenceInput, targetTrace.attentionQ, targetTrace.attentionK, targetTrace.attentionV, targetTrace.attentionContext, targetTrace.attentionOutputDenseWeight, targetTrace.attentionLayerNormInput, targetTrace.attentionNormWeight, targetTrace.intermediateDenseWeight, targetTrace.layerNormInput, targetTrace.normWeight, targetTrace.normBias, targetTrace.outputDenseWeight, targetTrace.outputSequence, finalMean)
 }
 
-fun embeddingDeltaTrace(info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, backend: String) r: MiniLMEmbeddingTrace {
-    let word = loadEmbeddingTensor(info, "embeddings.word_embeddings.weight", maxLoadElements)
+fun embeddingDeltaTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, readyLayers: Int, embeddingDeltas: MiniLMEmbeddingDeltas, layerDeltas: MiniLMLayerDeltas, backend: String) r: MiniLMEmbeddingTrace {
+    let word = cachedEmbeddingTensor(cache, info, "embeddings.word_embeddings.weight", maxLoadElements)
     if not word.ok { return MiniLMEmbeddingTrace.failure() }
-    let position = loadEmbeddingTensor(info, "embeddings.position_embeddings.weight", maxLoadElements)
+    let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
     if not position.ok { return MiniLMEmbeddingTrace.failure() }
-    let tokenType = loadEmbeddingTensor(info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    let tokenType = cachedEmbeddingTensor(cache, info, "embeddings.token_type_embeddings.weight", maxLoadElements)
     if not tokenType.ok { return MiniLMEmbeddingTrace.failure() }
-    let normWeight = loadEmbeddingTensor(info, "embeddings.LayerNorm.weight", maxLoadElements)
+    let normWeight = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.weight", maxLoadElements)
     if not normWeight.ok { return MiniLMEmbeddingTrace.failure() }
-    let normBias = loadEmbeddingTensor(info, "embeddings.LayerNorm.bias", maxLoadElements)
+    let normBias = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.bias", maxLoadElements)
     if not normBias.ok { return MiniLMEmbeddingTrace.failure() }
 
     let rawSequence = Array<Float>()
@@ -1742,9 +1742,9 @@ fun embeddingDeltaTrace(info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<
     while layer < readyLayers {
         var layerOut = Array<Float>()
         if layerDeltas.hasLayer(layer) {
-            layerOut = applyEncoderLayerWithDenseAdapterBackend(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
+            layerOut = applyEncoderLayerMaybeCached(cache, info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(intermediateSize, hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, backend)
         } else {
-            layerOut = applyEncoderLayerBackend(info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
+            layerOut = applyEncoderLayerMaybeCachedBase(cache, info, encoded, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
         }
         if layerOut.length() != encoded.length() {
             return MiniLMEmbeddingTrace.failure()

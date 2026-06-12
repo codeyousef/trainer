@@ -95,8 +95,9 @@ class Encoder {
     }
 
     fun encodeRawMean(text: String) r: Array<Float> {
-        let tokenIds = this.tokenizer.tokenIds(text)
-        let mask = this.tokenizer.attentionMask(text)
+        let tokenized = this.tokenizer.tokenized(text)
+        let tokenIds = tokenized.ids
+        let mask = tokenized.masks
         if this.modelEmbeddings.loaded {
             var modelMean = Array<Float>()
             if this.hasMiniLMAllLayerDeltaTarget() {
@@ -152,8 +153,9 @@ class Encoder {
         if not this.hasMiniLMLayerAdapterTarget() {
             return Array<Float>()
         }
-        let tokenIds = this.tokenizer.tokenIds(text)
-        let mask = this.tokenizer.attentionMask(text)
+        let tokenized = this.tokenizer.tokenized(text)
+        let tokenIds = tokenized.ids
+        let mask = tokenized.masks
         let layerMean = this.modelEmbeddings.encodeLayerMean(tokenIds, mask, this.minilmAdapterLayer)
         if layerMean.length() == this.embeddingDim {
             return layerMean
@@ -165,12 +167,15 @@ class Encoder {
         if not this.hasMiniLMDenseAdapterTarget() {
             return 0.0
         }
-        let qIds = this.tokenizer.tokenIds(queryText)
-        let qMask = this.tokenizer.attentionMask(queryText)
-        let pIds = this.tokenizer.tokenIds(positiveText)
-        let pMask = this.tokenizer.attentionMask(positiveText)
-        let nIds = this.tokenizer.tokenIds(negativeText)
-        let nMask = this.tokenizer.attentionMask(negativeText)
+        let qTokenized = this.tokenizer.tokenized(queryText)
+        let qIds = qTokenized.ids
+        let qMask = qTokenized.masks
+        let pTokenized = this.tokenizer.tokenized(positiveText)
+        let pIds = pTokenized.ids
+        let pMask = pTokenized.masks
+        let nTokenized = this.tokenizer.tokenized(negativeText)
+        let nIds = nTokenized.ids
+        let nMask = nTokenized.masks
         if this.hasMiniLMAllLayerDeltaTarget() {
             return this.modelEmbeddings.updateAllLayerDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, parameterRegistry, margin, lr, weightDecay, gradClip)
         }
