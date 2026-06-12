@@ -422,7 +422,7 @@ class MiniLMEmbeddings {
             }
             layer = layer - 1
         }
-        applyMiniLMLayerDeltaGradients(layerDeltas, gradDeltas, this.readyLayers, lr, weightDecay, gradClip)
+        applyMiniLMLayerBaseParameterGradients(info, layerDeltas, gradDeltas, this.readyLayers, this.maxLoadElements, lr, weightDecay, gradClip)
         let embeddingLoss = this.updateEmbeddingDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, embeddingDeltas, layerDeltas, margin, lr, weightDecay, gradClip)
         if embeddingLoss > 0.0 {
             lossSum = lossSum + embeddingLoss
@@ -2176,6 +2176,93 @@ fun applyMiniLMLayerDeltaGradients(layerDeltas: MiniLMLayerDeltas, gradDeltas: M
             layerDeltas.outputLayerNormDeltas[layer].applyGradients(gradDeltas.outputLayerNormDeltas[layer].weightDelta, gradDeltas.outputLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
         }
         layer = layer + 1
+    }
+}
+
+fun applyMiniLMLayerBaseParameterGradients(info: SafeTensorInfo, layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, readyLayers: Int, maxLoadElements: Int, lr: Float, weightDecay: Float, gradClip: Float) r: Void {
+    var scale = 1.0
+    if gradClip > 0.0 {
+        let norm = miniLMLayerDeltaGradNorm(gradDeltas, readyLayers)
+        if norm > gradClip {
+            scale = gradClip / norm
+        }
+    }
+    if scale != 1.0 {
+        scaleMiniLMLayerDeltaGradients(gradDeltas, readyLayers, scale)
+    }
+    var layer = 0
+    while layer < readyLayers and layer < layerDeltas.layers and layer < gradDeltas.layers {
+        if layerDeltas.hasLayer(layer) and gradDeltas.hasLayer(layer) {
+            applyMiniLMLayerBaseParameterGradientsAt(info, layerDeltas, gradDeltas, layer, maxLoadElements, lr, weightDecay)
+        }
+        layer = layer + 1
+    }
+}
+
+fun applyMiniLMLayerBaseParameterGradientsAt(info: SafeTensorInfo, layerDeltas: MiniLMLayerDeltas, gradDeltas: MiniLMLayerDeltas, layer: Int, maxLoadElements: Int, lr: Float, weightDecay: Float) r: Void {
+    let prefix = "encoder.layer." + layer.toString() + "."
+    let qWeight = loadEmbeddingTensor(info, prefix + "attention.self.query.weight", maxLoadElements)
+    let qBias = loadEmbeddingTensor(info, prefix + "attention.self.query.bias", maxLoadElements)
+    if qWeight.ok and qBias.ok {
+        layerDeltas.queryDeltas[layer].applyBaseParameterGradients(qWeight.values, qBias.values, gradDeltas.queryDeltas[layer].weightDelta, gradDeltas.queryDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.queryDeltas[layer].applyGradients(gradDeltas.queryDeltas[layer].weightDelta, gradDeltas.queryDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let kWeight = loadEmbeddingTensor(info, prefix + "attention.self.key.weight", maxLoadElements)
+    let kBias = loadEmbeddingTensor(info, prefix + "attention.self.key.bias", maxLoadElements)
+    if kWeight.ok and kBias.ok {
+        layerDeltas.keyDeltas[layer].applyBaseParameterGradients(kWeight.values, kBias.values, gradDeltas.keyDeltas[layer].weightDelta, gradDeltas.keyDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.keyDeltas[layer].applyGradients(gradDeltas.keyDeltas[layer].weightDelta, gradDeltas.keyDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let vWeight = loadEmbeddingTensor(info, prefix + "attention.self.value.weight", maxLoadElements)
+    let vBias = loadEmbeddingTensor(info, prefix + "attention.self.value.bias", maxLoadElements)
+    if vWeight.ok and vBias.ok {
+        layerDeltas.valueDeltas[layer].applyBaseParameterGradients(vWeight.values, vBias.values, gradDeltas.valueDeltas[layer].weightDelta, gradDeltas.valueDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.valueDeltas[layer].applyGradients(gradDeltas.valueDeltas[layer].weightDelta, gradDeltas.valueDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let attnWeight = loadEmbeddingTensor(info, prefix + "attention.output.dense.weight", maxLoadElements)
+    let attnBias = loadEmbeddingTensor(info, prefix + "attention.output.dense.bias", maxLoadElements)
+    if attnWeight.ok and attnBias.ok {
+        layerDeltas.attentionDenseDeltas[layer].applyBaseParameterGradients(attnWeight.values, attnBias.values, gradDeltas.attentionDenseDeltas[layer].weightDelta, gradDeltas.attentionDenseDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.attentionDenseDeltas[layer].applyGradients(gradDeltas.attentionDenseDeltas[layer].weightDelta, gradDeltas.attentionDenseDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let attnLnWeight = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.weight", maxLoadElements)
+    let attnLnBias = loadEmbeddingTensor(info, prefix + "attention.output.LayerNorm.bias", maxLoadElements)
+    if attnLnWeight.ok and attnLnBias.ok {
+        layerDeltas.attentionLayerNormDeltas[layer].applyBaseParameterGradients(attnLnWeight.values, attnLnBias.values, gradDeltas.attentionLayerNormDeltas[layer].weightDelta, gradDeltas.attentionLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.attentionLayerNormDeltas[layer].applyGradients(gradDeltas.attentionLayerNormDeltas[layer].weightDelta, gradDeltas.attentionLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let intermediateWeight = loadEmbeddingTensor(info, prefix + "intermediate.dense.weight", maxLoadElements)
+    let intermediateBias = loadEmbeddingTensor(info, prefix + "intermediate.dense.bias", maxLoadElements)
+    if intermediateWeight.ok and intermediateBias.ok {
+        layerDeltas.intermediateDeltas[layer].applyBaseParameterGradients(intermediateWeight.values, intermediateBias.values, gradDeltas.intermediateDeltas[layer].weightDelta, gradDeltas.intermediateDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.intermediateDeltas[layer].applyGradients(gradDeltas.intermediateDeltas[layer].weightDelta, gradDeltas.intermediateDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let outputWeight = loadEmbeddingTensor(info, prefix + "output.dense.weight", maxLoadElements)
+    let outputBias = loadEmbeddingTensor(info, prefix + "output.dense.bias", maxLoadElements)
+    if outputWeight.ok and outputBias.ok {
+        layerDeltas.outputDeltas[layer].applyBaseParameterGradients(outputWeight.values, outputBias.values, gradDeltas.outputDeltas[layer].weightDelta, gradDeltas.outputDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.outputDeltas[layer].applyGradients(gradDeltas.outputDeltas[layer].weightDelta, gradDeltas.outputDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    }
+
+    let outputLnWeight = loadEmbeddingTensor(info, prefix + "output.LayerNorm.weight", maxLoadElements)
+    let outputLnBias = loadEmbeddingTensor(info, prefix + "output.LayerNorm.bias", maxLoadElements)
+    if outputLnWeight.ok and outputLnBias.ok {
+        layerDeltas.outputLayerNormDeltas[layer].applyBaseParameterGradients(outputLnWeight.values, outputLnBias.values, gradDeltas.outputLayerNormDeltas[layer].weightDelta, gradDeltas.outputLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
+    } else {
+        layerDeltas.outputLayerNormDeltas[layer].applyGradients(gradDeltas.outputLayerNormDeltas[layer].weightDelta, gradDeltas.outputLayerNormDeltas[layer].biasDelta, lr, weightDecay, 0.0)
     }
 }
 

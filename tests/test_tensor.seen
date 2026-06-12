@@ -1,11 +1,20 @@
 import trainer.math_utils.{cosine}
 import trainer.optimizer.{AdamW, clipGlobalNorm}
+import trainer.dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
 import trainer.tensor.{Parameter, Tensor, tripletMarginLoss}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
         abort(message)
     }
+}
+
+fun closeEnough(value: Float, expected: Float) r: Bool {
+    let diff = value - expected
+    if diff < 0.0 {
+        return (0.0 - diff) < 0.0001
+    }
+    return diff < 0.0001
 }
 
 fun main() -> Int {
@@ -78,6 +87,43 @@ fun main() -> Int {
     expect(norm > 4.999 and norm < 5.001, "clip norm return")
     expect(clipParam.grad[0] > 0.599 and clipParam.grad[0] < 0.601, "clip grad x")
     expect(clipParam.grad[1] > 0.799 and clipParam.grad[1] < 0.801, "clip grad y")
+    let denseBaseWeight = Array<Float>()
+    denseBaseWeight.push(2.0)
+    denseBaseWeight.push(-1.0)
+    denseBaseWeight.push(0.5)
+    denseBaseWeight.push(4.0)
+    let denseBaseBias = Array<Float>()
+    denseBaseBias.push(-1.0)
+    denseBaseBias.push(3.0)
+    let zeroDenseGrad = Array<Float>()
+    zeroDenseGrad.push(0.0)
+    zeroDenseGrad.push(0.0)
+    zeroDenseGrad.push(0.0)
+    zeroDenseGrad.push(0.0)
+    let zeroBiasGrad = Array<Float>()
+    zeroBiasGrad.push(0.0)
+    zeroBiasGrad.push(0.0)
+    let denseDelta = DenseDeltaAdapter.identity(2, 2)
+    expect(denseDelta.applyBaseParameterGradients(denseBaseWeight, denseBaseBias, zeroDenseGrad, zeroBiasGrad, 0.1, 0.1, 0.0), "dense base parameter update")
+    expect(closeEnough(denseDelta.weightDelta[0], -0.02), "dense base weight decay delta")
+    expect(closeEnough(denseDelta.weightDelta[1], 0.01), "dense base negative weight decay delta")
+    expect(closeEnough(denseDelta.biasDelta[0], 0.01), "dense base bias decay delta")
+    expect(closeEnough(denseDelta.biasDelta[1], -0.03), "dense base positive bias decay delta")
+    let lnBaseWeight = Array<Float>()
+    lnBaseWeight.push(1.5)
+    lnBaseWeight.push(0.5)
+    let lnBaseBias = Array<Float>()
+    lnBaseBias.push(0.4)
+    lnBaseBias.push(-0.2)
+    let zeroLnGrad = Array<Float>()
+    zeroLnGrad.push(0.0)
+    zeroLnGrad.push(0.0)
+    let lnDelta = LayerNormDeltaAdapter.identity(2)
+    expect(lnDelta.applyBaseParameterGradients(lnBaseWeight, lnBaseBias, zeroLnGrad, zeroLnGrad, 0.1, 0.1, 0.0), "layernorm base parameter update")
+    expect(closeEnough(lnDelta.weightDelta[0], -0.015), "layernorm base weight decay delta")
+    expect(closeEnough(lnDelta.weightDelta[1], -0.005), "layernorm base second weight decay delta")
+    expect(closeEnough(lnDelta.biasDelta[0], -0.004), "layernorm base bias decay delta")
+    expect(closeEnough(lnDelta.biasDelta[1], 0.002), "layernorm base negative bias decay delta")
     println("PASS test_tensor")
     return 0
 }
