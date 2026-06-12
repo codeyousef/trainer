@@ -4,7 +4,7 @@ import encoder.{Encoder}
 import io.file.{exists}
 import io_utils.{writeAtomicText}
 import json.builder.{escapeJsonString}
-import jsonl.{TripletExample, readTriplets}
+import jsonl.{TripletExample, readTripletsLimited}
 import math_utils.{cosine}
 
 class EvalResult {
@@ -47,15 +47,16 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
     if total > 0 {
         rate = answered.toFloat() / total.toFloat()
     }
-    writeAtomicText(cfg.evalResultsPath, evalJson(total, answered, rate, domains, totals, answeredTotals))
+    writeAtomicText(cfg.evalResultsPath, evalJson(cfg, total, answered, rate, domains, totals, answeredTotals))
     return EvalResult.new(total, answered, rate, cfg.evalResultsPath)
 }
 
 fun readEvalDataset(cfg: TrainerConfig) r: Array<TripletExample> {
     if cfg.testJsonlPath.length() > 0 and exists(cfg.testJsonlPath) {
-        return readTriplets(cfg.testJsonlPath)
+        return readTripletsLimited(cfg.testJsonlPath, cfg.maxEvalTriplets)
     }
-    return holdoutSplit(readCalibrationDataset(cfg), cfg.seed)
+    let heldOut = holdoutSplit(readCalibrationDataset(cfg), cfg.seed)
+    return limitTriplets(heldOut, cfg.maxEvalTriplets)
 }
 
 fun evalWithCalibration(cfg: TrainerConfig, encoder: Encoder) r: EvalResult {
@@ -63,14 +64,29 @@ fun evalWithCalibration(cfg: TrainerConfig, encoder: Encoder) r: EvalResult {
     return evaluate(cfg, encoder, thresholds)
 }
 
-fun evalJson(total: Int, answered: Int, rate: Float, domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>) r: String {
+fun evalJson(cfg: TrainerConfig, total: Int, answered: Int, rate: Float, domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>) r: String {
     return "{\n"
         + "  \"total\": " + total.toString() + ",\n"
         + "  \"answered\": " + answered.toString() + ",\n"
         + "  \"answer_rate\": " + rate.toString() + ",\n"
+        + "  \"max_eval_triplets\": " + cfg.maxEvalTriplets.toString() + ",\n"
+        + "  \"bounded_eval_dataset\": " + (cfg.maxEvalTriplets > 0).toString() + ",\n"
         + "  \"pass_overall_88\": " + boolJson(rate >= 0.88) + ",\n"
         + "  \"per_domain\": " + perDomainJson(domains, totals, answeredTotals) + "\n"
         + "}\n"
+}
+
+fun limitTriplets(items: Array<TripletExample>, maxItems: Int) r: Array<TripletExample> {
+    if maxItems <= 0 or items.length() <= maxItems {
+        return items
+    }
+    let out = Array<TripletExample>()
+    var i = 0
+    while i < items.length() and i < maxItems {
+        out.push(items[i])
+        i = i + 1
+    }
+    return out
 }
 
 fun perDomainJson(domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>) r: String {

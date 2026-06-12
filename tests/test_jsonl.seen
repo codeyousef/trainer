@@ -1,5 +1,5 @@
 import trainer.io_utils.{writeAtomicText}
-import trainer.jsonl.{parseTripletLine, tripletToJson}
+import trainer.jsonl.{parseTripletLine, readTripletsLimited, tripletToJson}
 import trainer.config.{readConfig}
 import trainer.source_adapters.{readSourcePairs}
 import trainer.tokenizer.{Tokenizer}
@@ -17,6 +17,13 @@ fun main() -> Int {
     expect(item.positiveChunkText == "p", "positive parse")
     expect(item.hardNegativeChunkText == "n", "negative parse")
     expect(tripletToJson(item) == line, "triplet json round trip")
+    let cappedTripletsPath = "/tmp/seen_trainer_capped_triplets.jsonl"
+    writeAtomicText(cappedTripletsPath,
+        line + "\n"
+        + "{\"query_text\":\"q2\",\"positive_chunk_text\":\"p2\",\"hard_negative_chunk_text\":\"n2\",\"domain\":\"d2\",\"source\":\"s2\"}\n")
+    let cappedTriplets = readTripletsLimited(cappedTripletsPath, 1)
+    expect(cappedTriplets.length() == 1, "limited triplet reader cap")
+    expect(cappedTriplets[0].source == "s", "limited triplet reader keeps first row")
 
     let tokDir = "/tmp/seen_trainer_tokenizer"
     writeAtomicText(tokDir + "/tokenizer.json",
@@ -56,6 +63,11 @@ fun main() -> Int {
         + "\"source_query_column\":\"instruction\","
         + "\"source_positive_column\":\"response\","
         + "\"min_text_length\":3,"
+        + "\"max_source_pairs\":1,"
+        + "\"max_mined_triplets\":2,"
+        + "\"max_train_triplets\":3,"
+        + "\"max_calibration_triplets\":4,"
+        + "\"max_eval_triplets\":5,"
         + "\"parameter_registry_load_cap_elements\":7,"
         + "\"train_all_minilm_layers\":false,"
         + "\"max_minilm_layers\":1,"
@@ -63,6 +75,11 @@ fun main() -> Int {
         + "\"learning_rate\":2e-5}")
     let cfg = readConfig(sourceDir + "/config.json")
     expect(cfg.learningRate > 0.000019 and cfg.learningRate < 0.000021, "scientific config float")
+    expect(cfg.maxSourcePairs == 1, "max source pairs config")
+    expect(cfg.maxMinedTriplets == 2, "max mined triplets config")
+    expect(cfg.maxTrainTriplets == 3, "max train triplets config")
+    expect(cfg.maxCalibrationTriplets == 4, "max calibration triplets config")
+    expect(cfg.maxEvalTriplets == 5, "max eval triplets config")
     expect(cfg.parameterRegistryLoadCapElements == 7, "registry cap config")
     expect(not cfg.trainAllMiniLMLayers, "train all layers config")
     expect(cfg.maxMiniLMLayers == 1, "max minilm layers config")
@@ -75,11 +92,13 @@ fun main() -> Int {
 
     writeAtomicText(sourceDir + "/pairs.JSONL",
         "{\"query_text\":\"tiny\",\"positive_chunk_text\":\"valid enough\",\"domain\":\"json\",\"source\":\"one\"}\n"
-        + "{\"query_text\":\"long enough\",\"positive_chunk_text\":\"also valid\",\"domain\":\"json\",\"source\":\"two\"}\n")
+        + "{\"query_text\":\"long enough\",\"positive_chunk_text\":\"also valid\",\"domain\":\"json\",\"source\":\"two\"}\n"
+        + "{\"query_text\":\"another long\",\"positive_chunk_text\":\"third valid\",\"domain\":\"json\",\"source\":\"three\"}\n")
     writeAtomicText(sourceDir + "/json_config.json",
         "{\"source_data_path\":\"" + sourceDir + "/pairs.JSONL\","
         + "\"source_format\":\"JSONL\","
-        + "\"min_text_length\":8}")
+        + "\"min_text_length\":8,"
+        + "\"max_source_pairs\":1}")
     let jsonCfg = readConfig(sourceDir + "/json_config.json")
     let jsonPairs = readSourcePairs(jsonCfg)
     expect(jsonPairs.length() == 1, "jsonl source adapter min length")

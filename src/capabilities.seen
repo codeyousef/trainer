@@ -1,6 +1,5 @@
 import config.{TrainerConfig}
 import io.file.{exists}
-import tensor_kernels.{trainerTensorKernelDeclarationCount}
 
 fun trainerTrainingMode() r: String {
     return "seen_native_minilm_embedding_and_layer_delta_v1"
@@ -10,72 +9,26 @@ fun trainerCapabilityFields(cfg: TrainerConfig) r: String {
     return "  \"implementation_language\": \"seen\",\n"
         + "  \"training_mode\": \"" + trainerTrainingMode() + "\",\n"
         + "  \"pooling_contract\": \"mean_pooling_for_training_eval_inference\",\n"
-        + "  \"base_encoder_forward\": \"bert_minilm_safetensors_f32_with_gpu_tensor_projection_dispatch\",\n"
+        + "  \"backend\": \"" + cfg.backend + "\",\n"
         + "  \"base_encoder_forward_ready_when_weights_loaded\": " + exists(cfg.modelWeightsPath()).toString() + ",\n"
-        + "  \"trainable_surfaces\": [\"sparse_word_embedding_rows_delta\", \"sparse_position_embedding_rows_delta\", \"sparse_token_type_embedding_rows_delta\", \"embedding_layernorm_delta\", \"all_ready_layers_attention_query_delta\", \"all_ready_layers_attention_key_delta\", \"all_ready_layers_attention_value_delta\", \"all_ready_layers_attention_output_dense_delta\", \"all_ready_layers_attention_output_layernorm_delta\", \"all_ready_layers_intermediate_dense_delta\", \"all_ready_layers_output_dense_delta\", \"all_ready_layers_output_layernorm_delta\", \"minilm_output_dense_lora\", \"minilm_layer_low_rank_projection\", \"mean_pool_low_rank_projection\", \"final_low_rank_projection\"],\n"
-        + "  \"full_base_model_weight_backprop\": true,\n"
-        + "  \"full_base_model_weight_backprop_scope\": \"MiniLM_encoder_surfaces_when_all_required_safetensors_are_loaded\",\n"
-        + "  \"base_weight_parameterization\": \"safetensors_base_plus_delta_parameters_materialized_into_base_weights\",\n"
-        + "  \"safetensors_parameter_registry\": true,\n"
-        + "  \"safetensors_parameter_registry_artifact\": \"" + cfg.outputModelDir + "/minilm_parameter_registry.json\",\n"
-        + "  \"safetensors_parameter_registry_buffers\": [\"value\", \"grad\", \"adam_m\", \"adam_v\"],\n"
-        + "  \"safetensors_parameter_registry_optimizer\": \"adamw_on_registry_parameter_buffers_then_delta_artifact_sync\",\n"
-        + "  \"adapter_and_delta_backprop\": true,\n"
-        + "  \"embedding_delta_backprop\": true,\n"
-        + "  \"embedding_delta_update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
-        + "  \"embedding_delta_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
-        + "  \"all_ready_layer_delta_backprop\": true,\n"
-        + "  \"direct_safetensors_base_weight_update\": " + cfg.copyBaseArtifacts.toString() + ",\n"
-        + "  \"direct_safetensors_base_weight_update_mode\": \"apply_adamw_to_loaded_base_plus_delta_then_materialize_delta_into_safetensors_base_weights\",\n"
-        + "  \"direct_safetensors_base_weight_update_artifact\": \"" + cfg.outputModelDir + "/seen_trained_base_model.safetensors\",\n"
-        + "  \"direct_safetensors_base_weight_update_manifest\": \"" + cfg.outputModelDir + "/seen_base_weight_update_manifest.json\",\n"
-        + "  \"all_ready_layer_delta_update_mode\": \"accumulate_all_ready_layer_gradients_then_global_clip_then_base_parameter_adamw\",\n"
-        + "  \"all_ready_layer_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
-        + "  \"target_layer_backprop_for_attention_query_delta\": true,\n"
-        + "  \"target_layer_backprop_for_attention_key_delta\": true,\n"
-        + "  \"target_layer_backprop_for_attention_value_delta\": true,\n"
-        + "  \"target_layer_backprop_for_attention_output_dense_delta\": true,\n"
-        + "  \"target_layer_backprop_for_attention_output_layernorm_delta\": true,\n"
-        + "  \"target_layer_backprop_for_intermediate_dense_delta\": true,\n"
-        + "  \"downstream_tail_backprop_for_dense_delta\": true,\n"
-        + "  \"downstream_tail_backprop_for_layernorm_delta\": true,\n"
-        + "  \"optimizer\": \"adamw\",\n"
-        + "  \"global_grad_clip\": " + cfg.gradClip.toString() + ",\n"
-        + "  \"gpu_runtime_required_for_gpu_backend\": true,\n"
-        + "  \"hardware_gpu_required_for_gpu_backend\": true,\n"
-        + "  \"gpu_tensor_kernel_declarations\": " + trainerTensorKernelDeclarationCount().toString() + ",\n"
-        + "  \"gpu_shader_surface_declared\": true,\n"
-        + "  \"gpu_shader_surface_checked_by_seen\": true,\n"
-        + "  \"gpu_shader_artifacts_emitted\": true,\n"
-        + "  \"gpu_shader_artifact_format\": \"glsl_and_spirv_reflection\",\n"
-        + "  \"gpu_tensor_dispatch_implemented\": true,\n"
-        + "  \"triplet_margin_loss_gpu_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"triplet_margin_loss_gpu_kernel\": \"tensorTripletMarginLoss\",\n"
-        + "  \"minilm_forward_gpu_projection_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_forward_gpu_projection_kernel\": \"tensorMatmul\",\n"
-        + "  \"minilm_forward_layernorm_gpu_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_forward_layernorm_gpu_kernels\": [\"tensorLayerNormRows\", \"tensorElementwiseMul\", \"tensorElementwiseAdd\"],\n"
-        + "  \"minilm_backward_gpu_dense_projection_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_backward_gpu_dense_projection_kernels\": [\"tensorMatmul_dense_input_gradient\", \"tensorMatmul_dense_weight_gradient\", \"tensorMatmul_bias_column_sum\"],\n"
-        + "  \"minilm_backward_gpu_gelu_derivative_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_backward_gpu_gelu_product_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_backward_gpu_gelu_kernel\": \"tensorGeluBackward\",\n"
-        + "  \"minilm_backward_attention_softmax_gpu_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_backward_attention_softmax_gpu_kernels\": [\"tensorSoftmaxRows\", \"tensorElementwiseMul\", \"tensorElementwiseSub\", \"tensorRowSums\"],\n"
-        + "  \"minilm_backward_attention_qkv_gradient_gpu_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_backward_attention_qkv_gradient_kernels\": [\"tensorMatmul\", \"tensorScale\"],\n"
-        + "  \"minilm_attention_score_context_gpu_dispatch\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_attention_score_context_gpu_kernels\": [\"tensorAttentionContext\", \"tensorMatmul\", \"tensorScale\", \"tensorSoftmaxRows\"],\n"
-        + "  \"cpu_scalar_reference_path\": true,\n"
-        + "  \"hard_negative_mining\": \"precomputed_normalized_inner_product_top_k_with_domain_source_exclusion\",\n"
-        + "  \"hard_negative_mining_explicit_row_normalization\": true,\n"
-        + "  \"hard_negative_mining_gpu_row_normalization\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"hard_negative_mining_gpu_row_normalization_kernel\": \"tensorNormalizeRows\",\n"
-        + "  \"hard_negative_mining_gpu_topk\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"hard_negative_mining_gpu_kernel\": \"tensorTopKInnerProduct\",\n"
-        + "  \"hard_negative_mining_cpu_fallback\": true,\n"
+        + "  \"source_input_streaming\": true,\n"
+        + "  \"bounded_data_mode\": " + boundedDataMode(cfg).toString() + ",\n"
+        + "  \"max_source_pairs\": " + cfg.maxSourcePairs.toString() + ",\n"
+        + "  \"max_mined_triplets\": " + cfg.maxMinedTriplets.toString() + ",\n"
+        + "  \"max_train_triplets\": " + cfg.maxTrainTriplets.toString() + ",\n"
+        + "  \"max_calibration_triplets\": " + cfg.maxCalibrationTriplets.toString() + ",\n"
+        + "  \"max_eval_triplets\": " + cfg.maxEvalTriplets.toString() + ",\n"
+        + "  \"trainable_surface_summary\": \"MiniLM deltas and projection adapters\",\n"
+        + "  \"copy_base_artifacts\": " + cfg.copyBaseArtifacts.toString() + ",\n"
+        + "  \"train_all_minilm_layers\": " + cfg.trainAllMiniLMLayers.toString() + ",\n"
+        + "  \"gpu_backend_requested\": " + (cfg.backendGpu == 1).toString() + ",\n"
+        + "  \"hard_negative_mining\": \"normalized_top_k_with_domain_source_exclusion\",\n"
         + "  \"calibration\": \"per_domain_percentile_positive_cosine\",\n"
         + "  \"package_format\": \"sentence_transformer_compatible_with_seen_manifests\""
+}
+
+fun boundedDataMode(cfg: TrainerConfig) r: Bool {
+    return cfg.maxSourcePairs > 0 or cfg.maxMinedTriplets > 0 or cfg.maxTrainTriplets > 0 or cfg.maxCalibrationTriplets > 0 or cfg.maxEvalTriplets > 0
 }
 
 fun trainerCapabilitiesJson(cfg: TrainerConfig) r: String {
@@ -84,6 +37,13 @@ fun trainerCapabilitiesJson(cfg: TrainerConfig) r: String {
         + "}\n"
 }
 
-fun trainerPackageReadmeNote() r: String {
-    return "The trainer is implemented in Seen. This v1 trains Seen-native MiniLM sparse embedding deltas, embedding LayerNorm deltas, adapter surfaces, and all-ready-layer query/key/value, attention-output, intermediate, output, and LayerNorm delta surfaces, applies AdamW to loaded safetensors base-plus-delta parameters, flushes the resulting Seen deltas into a safetensors base-weight artifact, uses mean pooling consistently, and emits a SentenceTransformer-compatible package with Seen manifests. Full MiniLM encoder weight backprop is represented with base-aware delta parameters that are materialized into safetensors base weights when all required local model tensors are loaded; packages include a safetensors-backed MiniLM parameter registry with value, grad, and Adam moment buffers for loaded tensors, and loaded sparse embedding plus MiniLM layer-surface optimizer steps run through that registry before syncing back to delta artifacts; the scalar tensor path is the correctness reference, triplet-margin loss evaluation, hard-negative row normalization, and hard-negative top-k can dispatch through Seen GPU kernels, MiniLM forward projections, LayerNorm forward normalization/affine, and dense backward projection gradients can dispatch through Seen's Vulkan GPU runtime when backend is gpu and shader artifacts are present, GELU backward dispatches derivative and product evaluation through tensorGeluBackward, attention context dispatches through tensorAttentionContext with Tensor matmul/scale/softmax composition as fallback, attention softmax backward dispatches through Tensor softmax/elementwise/row-reduction GPU kernels, and Q/K/V attention-gradient products dispatch through Tensor matmul/scale on gpu configs.\n"
+fun trainerPackageReadmeNote(cfg: TrainerConfig) r: String {
+    return "The trainer is implemented in Seen, uses mean pooling for training/evaluation/inference, and emits a SentenceTransformer-compatible package with Seen manifests. This package " + packageBaseArtifactNote(cfg) + ".\n"
+}
+
+fun packageBaseArtifactNote(cfg: TrainerConfig) r: String {
+    if cfg.copyBaseArtifacts {
+        return "flushes Seen deltas into a safetensors base-weight artifact"
+    }
+    return "persists Seen deltas as package-side delta artifacts without copying base safetensors"
 }

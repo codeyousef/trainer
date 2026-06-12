@@ -1,10 +1,13 @@
 import config.{TrainerConfig}
-import io.file.{readText}
-import jsonl.{PairExample, readPairsWithMinLength}
+import io.file.{readBytesRange, readText, size}
+import jsonl.{PairExample, readPairsWithMinLengthLimited}
 import str.string.{split, trim}
 
 fun readSourcePairs(cfg: TrainerConfig) r: Array<PairExample> {
-    let path = if cfg.sourceDataPath.length() > 0 { cfg.sourceDataPath } else { cfg.trainJsonlPath }
+    var path = cfg.trainJsonlPath
+    if cfg.sourceDataPath.length() > 0 {
+        path = cfg.sourceDataPath
+    }
     let format = normalizeSourceFormat(cfg.sourceFormat, path)
     if format == "csv" {
         return readDelimitedPairs(path, ",", cfg)
@@ -12,7 +15,7 @@ fun readSourcePairs(cfg: TrainerConfig) r: Array<PairExample> {
     if format == "tsv" {
         return readDelimitedPairs(path, "\t", cfg)
     }
-    return readPairsWithMinLength(path, cfg.minTextLength)
+    return readPairsWithMinLengthLimited(path, cfg.minTextLength, cfg.maxSourcePairs)
 }
 
 fun normalizeSourceFormat(format: String, path: String) r: String {
@@ -31,6 +34,10 @@ fun normalizeSourceFormat(format: String, path: String) r: String {
 }
 
 fun readDelimitedPairs(path: String, delimiter: String, cfg: TrainerConfig) r: Array<PairExample> {
+    let streamed = readDelimitedPairsStreamed(path, delimiter, cfg)
+    if streamed.length() > 0 or cfg.maxSourcePairs > 0 {
+        return streamed
+    }
     let content = readText(path)
     let lines = split(content, "\n")
     let out = Array<PairExample>()
@@ -58,11 +65,119 @@ fun readDelimitedPairs(path: String, delimiter: String, cfg: TrainerConfig) r: A
             let s = fieldAt(row, sCol)
             if q.length() >= cfg.minTextLength and p.length() >= cfg.minTextLength {
                 out.push(PairExample.new(q, p, d, s))
+                if sourceReachedLimit(out.length(), cfg.maxSourcePairs) {
+                    return out
+                }
             }
         }
         i = i + 1
     }
     return out
+}
+
+fun readDelimitedPairsStreamed(path: String, delimiter: String, cfg: TrainerConfig) r: Array<PairExample> {
+    let out = Array<PairExample>()
+    let byteCount = size(path)
+    if byteCount < 0 {
+        return out
+    }
+    var headerFound = false
+    var qCol = -1
+    var pCol = -1
+    var dCol = -1
+    var sCol = -1
+    var line = ""
+    var offset = 0
+    while offset < byteCount {
+        let bytes = readBytesRange(path, offset, sourceStreamChunkSize(byteCount - offset))
+        if bytes.length() == 0 {
+            offset = byteCount
+        } else {
+            offset = offset + bytes.length()
+            var i = 0
+            while i < bytes.length() {
+                let ch = bytes[i]
+                if ch == 10 {
+                    let status = processDelimitedLine(out, line, delimiter, cfg, headerFound, qCol, pCol, dCol, sCol)
+                    headerFound = status.headerFound
+                    qCol = status.queryColumn
+                    pCol = status.positiveColumn
+                    dCol = status.domainColumn
+                    sCol = status.sourceColumn
+                    if status.limitReached {
+                        return out
+                    }
+                    line = ""
+                } else if ch != 13 {
+                    line = line + String.fromCharCode(ch)
+                }
+                i = i + 1
+            }
+        }
+    }
+    if line.length() > 0 {
+        let status = processDelimitedLine(out, line, delimiter, cfg, headerFound, qCol, pCol, dCol, sCol)
+        headerFound = status.headerFound
+    }
+    return out
+}
+
+fun sourceStreamChunkSize(remaining: Int) r: Int {
+    if remaining < 65536 {
+        return remaining
+    }
+    return 65536
+}
+
+class DelimitedReadStatus {
+    var headerFound: Bool
+    var queryColumn: Int
+    var positiveColumn: Int
+    var domainColumn: Int
+    var sourceColumn: Int
+    var limitReached: Bool
+
+    static fun new(headerFound: Bool, queryColumn: Int, positiveColumn: Int, domainColumn: Int, sourceColumn: Int, limitReached: Bool) r: DelimitedReadStatus {
+        return DelimitedReadStatus{
+            headerFound: headerFound,
+            queryColumn: queryColumn,
+            positiveColumn: positiveColumn,
+            domainColumn: domainColumn,
+            sourceColumn: sourceColumn,
+            limitReached: limitReached
+        }
+    }
+}
+
+fun processDelimitedLine(out: Array<PairExample>, lineText: String, delimiter: String, cfg: TrainerConfig, headerFound: Bool, qCol: Int, pCol: Int, dCol: Int, sCol: Int) r: DelimitedReadStatus {
+    let rowText = trim(lineText)
+    if rowText.length() == 0 {
+        return DelimitedReadStatus.new(headerFound, qCol, pCol, dCol, sCol, false)
+    }
+    if not headerFound {
+        let headers = splitDelimitedLine(rowText, delimiter)
+        let queryColumn = findQueryColumn(headers, cfg.sourceQueryColumn)
+        let positiveColumn = findPositiveColumn(headers, cfg.sourcePositiveColumn)
+        let domainColumn = findHeader(headers, cfg.sourceDomainColumn)
+        let sourceColumn = findHeader(headers, cfg.sourceSourceColumn)
+        return DelimitedReadStatus.new(true, queryColumn, positiveColumn, domainColumn, sourceColumn, false)
+    }
+    if qCol < 0 or pCol < 0 {
+        return DelimitedReadStatus.new(headerFound, qCol, pCol, dCol, sCol, false)
+    }
+    let row = splitDelimitedLine(rowText, delimiter)
+    let q = fieldAt(row, qCol)
+    let p = fieldAt(row, pCol)
+    let d = fieldAt(row, dCol)
+    let s = fieldAt(row, sCol)
+    if q.length() >= cfg.minTextLength and p.length() >= cfg.minTextLength {
+        out.push(PairExample.new(q, p, d, s))
+    }
+    return DelimitedReadStatus.new(headerFound, qCol, pCol, dCol, sCol, sourceReachedLimit(out.length(), cfg.maxSourcePairs))
+}
+
+fun sourceReachedLimit(count: Int, maxItems: Int) r: Bool {
+    return maxItems > 0 and count >= maxItems
 }
 
 fun splitDelimitedLine(line: String, delimiter: String) r: Array<String> {

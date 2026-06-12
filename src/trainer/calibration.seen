@@ -3,7 +3,7 @@ import encoder.{Encoder}
 import io.file.{exists}
 import io_utils.{writeAtomicText}
 import json.builder.{escapeJsonString}
-import jsonl.{TripletExample, readTriplets}
+import jsonl.{TripletExample, readTripletsLimited}
 import math_utils.{cosine, percentile, deterministicShuffleIndices}
 
 class DomainThreshold {
@@ -46,13 +46,13 @@ fun calibrateThresholds(cfg: TrainerConfig, encoder: Encoder) r: Array<DomainThr
 
 fun readCalibrationDataset(cfg: TrainerConfig) r: Array<TripletExample> {
     if exists(cfg.minedJsonlPath) {
-        return readTriplets(cfg.minedJsonlPath)
+        return readTripletsLimited(cfg.minedJsonlPath, cfg.maxCalibrationTriplets)
     }
     if cfg.trainJsonlPath.length() > 0 and exists(cfg.trainJsonlPath) {
-        return readTriplets(cfg.trainJsonlPath)
+        return readTripletsLimited(cfg.trainJsonlPath, cfg.maxCalibrationTriplets)
     }
     if cfg.testJsonlPath.length() > 0 and exists(cfg.testJsonlPath) {
-        return readTriplets(cfg.testJsonlPath)
+        return readTripletsLimited(cfg.testJsonlPath, cfg.maxCalibrationTriplets)
     }
     return Array<TripletExample>()
 }

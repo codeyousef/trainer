@@ -1,7 +1,7 @@
 import trainer.config.{readConfig}
 import trainer.calibration.{DomainThreshold, thresholdsJson}
 import trainer.encoder.{Encoder}
-import trainer.io.file.{exists}
+import trainer.io.file.{deleteFile, exists}
 import trainer.io_utils.{writeAtomicText}
 import trainer.jsonl.{PairExample}
 import trainer.miner.{MiningEmbeddingMatrix, buildPositiveEmbeddingMatrix, buildPositiveEmbeddingMatrixBackend, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
@@ -59,6 +59,38 @@ fun stringContains(text: String, needle: String) r: Bool {
     return false
 }
 
+fun cleanPipelineOutputs() r: Void {
+    let _ = deleteFile("/tmp/seen_trainer_test/out/mined.jsonl")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/training_config.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/thresholds.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/eval_results.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/modules.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/sentence_bert_config.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/1_Pooling/config.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/README.md")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/adapter.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/layer_adapter.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/minilm_layer_adapter.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_trainer_capabilities.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/minilm_parameter_registry.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/minilm_weight_map.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/model.safetensors.manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_adapter_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_layer_adapter_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_layer_adapter_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_dense_adapter_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_dense_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_embedding_deltas_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_all_layer_deltas_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_intermediate_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_query_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_key_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_value_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_attention_dense_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_attention_layernorm_delta_manifest.json")
+    let _ = deleteFile("/tmp/seen_trainer_test/out/model/seen_minilm_layernorm_delta_manifest.json")
+}
+
 fun main() -> Int {
     expect(normalizedTopK(16, 3) == 3, "top k clamps to candidate count")
     expect(normalizedTopK(0, 3) == 1, "top k defaults to one candidate")
@@ -96,13 +128,13 @@ fun main() -> Int {
 
     let dataPath = "/tmp/seen_trainer_test/train.jsonl"
     let cfgPath = "/tmp/seen_trainer_test/config.json"
+    cleanPipelineOutputs()
     writeAtomicText(dataPath,
         "{\"query_text\":\"alpha question\",\"positive_chunk_text\":\"alpha answer\",\"domain\":\"a\",\"source\":\"one\"}\n"
         + "{\"query_text\":\"beta question\",\"positive_chunk_text\":\"beta answer\",\"domain\":\"b\",\"source\":\"two\"}\n"
         + "{\"query_text\":\"gamma question\",\"positive_chunk_text\":\"gamma answer\",\"domain\":\"c\",\"source\":\"three\"}\n")
     writeAtomicText(cfgPath,
-        "{"
-        + "\"train_jsonl_path\":\"" + dataPath + "\","
+        "{\"train_jsonl_path\":\"" + dataPath + "\","
         + "\"mined_jsonl_path\":\"/tmp/seen_trainer_test/out/mined.jsonl\","
         + "\"output_model_dir\":\"/tmp/seen_trainer_test/out/model\","
         + "\"thresholds_path\":\"/tmp/seen_trainer_test/out/model/thresholds.json\","
@@ -110,10 +142,13 @@ fun main() -> Int {
         + "\"backend\":\"cpu\","
         + "\"embedding_dim\":16,"
         + "\"max_sequence_length\":16,"
+        + "\"quality_margin\":-2.0,"
+        + "\"copy_base_artifacts\":false,"
         + "\"epochs\":1"
         + "}")
 
     let cfg = readConfig(cfgPath)
+    expect(cfg.trainJsonlPath == dataPath, "pipeline config train path")
     let pipeline = Pipeline.new(cfg)
     let code = pipeline.runAll()
     expect(code == 0, "runAll should succeed")

@@ -57,6 +57,10 @@ fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
         )
         if passesQualityFilter(candidate, encoder, cfg.qualityMargin) {
             out.push(candidate)
+            if cfg.maxMinedTriplets > 0 and out.length() >= cfg.maxMinedTriplets {
+                writeAtomicText(cfg.minedJsonlPath, tripletsToJsonl(out))
+                return MineResult.new(out.length(), cfg.minedJsonlPath)
+            }
         }
         i = i + 1
     }

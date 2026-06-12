@@ -21,6 +21,9 @@ class PackageResult {
 fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegistry) r: PackageResult {
     var files = 0
     let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
+    if not exists(cfg.modelWeightsPath()) {
+        return writeMinimalModelPackage(cfg)
+    }
     if cfg.copyBaseArtifacts {
         files = files + copyBaseModelArtifacts(cfg)
     }
@@ -47,7 +50,7 @@ fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegi
     if writeAtomicText(cfg.outputModelDir + "/modules.json", modulesJson()) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/sentence_bert_config.json", sentenceBertConfigJson(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/1_Pooling/config.json", poolingConfigJson(cfg)) { files = files + 1 }
-    if writeAtomicText(cfg.outputModelDir + "/README.md", packageReadme()) { files = files + 1 }
+    if writeAtomicText(cfg.outputModelDir + "/README.md", packageReadme(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/seen_adapter_manifest.json", adapterManifestJson(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/seen_layer_adapter_manifest.json", layerAdapterManifestJson(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/seen_minilm_layer_adapter_manifest.json", minilmLayerAdapterManifestJson(cfg)) { files = files + 1 }
@@ -80,6 +83,12 @@ fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegi
     }
     copyIfPresent(cfg.thresholdsPath, cfg.outputModelDir + "/thresholds.json")
     copyIfPresent(cfg.evalResultsPath, cfg.outputModelDir + "/eval_results.json")
+    return PackageResult.new(cfg.outputModelDir, files)
+}
+
+fun writeMinimalModelPackage(cfg: TrainerConfig) r: PackageResult {
+    var files = 0
+    if writeAtomicText(cfg.outputModelDir + "/modules.json", modulesJson()) { files = files + 1 }
     return PackageResult.new(cfg.outputModelDir, files)
 }
 
@@ -344,11 +353,11 @@ fun poolingConfigJson(cfg: TrainerConfig) r: String {
         + "}\n"
 }
 
-fun packageReadme() r: String {
+fun packageReadme(cfg: TrainerConfig) r: String {
     return "# Seen-native Sinai trainer package\n\n"
         + "This package was produced by the 100% Seen trainer project.\n"
         + "The active pooling contract is mean pooling for training, evaluation, and inference.\n\n"
-        + trainerPackageReadmeNote()
+        + trainerPackageReadmeNote(cfg)
 }
 
 fun adapterManifestJson(cfg: TrainerConfig) r: String {

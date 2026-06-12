@@ -1,4 +1,4 @@
-import io.file.{readText}
+import io.file.{readBytesRange, readText, size}
 import json.builder.{escapeJsonString}
 import str.string.{split, trim}
 
@@ -96,6 +96,14 @@ fun parsePairLine(line: String) r: PairExample {
 }
 
 fun readTriplets(path: String) r: Array<TripletExample> {
+    return readTripletsLimited(path, 0)
+}
+
+fun readTripletsLimited(path: String, maxItems: Int) r: Array<TripletExample> {
+    let streamed = readTripletsStreamed(path, maxItems)
+    if streamed.length() > 0 or maxItems > 0 {
+        return streamed
+    }
     let content = readText(path)
     let lines = split(content, "\n")
     let items = Array<TripletExample>()
@@ -106,6 +114,9 @@ fun readTriplets(path: String) r: Array<TripletExample> {
             let item = parseTripletLine(line)
             if item.queryText.length() > 0 and item.positiveChunkText.length() > 0 {
                 items.push(item)
+                if reachedLimit(items.length(), maxItems) {
+                    return items
+                }
             }
         }
         i = i + 1
@@ -118,6 +129,14 @@ fun readPairs(path: String) r: Array<PairExample> {
 }
 
 fun readPairsWithMinLength(path: String, minTextLength: Int) r: Array<PairExample> {
+    return readPairsWithMinLengthLimited(path, minTextLength, 0)
+}
+
+fun readPairsWithMinLengthLimited(path: String, minTextLength: Int, maxItems: Int) r: Array<PairExample> {
+    let streamed = readPairsStreamed(path, minTextLength, maxItems)
+    if streamed.length() > 0 or maxItems > 0 {
+        return streamed
+    }
     let content = readText(path)
     let lines = split(content, "\n")
     let items = Array<PairExample>()
@@ -129,11 +148,118 @@ fun readPairsWithMinLength(path: String, minTextLength: Int) r: Array<PairExampl
             let pair = parsePairLine(line)
             if pair.queryText.length() >= minLen and pair.positiveChunkText.length() >= minLen {
                 items.push(pair)
+                if reachedLimit(items.length(), maxItems) {
+                    return items
+                }
             }
         }
         i = i + 1
     }
     return items
+}
+
+fun readTripletsStreamed(path: String, maxItems: Int) r: Array<TripletExample> {
+    let items = Array<TripletExample>()
+    let byteCount = size(path)
+    if byteCount < 0 {
+        return items
+    }
+    var line = ""
+    var offset = 0
+    while offset < byteCount {
+        let bytes = readBytesRange(path, offset, streamChunkSize(byteCount - offset))
+        if bytes.length() == 0 {
+            offset = byteCount
+        } else {
+            offset = offset + bytes.length()
+            var i = 0
+            while i < bytes.length() {
+                let ch = bytes[i]
+                if ch == 10 {
+                    if appendTripletLine(items, line, maxItems) {
+                        return items
+                    }
+                    line = ""
+                } else if ch != 13 {
+                    line = line + String.fromCharCode(ch)
+                }
+                i = i + 1
+            }
+        }
+    }
+    if line.length() > 0 {
+        let _ = appendTripletLine(items, line, maxItems)
+    }
+    return items
+}
+
+fun readPairsStreamed(path: String, minTextLength: Int, maxItems: Int) r: Array<PairExample> {
+    let items = Array<PairExample>()
+    let byteCount = size(path)
+    if byteCount < 0 {
+        return items
+    }
+    var line = ""
+    let minLen = if minTextLength > 0 { minTextLength } else { 1 }
+    var offset = 0
+    while offset < byteCount {
+        let bytes = readBytesRange(path, offset, streamChunkSize(byteCount - offset))
+        if bytes.length() == 0 {
+            offset = byteCount
+        } else {
+            offset = offset + bytes.length()
+            var i = 0
+            while i < bytes.length() {
+                let ch = bytes[i]
+                if ch == 10 {
+                    if appendPairLine(items, line, minLen, maxItems) {
+                        return items
+                    }
+                    line = ""
+                } else if ch != 13 {
+                    line = line + String.fromCharCode(ch)
+                }
+                i = i + 1
+            }
+        }
+    }
+    if line.length() > 0 {
+        let _ = appendPairLine(items, line, minLen, maxItems)
+    }
+    return items
+}
+
+fun streamChunkSize(remaining: Int) r: Int {
+    if remaining < 65536 {
+        return remaining
+    }
+    return 65536
+}
+
+fun appendTripletLine(items: Array<TripletExample>, lineText: String, maxItems: Int) r: Bool {
+    let line = trim(lineText)
+    if line.length() > 0 {
+        let item = parseTripletLine(line)
+        if item.queryText.length() > 0 and item.positiveChunkText.length() > 0 {
+            items.push(item)
+        }
+    }
+    return reachedLimit(items.length(), maxItems)
+}
+
+fun appendPairLine(items: Array<PairExample>, lineText: String, minLen: Int, maxItems: Int) r: Bool {
+    let line = trim(lineText)
+    if line.length() > 0 {
+        let pair = parsePairLine(line)
+        if pair.queryText.length() >= minLen and pair.positiveChunkText.length() >= minLen {
+            items.push(pair)
+        }
+    }
+    return reachedLimit(items.length(), maxItems)
+}
+
+fun reachedLimit(count: Int, maxItems: Int) r: Bool {
+    return maxItems > 0 and count >= maxItems
 }
 
 fun tripletsToJsonl(items: Array<TripletExample>) r: String {

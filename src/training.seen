@@ -1,10 +1,10 @@
-import config.{TrainerConfig, resolvedParameterRegistryLoadCap}
-import capabilities.{trainerCapabilityFields, trainerTrainingMode}
-import base_update.{directBaseWeightsPath, writeDirectBaseWeightUpdateArtifact}
+import config.{TrainerConfig}
+import capabilities.{trainerTrainingMode}
+import base_update.{writeDirectBaseWeightUpdateArtifact}
 import embedding_delta.{miniLMEmbeddingDeltasPath}
 import encoder.{Encoder}
 import io_utils.{writeAtomicText}
-import jsonl.{TripletExample, readTriplets}
+import jsonl.{TripletExample, readTripletsLimited}
 import math_utils.{cosine, relu, deterministicShuffleIndices}
 import parameter_registry.{MiniLMParameterRegistry, writeMiniLMParameterRegistry}
 
@@ -21,7 +21,7 @@ class TrainResult {
 
 fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLMParameterRegistry) r: TrainResult {
     let trainPath = if cfg.minedJsonlPath.length() > 0 { cfg.minedJsonlPath } else { cfg.trainJsonlPath }
-    let items = readTriplets(trainPath)
+    let items = readTripletsLimited(trainPath, cfg.maxTrainTriplets)
     let batchSize = effectiveBatchSize(cfg.batchSize, items.length())
     let batches = batchesPerEpoch(items.length(), batchSize)
     let examplesPerEpoch = batches * batchSize
@@ -83,7 +83,8 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
     encoder.layerAdapter.save(cfg.layerAdapterPath())
     encoder.adapter.save(cfg.adapterPath())
     let path = cfg.outputModelDir + "/training_config.json"
-    writeAtomicText(path, trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch, encoder.modelEmbeddings.layers))
+    let trainingJson = trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch, encoder.modelEmbeddings.layers)
+    writeAtomicText(path, trainingJson)
     writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry)
     return TrainResult.new(items.length(), cfg.epochs, finalLoss, path)
 }
@@ -153,114 +154,16 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"training_mode\": \"" + trainerTrainingMode() + "\",\n"
         + "  \"pooling\": \"mean\",\n"
         + "  \"backend\": \"" + cfg.backend + "\",\n"
-        + "  \"backend_requires_gpu\": " + (cfg.backendGpu == 1).toString() + ",\n"
-        + "  \"minilm_forward_projection_backend\": \"" + cfg.backend + "\",\n"
-        + "  \"minilm_forward_projection_kernel\": \"tensorMatmul\",\n"
         + "  \"examples\": " + count.toString() + ",\n"
+        + "  \"max_train_triplets\": " + cfg.maxTrainTriplets.toString() + ",\n"
+        + "  \"bounded_training_dataset\": " + (cfg.maxTrainTriplets > 0).toString() + ",\n"
         + "  \"examples_per_epoch\": " + examplesPerEpoch.toString() + ",\n"
         + "  \"dropped_examples_per_epoch\": " + dropped.toString() + ",\n"
         + "  \"batches_per_epoch\": " + batches.toString() + ",\n"
         + "  \"epochs\": " + cfg.epochs.toString() + ",\n"
-        + "  \"batch_size\": " + cfg.batchSize.toString() + ",\n"
         + "  \"effective_batch_size\": " + effectiveBatch.toString() + ",\n"
-        + "  \"drop_last_batch\": true,\n"
-        + "  \"learning_rate\": " + cfg.learningRate.toString() + ",\n"
-        + "  \"weight_decay\": " + cfg.weightDecay.toString() + ",\n"
-        + "  \"margin\": " + cfg.margin.toString() + ",\n"
-        + "  \"grad_clip\": " + cfg.gradClip.toString() + ",\n"
-        + "  \"quality_margin\": " + cfg.qualityMargin.toString() + ",\n"
-        + "  \"weight_load_cap_elements\": " + cfg.weightLoadCapElements.toString() + ",\n"
-        + "  \"parameter_registry_load_cap_elements\": " + resolvedParameterRegistryLoadCap(cfg).toString() + ",\n"
-        + "  \"train_all_minilm_layers\": " + cfg.trainAllMiniLMLayers.toString() + ",\n"
-        + "  \"max_minilm_layers\": " + cfg.maxMiniLMLayers.toString() + ",\n"
-        + "  \"cache_minilm_tensors\": " + cfg.cacheMiniLMTensors.toString() + ",\n"
         + "  \"effective_minilm_layers\": " + runtimeLayers.toString() + ",\n"
-        + "  \"capabilities\": {\n"
-        + trainerCapabilityFields(cfg) + "\n"
-        + "  },\n"
-        + "  \"embedding_forward_implemented\": true,\n"
-        + "  \"first_layer_forward_implemented\": true,\n"
-        + "  \"multi_layer_forward_implemented\": true,\n"
-        + "  \"projection_adapter_trained\": true,\n"
-        + "  \"projection_adapter_gradient\": \"normalized_cosine_low_rank_projection\",\n"
-        + "  \"projection_adapter_optimizer\": \"adamw\",\n"
-        + "  \"projection_adapter_moments_tracked\": true,\n"
-        + "  \"low_rank_projection_trained\": true,\n"
-        + "  \"adapter_path\": \"" + cfg.adapterPath() + "\",\n"
-        + "  \"layer_adapter_path\": \"" + cfg.layerAdapterPath() + "\",\n"
-        + "  \"minilm_layer_adapter_path\": \"" + cfg.minilmLayerAdapterPath() + "\",\n"
-        + "  \"minilm_dense_adapter_path\": \"" + cfg.minilmDenseAdapterPath() + "\",\n"
-        + "  \"minilm_dense_delta_path\": \"" + cfg.minilmDenseDeltaPath() + "\",\n"
-        + "  \"minilm_intermediate_delta_path\": \"" + cfg.minilmIntermediateDeltaPath() + "\",\n"
-        + "  \"minilm_query_delta_path\": \"" + cfg.minilmQueryDeltaPath() + "\",\n"
-        + "  \"minilm_key_delta_path\": \"" + cfg.minilmKeyDeltaPath() + "\",\n"
-        + "  \"minilm_value_delta_path\": \"" + cfg.minilmValueDeltaPath() + "\",\n"
-        + "  \"minilm_attention_dense_delta_path\": \"" + cfg.minilmAttentionDenseDeltaPath() + "\",\n"
-        + "  \"minilm_attention_layernorm_delta_path\": \"" + cfg.minilmAttentionLayerNormDeltaPath() + "\",\n"
-        + "  \"minilm_layernorm_delta_path\": \"" + cfg.minilmLayerNormDeltaPath() + "\",\n"
-        + "  \"minilm_dense_adapter_layer\": " + cfg.minilmDenseAdapterLayer.toString() + ",\n"
-        + "  \"minilm_dense_adapter_trained\": true,\n"
-        + "  \"minilm_dense_adapter_gradient\": \"output_dense_lora_to_output_layernorm_through_downstream_transformer_tail_to_mean_pool\",\n"
-        + "  \"minilm_dense_adapter_optimizer\": \"adamw\",\n"
-        + "  \"minilm_output_dense_delta_trained\": true,\n"
-        + "  \"minilm_output_dense_delta_gradient\": \"output_dense_weight_bias_delta_to_output_layernorm_through_downstream_transformer_tail_to_mean_pool\",\n"
-        + "  \"minilm_output_dense_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_intermediate_dense_delta_trained\": true,\n"
-        + "  \"minilm_intermediate_dense_delta_gradient\": \"intermediate_dense_weight_bias_delta_through_gelu_output_dense_output_layernorm_downstream_tail_to_mean_pool\",\n"
-        + "  \"minilm_intermediate_dense_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_attention_query_delta_trained\": true,\n"
-        + "  \"minilm_attention_query_delta_gradient\": \"self_attention_query_weight_bias_delta_through_attention_output_ffn_downstream_tail_to_mean_pool\",\n"
-        + "  \"minilm_attention_query_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_attention_key_delta_trained\": true,\n"
-        + "  \"minilm_attention_key_delta_gradient\": \"self_attention_key_weight_bias_delta_through_attention_output_ffn_downstream_tail_to_mean_pool\",\n"
-        + "  \"minilm_attention_key_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_attention_value_delta_trained\": true,\n"
-        + "  \"minilm_attention_value_delta_gradient\": \"self_attention_value_weight_bias_delta_through_attention_output_ffn_downstream_tail_to_mean_pool\",\n"
-        + "  \"minilm_attention_value_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_all_ready_layer_deltas_trained\": true,\n"
-        + "  \"minilm_all_ready_layer_delta_surfaces\": [\"attention.self.query\", \"attention.self.key\", \"attention.self.value\", \"attention.output.dense\", \"attention.output.LayerNorm\", \"intermediate.dense\", \"output.dense\", \"output.LayerNorm\"],\n"
-        + "  \"minilm_all_ready_layer_delta_gradient\": \"simultaneous_delta_aware_per_triplet_gradients_through_layer_tail_to_mean_pool\",\n"
-        + "  \"minilm_all_ready_layer_delta_update_mode\": \"accumulate_all_ready_layer_gradients_then_global_clip_then_base_parameter_adamw\",\n"
-        + "  \"minilm_all_ready_layer_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
-        + "  \"minilm_all_ready_layer_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_embedding_deltas_trained\": true,\n"
-        + "  \"minilm_embedding_delta_surfaces\": [\"embeddings.word_embeddings.sparse_rows\", \"embeddings.position_embeddings.sparse_rows\", \"embeddings.token_type_embeddings.sparse_rows\", \"embeddings.LayerNorm\"],\n"
-        + "  \"minilm_embedding_delta_gradient\": \"sparse_embedding_rows_and_embedding_layernorm_through_delta_aware_all_ready_transformer_layers_to_mean_pool\",\n"
-        + "  \"minilm_embedding_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_embedding_delta_update_mode\": \"sparse_row_gradients_then_base_parameter_adamw\",\n"
-        + "  \"minilm_embedding_delta_optimizer_parameterization\": \"loaded_safetensors_base_value_plus_seen_delta\",\n"
-        + "  \"minilm_embedding_delta_path\": \"" + miniLMEmbeddingDeltasPath(cfg.outputModelDir) + "\",\n"
-        + "  \"direct_base_weight_update_enabled\": " + cfg.copyBaseArtifacts.toString() + ",\n"
-        + "  \"direct_base_weight_update_artifact\": \"" + directBaseWeightsPath(cfg) + "\",\n"
-        + "  \"direct_base_weight_update_manifest\": \"" + cfg.outputModelDir + "/seen_base_weight_update_manifest.json\",\n"
-        + "  \"direct_base_weight_update_mode\": \"apply_adamw_to_loaded_base_plus_delta_then_materialize_delta_into_safetensors_base_weights\",\n"
-        + "  \"base_weight_parameterization\": \"safetensors_base_plus_delta_parameters_materialized_into_base_weights\",\n"
-        + "  \"safetensors_parameter_registry_path\": \"" + cfg.outputModelDir + "/minilm_parameter_registry.json\",\n"
-        + "  \"safetensors_parameter_registry_buffers\": [\"value\", \"grad\", \"adam_m\", \"adam_v\"],\n"
-        + "  \"safetensors_parameter_registry_optimizer\": \"adamw_on_registry_parameter_buffers_then_delta_artifact_sync\",\n"
-        + "  \"direct_base_parameter_optimizer\": \"adamw_on_loaded_safetensors_base_plus_seen_delta\",\n"
-        + "  \"direct_base_weight_update_scope\": \"sparse_embeddings_embedding_layernorm_and_all_ready_minilm_layer_surfaces\",\n"
-        + "  \"minilm_attention_output_dense_delta_trained\": true,\n"
-        + "  \"minilm_attention_output_dense_delta_gradient\": \"attention_output_dense_weight_bias_delta_through_attention_layernorm_ffn_output_layernorm_downstream_tail_to_mean_pool\",\n"
-        + "  \"minilm_attention_output_dense_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_attention_output_layernorm_delta_trained\": true,\n"
-        + "  \"minilm_attention_output_layernorm_delta_gradient\": \"attention_output_layernorm_gamma_beta_delta_through_ffn_output_layernorm_downstream_tail_to_mean_pool\",\n"
-        + "  \"minilm_attention_output_layernorm_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_output_layernorm_delta_trained\": true,\n"
-        + "  \"minilm_output_layernorm_delta_gradient\": \"output_layernorm_gamma_beta_delta_through_downstream_transformer_tail_to_mean_pool\",\n"
-        + "  \"minilm_output_layernorm_delta_optimizer\": \"adamw\",\n"
-        + "  \"minilm_layer_adapter_layer\": " + cfg.minilmAdapterLayer.toString() + ",\n"
-        + "  \"minilm_layer_adapter_trained\": true,\n"
-        + "  \"minilm_layer_adapter_gradient\": \"normalized_cosine_low_rank_projection_on_layer_mean\",\n"
-        + "  \"minilm_layer_adapter_optimizer\": \"adamw\",\n"
-        + "  \"minilm_output_adapter_trained\": true,\n"
-        + "  \"minilm_output_adapter_gradient\": \"normalized_cosine_low_rank_projection\",\n"
-        + "  \"minilm_output_adapter_optimizer\": \"adamw\",\n"
-        + "  \"downstream_tail_transformer_backprop_implemented\": true,\n"
-        + "  \"transformer_backprop_scope\": \"sparse_embeddings_embedding_layernorm_through_delta_aware_all_ready_layers_plus_all_ready_minilm_layers_query_key_value_attention_output_dense_attention_output_layernorm_intermediate_dense_output_dense_output_layernorm_deltas_to_mean_pool\",\n"
-        + "  \"full_base_model_weight_backprop_implemented\": true,\n"
-        + "  \"full_base_model_weight_backprop_scope\": \"MiniLM_encoder_surfaces_when_all_required_safetensors_are_loaded\",\n"
-        + "  \"transformer_backprop_implemented\": true,\n"
+        + "  \"capabilities_artifact\": \"" + cfg.outputModelDir + "/seen_trainer_capabilities.json\",\n"
         + "  \"final_loss\": " + loss.toString() + "\n"
         + "}\n"
 }

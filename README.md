@@ -32,6 +32,22 @@ Training JSONL rows use this triplet schema:
 ```
 
 Source adapters can also normalize CSV/TSV/JSONL rows into `(query, positive)` pairs before mining.
+Input JSONL/CSV/TSV readers use chunked byte reads and stop after configured accepted-row caps.
+Set any cap to `0` for unbounded processing:
+
+```json
+{
+  "max_source_pairs": 0,
+  "max_mined_triplets": 0,
+  "max_train_triplets": 0,
+  "max_calibration_triplets": 0,
+  "max_eval_triplets": 0
+}
+```
+
+These are intended for memory-safe real-data smoke runs: `max_source_pairs` bounds the candidate
+pool loaded for mining, `max_mined_triplets` bounds accepted mined output, and the train,
+calibration, and eval caps bound the examples consumed by their respective phases.
 Hard-negative mining precomputes positive embeddings, normalizes query/candidate rows through
 `tensorNormalizeRows` when `backend` is `gpu`, then uses Seen's `tensorTopKInnerProduct` GPU
 kernel; if dispatch is unavailable it falls back to the same scalar top-k and domain/source

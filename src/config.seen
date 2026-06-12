@@ -29,6 +29,11 @@ class TrainerConfig {
     var thresholdPercentile: Float
     var qualityMargin: Float
     var minTextLength: Int
+    var maxSourcePairs: Int
+    var maxMinedTriplets: Int
+    var maxTrainTriplets: Int
+    var maxCalibrationTriplets: Int
+    var maxEvalTriplets: Int
     var copyBaseArtifacts: Bool
     var weightLoadCapElements: Int
     var parameterRegistryLoadCapElements: Int
@@ -70,6 +75,11 @@ class TrainerConfig {
             thresholdPercentile: 5.0,
             qualityMargin: 0.05,
             minTextLength: 2,
+            maxSourcePairs: 0,
+            maxMinedTriplets: 0,
+            maxTrainTriplets: 0,
+            maxCalibrationTriplets: 0,
+            maxEvalTriplets: 0,
             copyBaseArtifacts: true,
             weightLoadCapElements: 0,
             parameterRegistryLoadCapElements: -1,
@@ -180,6 +190,11 @@ fun readConfig(path: String) r: TrainerConfig {
     cfg.thresholdPercentile = configFloat(text, "threshold_percentile", cfg.thresholdPercentile)
     cfg.qualityMargin = configFloat(text, "quality_margin", cfg.qualityMargin)
     cfg.minTextLength = configInt(text, "min_text_length", cfg.minTextLength)
+    cfg.maxSourcePairs = configInt(text, "max_source_pairs", cfg.maxSourcePairs)
+    cfg.maxMinedTriplets = configInt(text, "max_mined_triplets", cfg.maxMinedTriplets)
+    cfg.maxTrainTriplets = configInt(text, "max_train_triplets", cfg.maxTrainTriplets)
+    cfg.maxCalibrationTriplets = configInt(text, "max_calibration_triplets", cfg.maxCalibrationTriplets)
+    cfg.maxEvalTriplets = configInt(text, "max_eval_triplets", cfg.maxEvalTriplets)
     cfg.copyBaseArtifacts = configBool(text, "copy_base_artifacts", cfg.copyBaseArtifacts)
     cfg.weightLoadCapElements = configInt(text, "weight_load_cap_elements", cfg.weightLoadCapElements)
     cfg.parameterRegistryLoadCapElements = configInt(text, "parameter_registry_load_cap_elements", cfg.parameterRegistryLoadCapElements)
