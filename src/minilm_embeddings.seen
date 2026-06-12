@@ -2,6 +2,7 @@ import io.file.{readBytesRange}
 import adapter.{ProjectionAdapter}
 import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas, denseRankBAt, denseRankBottleneckAt, denseZeros}
 import embedding_delta.{MiniLMEmbeddingDeltas}
+import gpu_tensor_ops.{tensorGpuAttentionContext}
 import math.math.{sqrt, exp}
 import math_utils.{gelu}
 import minilm_weights.{mwFindCandidateIndex}
@@ -1090,6 +1091,10 @@ fun attentionContextBackend(q: Array<Float>, k: Array<Float>, v: Array<Float>, s
         return Array<Float>()
     }
     if miniLMBackendIsGpu(backend) {
+        let fused = tensorGpuAttentionContext(q, k, v, seqLen, hiddenSize, attentionHeads)
+        if fused.ok == 1 and fused.values.length() == seqLen * hiddenSize {
+            return fused.values
+        }
         let headDim = hiddenSize / attentionHeads
         let out = zerosFloat(seqLen * hiddenSize)
         let scale = sqrt(headDim.toFloat())

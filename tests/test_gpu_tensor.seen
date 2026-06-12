@@ -1,5 +1,5 @@
-import trainer.gpu_tensor_ops.{tensorGpuBinary, tensorGpuMatmul}
-import trainer.tensor.{Tensor, tensorGeluDerivativeScalar}
+import trainer.gpu_tensor_ops.{tensorGpuAttentionContext, tensorGpuBinary, tensorGpuGeluBackward, tensorGpuMatmul, tensorGpuNormalizeRows}
+import trainer.tensor.{Tensor, tensorGeluDerivativeScalar, tripletMarginLossBackend, tripletMarginLossRows}
 import trainer.tensor_kernels.{trainerTensorKernelDeclarationCount}
 
 fun expect(condition: Bool, message: String) r: Void {
@@ -13,8 +13,17 @@ fun approx(value: Float, expected: Float) r: Bool {
     return diff < 0.001
 }
 
+fun expectApproxArray(values: Array<Float>, expected: Array<Float>, message: String) r: Void {
+    expect(values.length() == expected.length(), message + " length")
+    var i = 0
+    while i < values.length() {
+        expect(approx(values[i], expected[i]), message)
+        i = i + 1
+    }
+}
+
 fun main() -> Int {
-    expect(trainerTensorKernelDeclarationCount() >= 13, "gpu tensor kernel declarations available")
+    expect(trainerTensorKernelDeclarationCount() >= 16, "gpu tensor kernel declarations available")
     let a = Array<Float>()
     a.push(1.0)
     a.push(2.0)
@@ -84,6 +93,9 @@ fun main() -> Int {
     geluGradVals.push(2.0)
     let geluPre = Tensor.fromArray(2, 2, geluPreVals, "gpu")
     let geluGrad = Tensor.fromArray(2, 2, geluGradVals, "gpu")
+    let fusedGeluBack = tensorGpuGeluBackward(geluPreVals, geluGradVals, 2, 2)
+    expect(fusedGeluBack.ok == 1, "gpu fused gelu backward dispatch")
+    expect(approx(fusedGeluBack.values[0], tensorGeluDerivativeScalar(-1.0)), "gpu fused gelu backward negative")
     let geluBack = geluPre.geluBackward(geluGrad)
     expect(approx(geluBack.at(0, 0), tensorGeluDerivativeScalar(-1.0)), "gpu gelu backward negative")
     expect(approx(geluBack.at(0, 1), 0.5 * tensorGeluDerivativeScalar(0.0)), "gpu gelu backward zero")
@@ -104,6 +116,84 @@ fun main() -> Int {
     expect(approx(softBack.at(0, 1), softmax.at(0, 1) * (-0.1 - row0Dot)), "gpu softmax backward 01")
     expect(approx(softBack.at(1, 0), softmax.at(1, 0) * (0.4 - row1Dot)), "gpu softmax backward 10")
     expect(approx(softBack.at(1, 1), softmax.at(1, 1) * (-0.2 - row1Dot)), "gpu softmax backward 11")
+    let normVals = Array<Float>()
+    normVals.push(3.0)
+    normVals.push(4.0)
+    normVals.push(0.0)
+    normVals.push(0.0)
+    let normalizedRows = tensorGpuNormalizeRows(normVals, 2, 2)
+    expect(normalizedRows.ok == 1, "gpu normalize rows dispatch")
+    expect(approx(normalizedRows.values[0], 0.6), "gpu normalize row 00")
+    expect(approx(normalizedRows.values[1], 0.8), "gpu normalize row 01")
+    expect(approx(normalizedRows.values[2], 0.0) and approx(normalizedRows.values[3], 0.0), "gpu normalize zero row")
+    let qCtx = Array<Float>()
+    qCtx.push(1.0)
+    qCtx.push(0.0)
+    qCtx.push(0.0)
+    qCtx.push(1.0)
+    qCtx.push(0.0)
+    qCtx.push(1.0)
+    qCtx.push(1.0)
+    qCtx.push(0.0)
+    let kCtx = Array<Float>()
+    kCtx.push(1.0)
+    kCtx.push(0.0)
+    kCtx.push(0.0)
+    kCtx.push(1.0)
+    kCtx.push(0.0)
+    kCtx.push(1.0)
+    kCtx.push(1.0)
+    kCtx.push(0.0)
+    let vCtx = Array<Float>()
+    vCtx.push(1.0)
+    vCtx.push(2.0)
+    vCtx.push(3.0)
+    vCtx.push(4.0)
+    vCtx.push(5.0)
+    vCtx.push(6.0)
+    vCtx.push(7.0)
+    vCtx.push(8.0)
+    let expectedContext = Array<Float>()
+    expectedContext.push(2.320)
+    expectedContext.push(3.320)
+    expectedContext.push(4.320)
+    expectedContext.push(5.320)
+    expectedContext.push(3.679)
+    expectedContext.push(4.679)
+    expectedContext.push(5.679)
+    expectedContext.push(6.679)
+    let fusedContext = tensorGpuAttentionContext(qCtx, kCtx, vCtx, 2, 4, 2)
+    expect(fusedContext.ok == 1, "gpu fused attention context dispatch")
+    expectApproxArray(fusedContext.values, expectedContext, "gpu fused attention context")
+    let qLoss = Array<Float>()
+    qLoss.push(1.0)
+    qLoss.push(0.0)
+    let pLoss = Array<Float>()
+    pLoss.push(1.0)
+    pLoss.push(0.0)
+    let nLoss = Array<Float>()
+    nLoss.push(0.0)
+    nLoss.push(1.0)
+    expect(approx(tripletMarginLossBackend(qLoss, pLoss, nLoss, 0.2, "gpu"), 0.0), "gpu triplet loss easy")
+    let batchQ = Array<Float>()
+    batchQ.push(1.0)
+    batchQ.push(0.0)
+    batchQ.push(0.0)
+    batchQ.push(1.0)
+    let batchP = Array<Float>()
+    batchP.push(1.0)
+    batchP.push(0.0)
+    batchP.push(1.0)
+    batchP.push(0.0)
+    let batchN = Array<Float>()
+    batchN.push(0.0)
+    batchN.push(1.0)
+    batchN.push(0.0)
+    batchN.push(1.0)
+    let batchLosses = tripletMarginLossRows(batchQ, batchP, batchN, 2, 2, 0.2, "gpu")
+    expect(batchLosses.length() == 2, "gpu triplet loss rows count")
+    expect(approx(batchLosses[0], 0.0), "gpu triplet loss rows easy")
+    expect(approx(batchLosses[1], 1.2), "gpu triplet loss rows hard")
     println("PASS test_gpu_tensor")
     return 0
 }

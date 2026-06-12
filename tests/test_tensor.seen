@@ -1,7 +1,7 @@
 import trainer.math_utils.{cosine}
 import trainer.optimizer.{AdamW, clipGlobalNorm}
 import trainer.dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
-import trainer.tensor.{Parameter, Tensor, tensorGeluDerivativeScalar, tripletMarginLoss}
+import trainer.tensor.{Parameter, Tensor, tensorGeluDerivativeScalar, tripletMarginLoss, tripletMarginLossRows}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
@@ -128,6 +128,15 @@ fun main() -> Int {
     expect(closeEnough(softBack.at(1, 1), softmax.at(1, 1) * (-0.2 - row1Dot)), "softmax backward 11")
     let normalized = a.layerNormRows()
     expect(normalized.at(0, 0) < -0.99 and normalized.at(0, 1) > 0.99, "layer norm row")
+    let normVals = Array<Float>()
+    normVals.push(3.0)
+    normVals.push(4.0)
+    normVals.push(0.0)
+    normVals.push(0.0)
+    let l2Rows = Tensor.fromArray(2, 2, normVals).normalizeRows()
+    expect(closeEnough(l2Rows.at(0, 0), 0.6), "normalize row 00")
+    expect(closeEnough(l2Rows.at(0, 1), 0.8), "normalize row 01")
+    expect(closeEnough(l2Rows.at(1, 0), 0.0) and closeEnough(l2Rows.at(1, 1), 0.0), "normalize zero row")
     let kept = a.dropoutDeterministic(1.0, 42)
     expect(kept.at(1, 1) == 4.0, "dropout keep all")
     let sim = cosine(a.row(0), a.row(0))
@@ -144,6 +153,25 @@ fun main() -> Int {
     expect(tripletMarginLoss(q, p, n, 0.2) == 0.0, "triplet loss easy")
     let hardLoss = tripletMarginLoss(q, n, p, 0.2)
     expect(hardLoss > 1.19 and hardLoss < 1.21, "triplet loss hard")
+    let batchQ = Array<Float>()
+    batchQ.push(1.0)
+    batchQ.push(0.0)
+    batchQ.push(0.0)
+    batchQ.push(1.0)
+    let batchP = Array<Float>()
+    batchP.push(1.0)
+    batchP.push(0.0)
+    batchP.push(1.0)
+    batchP.push(0.0)
+    let batchN = Array<Float>()
+    batchN.push(0.0)
+    batchN.push(1.0)
+    batchN.push(0.0)
+    batchN.push(1.0)
+    let batchLosses = tripletMarginLossRows(batchQ, batchP, batchN, 2, 2, 0.2, "cpu")
+    expect(batchLosses.length() == 2, "triplet loss rows count")
+    expect(closeEnough(batchLosses[0], 0.0), "triplet loss rows easy")
+    expect(batchLosses[1] > 1.19 and batchLosses[1] < 1.21, "triplet loss rows hard")
     let top = a.topKInnerProductIndices(q, 2)
     expect(top[0] == 1 and top[1] == 0, "top-k inner product")
     let param = Parameter.zeros(1)

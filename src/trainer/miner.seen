@@ -5,6 +5,7 @@ import io_utils.{writeAtomicText}
 import jsonl.{PairExample, TripletExample, tripletsToJsonl}
 import math_utils.{cosine}
 import source_adapters.{readSourcePairs}
+import tensor.{Tensor}
 
 class MineResult {
     var count: Int
@@ -32,7 +33,7 @@ class MiningEmbeddingMatrix {
 
 fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
     let pairs = readSourcePairs(cfg)
-    let positiveMatrix = buildPositiveEmbeddingMatrix(pairs, encoder)
+    let positiveMatrix = buildPositiveEmbeddingMatrixBackend(pairs, encoder, cfg.backend)
     let out = Array<TripletExample>()
     var i = 0
     while i < pairs.length() {
@@ -98,6 +99,10 @@ fun findNegativeIndexByEncoding(pairs: Array<PairExample>, queryIndex: Int, enco
 }
 
 fun buildPositiveEmbeddingMatrix(pairs: Array<PairExample>, encoder: Encoder) r: MiningEmbeddingMatrix {
+    return buildPositiveEmbeddingMatrixBackend(pairs, encoder, "cpu")
+}
+
+fun buildPositiveEmbeddingMatrixBackend(pairs: Array<PairExample>, encoder: Encoder, backend: String) r: MiningEmbeddingMatrix {
     if pairs.length() == 0 {
         return MiningEmbeddingMatrix.empty()
     }
@@ -122,11 +127,16 @@ fun buildPositiveEmbeddingMatrix(pairs: Array<PairExample>, encoder: Encoder) r:
         }
         i = i + 1
     }
-    return MiningEmbeddingMatrix.new(pairs.length(), cols, values)
+    return normalizeMiningMatrixBackend(MiningEmbeddingMatrix.new(pairs.length(), cols, values), backend)
 }
 
 fun findNegativeIndexWithMatrix(pairs: Array<PairExample>, queryIndex: Int, queryEmbedding: Array<Float>, matrix: MiningEmbeddingMatrix, topK: Int, backend: String) r: Int {
     if not matrix.ok or queryEmbedding.length() != matrix.cols {
+        return fallbackNegativeIndex(pairs, queryIndex)
+    }
+    let normalizedMatrix = normalizeMiningMatrixBackend(matrix, backend)
+    let normalizedQuery = normalizeMiningQueryBackend(queryEmbedding, backend)
+    if not normalizedMatrix.ok or normalizedQuery.length() != normalizedMatrix.cols {
         return fallbackNegativeIndex(pairs, queryIndex)
     }
     let candidateCount = pairs.length() - 1
@@ -136,10 +146,10 @@ fun findNegativeIndexWithMatrix(pairs: Array<PairExample>, queryIndex: Int, quer
     }
     if tensorGpuBackendEnabled(backend) {
         var gpuKeep = keep + 1
-        if gpuKeep > matrix.rows {
-            gpuKeep = matrix.rows
+        if gpuKeep > normalizedMatrix.rows {
+            gpuKeep = normalizedMatrix.rows
         }
-        let gpu = tensorGpuTopKInnerProductIndices(queryEmbedding, matrix.values, matrix.rows, matrix.cols, gpuKeep)
+        let gpu = tensorGpuTopKInnerProductIndices(normalizedQuery, normalizedMatrix.values, normalizedMatrix.rows, normalizedMatrix.cols, gpuKeep)
         if gpu.ok == 1 {
             let gpuChoice = firstValidTopIndex(pairs, queryIndex, gpu.values)
             if gpuChoice >= 0 {
@@ -151,7 +161,29 @@ fun findNegativeIndexWithMatrix(pairs: Array<PairExample>, queryIndex: Int, quer
             }
         }
     }
-    return findNegativeIndexScalar(pairs, queryIndex, queryEmbedding, matrix, topK)
+    return findNegativeIndexScalar(pairs, queryIndex, normalizedQuery, normalizedMatrix, topK)
+}
+
+fun normalizeMiningMatrixBackend(matrix: MiningEmbeddingMatrix, backend: String) r: MiningEmbeddingMatrix {
+    if not matrix.ok or matrix.rows <= 0 or matrix.cols <= 0 or matrix.values.length() < matrix.rows * matrix.cols {
+        return matrix
+    }
+    let normalized = Tensor.fromArray(matrix.rows, matrix.cols, matrix.values, backend).normalizeRows()
+    if normalized.values.length() == matrix.rows * matrix.cols {
+        return MiningEmbeddingMatrix.new(matrix.rows, matrix.cols, normalized.values)
+    }
+    return matrix
+}
+
+fun normalizeMiningQueryBackend(queryEmbedding: Array<Float>, backend: String) r: Array<Float> {
+    if queryEmbedding.length() <= 0 {
+        return Array<Float>()
+    }
+    let normalized = Tensor.fromArray(1, queryEmbedding.length(), queryEmbedding, backend).normalizeRows()
+    if normalized.values.length() == queryEmbedding.length() {
+        return normalized.values
+    }
+    return queryEmbedding
 }
 
 fun findNegativeIndexScalar(pairs: Array<PairExample>, queryIndex: Int, queryEmbedding: Array<Float>, matrix: MiningEmbeddingMatrix, topK: Int) r: Int {

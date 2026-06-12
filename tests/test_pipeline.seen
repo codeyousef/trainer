@@ -3,7 +3,7 @@ import trainer.encoder.{Encoder}
 import trainer.io.file.{exists}
 import trainer.io_utils.{writeAtomicText}
 import trainer.jsonl.{PairExample}
-import trainer.miner.{buildPositiveEmbeddingMatrix, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
+import trainer.miner.{MiningEmbeddingMatrix, buildPositiveEmbeddingMatrix, buildPositiveEmbeddingMatrixBackend, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
 import trainer.pipeline.{Pipeline}
 import trainer.tokenizer.{Tokenizer}
 import trainer.training.{batchesPerEpoch, effectiveBatchSize}
@@ -12,6 +12,25 @@ fun expect(condition: Bool, message: String) r: Void {
     if not condition {
         abort(message)
     }
+}
+
+fun closeEnough(value: Float, expected: Float) r: Bool {
+    let diff = if value > expected { value - expected } else { expected - value }
+    return diff < 0.001
+}
+
+fun matrixRowSquareSum(matrix: MiningEmbeddingMatrix, row: Int) r: Float {
+    var sum = 0.0
+    if not matrix.ok or row < 0 or row >= matrix.rows {
+        return sum
+    }
+    var col = 0
+    while col < matrix.cols {
+        let value = matrix.values[row * matrix.cols + col]
+        sum = sum + value * value
+        col = col + 1
+    }
+    return sum
 }
 
 fun main() -> Int {
@@ -35,6 +54,9 @@ fun main() -> Int {
     let positiveMatrix = buildPositiveEmbeddingMatrix(miningPairs, miningEncoder)
     expect(positiveMatrix.ok, "mining positive matrix built")
     expect(positiveMatrix.rows == 3 and positiveMatrix.cols == 16, "mining matrix shape")
+    let gpuPositiveMatrix = buildPositiveEmbeddingMatrixBackend(miningPairs, miningEncoder, "gpu")
+    expect(gpuPositiveMatrix.ok, "gpu mining positive matrix built")
+    expect(closeEnough(matrixRowSquareSum(gpuPositiveMatrix, 0), 1.0), "backend mining matrix normalized")
     let queryEmbedding = miningEncoder.encode("alpha question")
     let cpuNeg = findNegativeIndexWithMatrix(miningPairs, 0, queryEmbedding, positiveMatrix, 3, "cpu")
     expect(cpuNeg == 2, "matrix mining excludes same domain")

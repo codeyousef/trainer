@@ -1,6 +1,6 @@
 import math.math.{exp, sqrt}
 import math_utils.{normalize, cosine}
-import gpu_tensor_ops.{tensorGpuBackendEnabled, tensorGpuBinary, tensorGpuCosineRows, tensorGpuLayerNormRows, tensorGpuMatmul, tensorGpuMeanPool, tensorGpuRowSums, tensorGpuRowsKernel, tensorGpuScale, tensorGpuTopKInnerProductIndices, tensorGpuUnary}
+import gpu_tensor_ops.{tensorGpuBackendEnabled, tensorGpuBinary, tensorGpuCosineRows, tensorGpuGeluBackward, tensorGpuLayerNormRows, tensorGpuMatmul, tensorGpuMeanPool, tensorGpuNormalizeRows, tensorGpuRowSums, tensorGpuRowsKernel, tensorGpuScale, tensorGpuTopKInnerProductIndices, tensorGpuTripletMarginLoss, tensorGpuUnary}
 
 class TensorShape {
     var rows: Int
@@ -227,16 +227,9 @@ class Tensor {
 
     fun geluBackward(gradOutput: Tensor) r: Tensor {
         if tensorGpuBackendEnabled(this.backend) {
-            let derivativeValues = Array<Float>()
-            var d = 0
-            while d < this.values.length() {
-                derivativeValues.push(tensorGeluDerivativeScalar(this.values[d]))
-                d = d + 1
-            }
-            let derivative = Tensor.fromArray(this.shape.rows, this.shape.cols, derivativeValues, this.backend)
-            let product = derivative.mulElementwise(gradOutput)
-            if product.values.length() == this.values.length() {
-                return product
+            let gpu = tensorGpuGeluBackward(this.values, gradOutput.values, this.shape.rows, this.shape.cols)
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
             }
         }
         let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
@@ -462,6 +455,12 @@ class Tensor {
     }
 
     fun normalizeRows() r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let gpu = tensorGpuNormalizeRows(this.values, this.shape.rows, this.shape.cols)
+            if gpu.ok == 1 {
+                return Tensor.fromArray(this.shape.rows, this.shape.cols, gpu.values, this.backend)
+            }
+        }
         let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
         var r = 0
         while r < this.shape.rows {
@@ -593,6 +592,16 @@ fun tensorTanhApprox(x: Float) r: Float {
 }
 
 fun tripletMarginLoss(query: Array<Float>, positive: Array<Float>, negative: Array<Float>, margin: Float) r: Float {
+    return tripletMarginLossBackend(query, positive, negative, margin, "cpu")
+}
+
+fun tripletMarginLossBackend(query: Array<Float>, positive: Array<Float>, negative: Array<Float>, margin: Float, backend: String) r: Float {
+    if tensorGpuBackendEnabled(backend) and query.length() > 0 and query.length() == positive.length() and query.length() == negative.length() {
+        let gpu = tensorGpuTripletMarginLoss(query, positive, negative, 1, query.length(), margin)
+        if gpu.ok == 1 and gpu.values.length() > 0 {
+            return gpu.values[0]
+        }
+    }
     let simPositive = cosine(query, positive)
     let simNegative = cosine(query, negative)
     let loss = simNegative - simPositive + margin
@@ -600,6 +609,40 @@ fun tripletMarginLoss(query: Array<Float>, positive: Array<Float>, negative: Arr
         return loss
     }
     return 0.0
+}
+
+fun tripletMarginLossRows(query: Array<Float>, positive: Array<Float>, negative: Array<Float>, rows: Int, cols: Int, margin: Float, backend: String) r: Array<Float> {
+    if rows <= 0 or cols <= 0 or query.length() < rows * cols or positive.length() < rows * cols or negative.length() < rows * cols {
+        return Array<Float>()
+    }
+    if tensorGpuBackendEnabled(backend) {
+        let gpu = tensorGpuTripletMarginLoss(query, positive, negative, rows, cols, margin)
+        if gpu.ok == 1 and gpu.values.length() == rows {
+            return gpu.values
+        }
+    }
+    let out = Array<Float>()
+    var row = 0
+    while row < rows {
+        out.push(tripletMarginLoss(tensorRowSlice(query, row, cols), tensorRowSlice(positive, row, cols), tensorRowSlice(negative, row, cols), margin))
+        row = row + 1
+    }
+    return out
+}
+
+fun tensorRowSlice(values: Array<Float>, row: Int, cols: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var col = 0
+    while col < cols {
+        let idx = row * cols + col
+        if idx >= 0 and idx < values.length() {
+            out.push(values[idx])
+        } else {
+            out.push(0.0)
+        }
+        col = col + 1
+    }
+    return out
 }
 
 fun tensorDot(a: Array<Float>, b: Array<Float>) r: Float {

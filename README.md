@@ -32,20 +32,22 @@ Training JSONL rows use this triplet schema:
 ```
 
 Source adapters can also normalize CSV/TSV/JSONL rows into `(query, positive)` pairs before mining.
-Hard-negative mining precomputes normalized positive embeddings once, then uses Seen's
-`tensorTopKInnerProduct` GPU kernel when `backend` is `gpu`; if dispatch is unavailable it
-falls back to the same scalar top-k and domain/source exclusion semantics.
+Hard-negative mining precomputes positive embeddings, normalizes query/candidate rows through
+`tensorNormalizeRows` when `backend` is `gpu`, then uses Seen's `tensorTopKInnerProduct` GPU
+kernel; if dispatch is unavailable it falls back to the same scalar top-k and domain/source
+exclusion semantics.
 Loaded MiniLM forward passes also thread the configured backend into Q/K/V, attention-output,
 intermediate, and output dense projections through Seen's `Tensor.matmul` dispatch, plus
 LayerNorm forward normalization/affine through `tensorLayerNormRows` and elementwise kernels,
 while keeping the scalar path as the correctness reference.
 MiniLM backward tail gradients now thread the configured backend into dense projection input
 gradients for FFN/output/attention paths, reusing `Tensor.matmul` through the dense-gradient
-helpers. GELU backward keeps derivative evaluation on the scalar reference path while dispatching
-the derivative-gradient product through the existing elementwise GPU kernel when `backend` is
-`gpu`; attention score construction, softmax, context projection, and Q/K/V attention-gradient
-products now route through Tensor matmul/scale/softmax/elementwise/reduction kernels for GPU
-configs.
+helpers. GELU backward dispatches derivative and product evaluation through `tensorGeluBackward`
+when `backend` is `gpu`; fused attention context dispatches through `tensorAttentionContext`,
+with the Tensor matmul/scale/softmax composition retained as a fallback. Q/K/V attention-gradient
+products route through Tensor matmul/scale/elementwise/reduction kernels for GPU configs. Triplet
+margin loss evaluation dispatches through `tensorTripletMarginLoss` for GPU configs while
+gradient-producing training paths keep their scalar-stat reference math.
 These paths retain scalar fallbacks for shape diagnostics and tests.
 
 ## Model Outputs
