@@ -89,6 +89,21 @@ fun main() -> Int {
     expect(approx(geluBack.at(0, 1), 0.5 * tensorGeluDerivativeScalar(0.0)), "gpu gelu backward zero")
     expect(approx(geluBack.at(1, 0), -0.25 * tensorGeluDerivativeScalar(1.0)), "gpu gelu backward positive")
     expect(approx(geluBack.at(1, 1), 2.0 * tensorGeluDerivativeScalar(2.0)), "gpu gelu backward large")
+    let softIn = Tensor.fromArray(2, 2, a, "gpu")
+    let softmax = softIn.softmaxRows()
+    let softGradVals = Array<Float>()
+    softGradVals.push(0.2)
+    softGradVals.push(-0.1)
+    softGradVals.push(0.4)
+    softGradVals.push(-0.2)
+    let softGrad = Tensor.fromArray(2, 2, softGradVals, "gpu")
+    let softBack = softmax.softmaxBackwardRows(softGrad)
+    let row0Dot = softmax.at(0, 0) * 0.2 + softmax.at(0, 1) * -0.1
+    let row1Dot = softmax.at(1, 0) * 0.4 + softmax.at(1, 1) * -0.2
+    expect(approx(softBack.at(0, 0), softmax.at(0, 0) * (0.2 - row0Dot)), "gpu softmax backward 00")
+    expect(approx(softBack.at(0, 1), softmax.at(0, 1) * (-0.1 - row0Dot)), "gpu softmax backward 01")
+    expect(approx(softBack.at(1, 0), softmax.at(1, 0) * (0.4 - row1Dot)), "gpu softmax backward 10")
+    expect(approx(softBack.at(1, 1), softmax.at(1, 1) * (-0.2 - row1Dot)), "gpu softmax backward 11")
     println("PASS test_gpu_tensor")
     return 0
 }

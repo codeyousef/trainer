@@ -346,6 +346,51 @@ class Tensor {
         return out
     }
 
+    fun softmaxBackwardRows(gradOutput: Tensor) r: Tensor {
+        if gradOutput.shape.rows != this.shape.rows or gradOutput.shape.cols != this.shape.cols {
+            return Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        }
+        if tensorGpuBackendEnabled(this.backend) and this.shape.rows > 0 and this.shape.cols > 0 {
+            let weighted = this.mulElementwise(gradOutput)
+            let rowDots = weighted.sumRows()
+            if rowDots.length() == this.shape.rows {
+                let repeated = Array<Float>()
+                var row = 0
+                while row < this.shape.rows {
+                    var col = 0
+                    while col < this.shape.cols {
+                        repeated.push(rowDots[row])
+                        col = col + 1
+                    }
+                    row = row + 1
+                }
+                let rowDotTensor = Tensor.fromArray(this.shape.rows, this.shape.cols, repeated, this.backend)
+                let centered = gradOutput.sub(rowDotTensor)
+                let out = this.mulElementwise(centered)
+                if out.values.length() == this.values.length() {
+                    return out
+                }
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        var row = 0
+        while row < this.shape.rows {
+            var dot = 0.0
+            var col = 0
+            while col < this.shape.cols {
+                dot = dot + this.at(row, col) * gradOutput.at(row, col)
+                col = col + 1
+            }
+            col = 0
+            while col < this.shape.cols {
+                out.set(row, col, this.at(row, col) * (gradOutput.at(row, col) - dot))
+                col = col + 1
+            }
+            row = row + 1
+        }
+        return out
+    }
+
     fun layerNormRows(epsilon: Float = 0.00001) r: Tensor {
         if tensorGpuBackendEnabled(this.backend) {
             let gpu = tensorGpuLayerNormRows(this.values, this.shape.rows, this.shape.cols, epsilon)

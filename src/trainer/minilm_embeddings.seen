@@ -2235,6 +2235,91 @@ fun geluDerivativeApprox(x: Float) r: Float {
     return 0.5 * (1.0 + t) + 0.5 * x * sechSq * innerGrad
 }
 
+fun attentionWeightsForHeadBackend(q: Array<Float>, k: Array<Float>, queryRow: Int, head: Int, headDim: Int, hiddenSize: Int, seqLen: Int, scale: Float, backend: String) r: Array<Float> {
+    let scores = Array<Float>()
+    var other = 0
+    while other < seqLen {
+        scores.push(attentionScore(q, k, queryRow, other, head, headDim, hiddenSize) / scale)
+        other = other + 1
+    }
+    return attentionSoftmaxWeightsBackend(scores, backend)
+}
+
+fun attentionSoftmaxWeightsBackend(scores: Array<Float>, backend: String) r: Array<Float> {
+    if scores.length() <= 0 {
+        return Array<Float>()
+    }
+    let scoreTensor = Tensor.fromArray(1, scores.length(), scores, backend)
+    let weights = scoreTensor.softmaxRows()
+    if weights.values.length() == scores.length() {
+        return weights.values
+    }
+    return attentionSoftmaxWeightsScalar(scores)
+}
+
+fun attentionSoftmaxWeightsScalar(scores: Array<Float>) r: Array<Float> {
+    let weights = Array<Float>()
+    if scores.length() <= 0 {
+        return weights
+    }
+    var maxScore = scores[0]
+    var i = 1
+    while i < scores.length() {
+        if scores[i] > maxScore {
+            maxScore = scores[i]
+        }
+        i = i + 1
+    }
+    var denom = 0.0
+    i = 0
+    while i < scores.length() {
+        let value = exp(scores[i] - maxScore)
+        weights.push(value)
+        denom = denom + value
+        i = i + 1
+    }
+    if denom > 0.000000001 {
+        i = 0
+        while i < weights.length() {
+            weights[i] = weights[i] / denom
+            i = i + 1
+        }
+    }
+    return weights
+}
+
+fun attentionSoftmaxBackwardBackend(weights: Array<Float>, gradWeights: Array<Float>, backend: String) r: Array<Float> {
+    if weights.length() <= 0 or gradWeights.length() < weights.length() {
+        return Array<Float>()
+    }
+    let weightsTensor = Tensor.fromArray(1, weights.length(), weights, backend)
+    let gradTensor = Tensor.fromArray(1, weights.length(), gradWeights, backend)
+    let gradScores = weightsTensor.softmaxBackwardRows(gradTensor)
+    if gradScores.values.length() == weights.length() {
+        return gradScores.values
+    }
+    return attentionSoftmaxBackwardScalar(weights, gradWeights)
+}
+
+fun attentionSoftmaxBackwardScalar(weights: Array<Float>, gradWeights: Array<Float>) r: Array<Float> {
+    let out = Array<Float>()
+    if weights.length() <= 0 or gradWeights.length() < weights.length() {
+        return out
+    }
+    var weightedGrad = 0.0
+    var i = 0
+    while i < weights.length() {
+        weightedGrad = weightedGrad + gradWeights[i] * weights[i]
+        i = i + 1
+    }
+    i = 0
+    while i < weights.length() {
+        out.push(weights[i] * (gradWeights[i] - weightedGrad))
+        i = i + 1
+    }
+    return out
+}
+
 fun attentionSequenceInputGradient(q: Array<Float>, k: Array<Float>, v: Array<Float>, gradContext: Array<Float>, qWeight: EmbeddingTensorLoad, kWeight: EmbeddingTensorLoad, vWeight: EmbeddingTensorLoad, seqLen: Int, hiddenSize: Int, attentionHeads: Int) r: Array<Float> {
     return attentionSequenceInputGradientBackend(q, k, v, gradContext, qWeight, kWeight, vWeight, seqLen, hiddenSize, attentionHeads, "cpu")
 }
@@ -2252,36 +2337,9 @@ fun attentionSequenceInputGradientBackend(q: Array<Float>, k: Array<Float>, v: A
     while token < seqLen {
         var head = 0
         while head < attentionHeads {
-            let weights = Array<Float>()
-            var maxScore = -99999999.0
-            var other = 0
-            while other < seqLen {
-                let score = attentionScore(q, k, token, other, head, headDim, hiddenSize) / scale
-                if score > maxScore {
-                    maxScore = score
-                }
-                weights.push(score)
-                other = other + 1
-            }
-            var denom = 0.0
-            other = 0
-            while other < weights.length() {
-                let value = exp(weights[other] - maxScore)
-                weights[other] = value
-                denom = denom + value
-                other = other + 1
-            }
-            if denom > 0.000000001 {
-                other = 0
-                while other < weights.length() {
-                    weights[other] = weights[other] / denom
-                    other = other + 1
-                }
-            }
-
+            let weights = attentionWeightsForHeadBackend(q, k, token, head, headDim, hiddenSize, seqLen, scale, backend)
             let gradWeights = Array<Float>()
-            var weightedGrad = 0.0
-            other = 0
+            var other = 0
             while other < seqLen {
                 var gw = 0.0
                 var d = 0
@@ -2292,13 +2350,16 @@ fun attentionSequenceInputGradientBackend(q: Array<Float>, k: Array<Float>, v: A
                     d = d + 1
                 }
                 gradWeights.push(gw)
-                weightedGrad = weightedGrad + gw * weights[other]
                 other = other + 1
             }
 
+            let gradScores = attentionSoftmaxBackwardBackend(weights, gradWeights, backend)
             other = 0
             while other < seqLen {
-                let gradScore = weights[other] * (gradWeights[other] - weightedGrad)
+                var gradScore = 0.0
+                if other < gradScores.length() {
+                    gradScore = gradScores[other]
+                }
                 var d = 0
                 while d < headDim {
                     let col = head * headDim + d
@@ -2338,36 +2399,9 @@ fun attentionSequenceInputGradientWithDeltasBackend(q: Array<Float>, k: Array<Fl
     while token < seqLen {
         var head = 0
         while head < attentionHeads {
-            let weights = Array<Float>()
-            var maxScore = -99999999.0
-            var other = 0
-            while other < seqLen {
-                let score = attentionScore(q, k, token, other, head, headDim, hiddenSize) / scale
-                if score > maxScore {
-                    maxScore = score
-                }
-                weights.push(score)
-                other = other + 1
-            }
-            var denom = 0.0
-            other = 0
-            while other < weights.length() {
-                let value = exp(weights[other] - maxScore)
-                weights[other] = value
-                denom = denom + value
-                other = other + 1
-            }
-            if denom > 0.000000001 {
-                other = 0
-                while other < weights.length() {
-                    weights[other] = weights[other] / denom
-                    other = other + 1
-                }
-            }
-
+            let weights = attentionWeightsForHeadBackend(q, k, token, head, headDim, hiddenSize, seqLen, scale, backend)
             let gradWeights = Array<Float>()
-            var weightedGrad = 0.0
-            other = 0
+            var other = 0
             while other < seqLen {
                 var gw = 0.0
                 var d = 0
@@ -2378,13 +2412,16 @@ fun attentionSequenceInputGradientWithDeltasBackend(q: Array<Float>, k: Array<Fl
                     d = d + 1
                 }
                 gradWeights.push(gw)
-                weightedGrad = weightedGrad + gw * weights[other]
                 other = other + 1
             }
 
+            let gradScores = attentionSoftmaxBackwardBackend(weights, gradWeights, backend)
             other = 0
             while other < seqLen {
-                let gradScore = weights[other] * (gradWeights[other] - weightedGrad)
+                var gradScore = 0.0
+                if other < gradScores.length() {
+                    gradScore = gradScores[other]
+                }
                 var d = 0
                 while d < headDim {
                     let col = head * headDim + d
@@ -2658,7 +2695,7 @@ fun accumulateAttentionDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gr
     let contextInput = rowVector(trace.attentionContext, row, trace.hiddenSize)
     accumulateDenseDeltaGrad(contextInput, gradAttnLnInput, attentionDenseDelta, gradADW, gradADB)
     let gradContext = denseInputGradientWithDelta(gradAttnLnInput, trace.attentionOutputDenseWeight, trace.hiddenSize, trace.hiddenSize, attentionDenseDelta)
-    accumulateSelfAttentionDeltaGradForRow(trace, row, gradContext, queryDelta, keyDelta, valueDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, attentionHeads)
+    accumulateSelfAttentionDeltaGradForRow(trace, row, gradContext, queryDelta, keyDelta, valueDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, attentionHeads, backend)
 }
 
 fun attentionNormGradientFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, backend: String) r: Array<Float> {
@@ -2693,7 +2730,7 @@ fun denseInputGradientWithDelta(gradOut: Array<Float>, baseWeight: Array<Float>,
     return out
 }
 
-fun accumulateSelfAttentionDeltaGradForRow(trace: MiniLMDenseTrace, token: Int, gradContextRow: Array<Float>, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, attentionHeads: Int) r: Void {
+fun accumulateSelfAttentionDeltaGradForRow(trace: MiniLMDenseTrace, token: Int, gradContextRow: Array<Float>, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, attentionHeads: Int, backend: String) r: Void {
     if attentionHeads <= 0 or trace.hiddenSize % attentionHeads != 0 {
         return
     }
@@ -2704,36 +2741,9 @@ fun accumulateSelfAttentionDeltaGradForRow(trace: MiniLMDenseTrace, token: Int, 
     let gradVRows = denseZeros(trace.seqLen * trace.hiddenSize)
     var head = 0
     while head < attentionHeads {
-        let weights = Array<Float>()
-        var maxScore = -99999999.0
-        var other = 0
-        while other < trace.seqLen {
-            let score = attentionScore(trace.attentionQ, trace.attentionK, token, other, head, headDim, trace.hiddenSize) / scale
-            if score > maxScore {
-                maxScore = score
-            }
-            weights.push(score)
-            other = other + 1
-        }
-        var denom = 0.0
-        other = 0
-        while other < weights.length() {
-            let value = exp(weights[other] - maxScore)
-            weights[other] = value
-            denom = denom + value
-            other = other + 1
-        }
-        if denom > 0.000000001 {
-            other = 0
-            while other < weights.length() {
-                weights[other] = weights[other] / denom
-                other = other + 1
-            }
-        }
-
+        let weights = attentionWeightsForHeadBackend(trace.attentionQ, trace.attentionK, token, head, headDim, trace.hiddenSize, trace.seqLen, scale, backend)
         let gradWeights = Array<Float>()
-        var weightedGrad = 0.0
-        other = 0
+        var other = 0
         while other < trace.seqLen {
             var gw = 0.0
             var d = 0
@@ -2744,13 +2754,16 @@ fun accumulateSelfAttentionDeltaGradForRow(trace: MiniLMDenseTrace, token: Int, 
                 d = d + 1
             }
             gradWeights.push(gw)
-            weightedGrad = weightedGrad + gw * weights[other]
             other = other + 1
         }
 
+        let gradScores = attentionSoftmaxBackwardBackend(weights, gradWeights, backend)
         other = 0
         while other < trace.seqLen {
-            let gradScore = weights[other] * (gradWeights[other] - weightedGrad)
+            var gradScore = 0.0
+            if other < gradScores.length() {
+                gradScore = gradScores[other]
+            }
             var d = 0
             while d < headDim {
                 let col = head * headDim + d
