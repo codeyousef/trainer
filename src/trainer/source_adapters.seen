@@ -1,6 +1,6 @@
 import config.{TrainerConfig}
 import io.file.{readText}
-import jsonl.{PairExample, readPairs}
+import jsonl.{PairExample, readPairsWithMinLength}
 import str.string.{split, trim}
 
 fun readSourcePairs(cfg: TrainerConfig) r: Array<PairExample> {
@@ -12,20 +12,19 @@ fun readSourcePairs(cfg: TrainerConfig) r: Array<PairExample> {
     if format == "tsv" {
         return readDelimitedPairs(path, "\t", cfg)
     }
-    return readPairs(path)
+    return readPairsWithMinLength(path, cfg.minTextLength)
 }
 
 fun normalizeSourceFormat(format: String, path: String) r: String {
-    if format == "jsonl" or format == "csv" or format == "tsv" {
-        return format
+    let normalized = trim(format).toLowerCase()
+    if normalized == "jsonl" or normalized == "csv" or normalized == "tsv" {
+        return normalized
     }
-    if format == "JSONL" { return "jsonl" }
-    if format == "CSV" { return "csv" }
-    if format == "TSV" { return "tsv" }
-    if endsWith(path, ".csv") {
+    let normalizedPath = path.toLowerCase()
+    if endsWith(normalizedPath, ".csv") {
         return "csv"
     }
-    if endsWith(path, ".tsv") {
+    if endsWith(normalizedPath, ".tsv") {
         return "tsv"
     }
     return "jsonl"
@@ -159,9 +158,10 @@ fun findHeader(headers: Array<String>, name: String) r: Int {
     if name.length() == 0 {
         return -1
     }
+    let normalizedName = trim(name).toLowerCase()
     var i = 0
     while i < headers.length() {
-        if trim(headers[i]) == name {
+        if trim(headers[i]).toLowerCase() == normalizedName {
             return i
         }
         i = i + 1

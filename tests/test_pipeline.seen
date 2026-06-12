@@ -1,4 +1,5 @@
 import trainer.config.{readConfig}
+import trainer.calibration.{DomainThreshold, thresholdsJson}
 import trainer.encoder.{Encoder}
 import trainer.io.file.{exists}
 import trainer.io_utils.{writeAtomicText}
@@ -33,6 +34,31 @@ fun matrixRowSquareSum(matrix: MiningEmbeddingMatrix, row: Int) r: Float {
     return sum
 }
 
+fun stringContains(text: String, needle: String) r: Bool {
+    if needle.length() == 0 {
+        return true
+    }
+    if needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i <= text.length() - needle.length() {
+        var matched = true
+        var j = 0
+        while j < needle.length() {
+            if text.charAt(i + j) != needle.charAt(j) {
+                matched = false
+            }
+            j = j + 1
+        }
+        if matched {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
 fun main() -> Int {
     expect(normalizedTopK(16, 3) == 3, "top k clamps to candidate count")
     expect(normalizedTopK(0, 3) == 1, "top k defaults to one candidate")
@@ -62,6 +88,11 @@ fun main() -> Int {
     expect(cpuNeg == 2, "matrix mining excludes same domain")
     let gpuNeg = findNegativeIndexWithMatrix(miningPairs, 0, queryEmbedding, positiveMatrix, 3, "gpu")
     expect(gpuNeg == 2, "gpu mining path preserves fallback semantics")
+
+    let escapedThresholds = Array<DomainThreshold>()
+    escapedThresholds.push(DomainThreshold.new("quoted \"domain\" \\ source", 0.4, 1))
+    let escapedThresholdJson = thresholdsJson(escapedThresholds)
+    expect(stringContains(escapedThresholdJson, "\"quoted \\\"domain\\\" \\\\ source\""), "threshold domain json escaping")
 
     let dataPath = "/tmp/seen_trainer_test/train.jsonl"
     let cfgPath = "/tmp/seen_trainer_test/config.json"

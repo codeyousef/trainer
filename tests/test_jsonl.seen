@@ -47,7 +47,7 @@ fun main() -> Int {
 
     let sourceDir = "/tmp/seen_trainer_source_adapter"
     writeAtomicText(sourceDir + "/pairs.csv",
-        "instruction,response,domain,source\n"
+        "Instruction,RESPONSE,DOMAIN,SOURCE\n"
         + "\"How to reset?\",\"Use the reset policy\",support,kb\n"
         + "x,y,tiny,tiny\n")
     writeAtomicText(sourceDir + "/config.json",
@@ -64,6 +64,18 @@ fun main() -> Int {
     expect(pairs[0].queryText == "How to reset?", "csv query column")
     expect(pairs[0].positiveChunkText == "Use the reset policy", "csv positive column")
     expect(pairs[0].domain == "support" and pairs[0].source == "kb", "csv metadata columns")
+
+    writeAtomicText(sourceDir + "/pairs.JSONL",
+        "{\"query_text\":\"tiny\",\"positive_chunk_text\":\"valid enough\",\"domain\":\"json\",\"source\":\"one\"}\n"
+        + "{\"query_text\":\"long enough\",\"positive_chunk_text\":\"also valid\",\"domain\":\"json\",\"source\":\"two\"}\n")
+    writeAtomicText(sourceDir + "/json_config.json",
+        "{\"source_data_path\":\"" + sourceDir + "/pairs.JSONL\","
+        + "\"source_format\":\"JSONL\","
+        + "\"min_text_length\":8}")
+    let jsonCfg = readConfig(sourceDir + "/json_config.json")
+    let jsonPairs = readSourcePairs(jsonCfg)
+    expect(jsonPairs.length() == 1, "jsonl source adapter min length")
+    expect(jsonPairs[0].source == "two", "jsonl source adapter keeps valid row")
     println("PASS test_jsonl")
     return 0
 }

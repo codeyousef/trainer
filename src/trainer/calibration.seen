@@ -2,6 +2,7 @@ import config.{TrainerConfig}
 import encoder.{Encoder}
 import io.file.{exists}
 import io_utils.{writeAtomicText}
+import json.builder.{escapeJsonString}
 import jsonl.{TripletExample, readTriplets}
 import math_utils.{cosine, percentile, deterministicShuffleIndices}
 
@@ -171,7 +172,7 @@ fun thresholdsJson(thresholds: Array<DomainThreshold>) r: String {
     var out = "{\n"
     var i = 0
     while i < thresholds.length() {
-        out = out + "  \"" + thresholds[i].domain + "\": " + thresholds[i].threshold.toString()
+        out = out + "  " + escapeJsonString(thresholds[i].domain) + ": " + thresholds[i].threshold.toString()
         if i + 1 < thresholds.length() {
             out = out + ","
         }

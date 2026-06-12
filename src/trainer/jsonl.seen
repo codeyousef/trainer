@@ -114,15 +114,20 @@ fun readTriplets(path: String) r: Array<TripletExample> {
 }
 
 fun readPairs(path: String) r: Array<PairExample> {
+    return readPairsWithMinLength(path, 2)
+}
+
+fun readPairsWithMinLength(path: String, minTextLength: Int) r: Array<PairExample> {
     let content = readText(path)
     let lines = split(content, "\n")
     let items = Array<PairExample>()
+    let minLen = if minTextLength > 0 { minTextLength } else { 1 }
     var i = 0
     while i < lines.length() {
         let line = trim(lines[i])
         if line.length() > 0 {
             let pair = parsePairLine(line)
-            if pair.queryText.length() > 1 and pair.positiveChunkText.length() > 1 {
+            if pair.queryText.length() >= minLen and pair.positiveChunkText.length() >= minLen {
                 items.push(pair)
             }
         }
