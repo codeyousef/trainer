@@ -1,6 +1,6 @@
 import io.file.{copyFileBytes, exists, readText}
 import capabilities.{trainerCapabilitiesJson, trainerPackageReadmeNote}
-import config.{TrainerConfig}
+import config.{TrainerConfig, resolvedParameterRegistryLoadCap}
 import dense_lora.{miniLMLayerAttentionDenseDeltaPath, miniLMLayerAttentionLayerNormDeltaPath, miniLMLayerIntermediateDeltaPath, miniLMLayerKeyDeltaPath, miniLMLayerOutputDeltaPath, miniLMLayerOutputLayerNormDeltaPath, miniLMLayerQueryDeltaPath, miniLMLayerValueDeltaPath}
 import embedding_delta.{miniLMEmbeddingDeltasPath}
 import io_utils.{writeAtomicText}
@@ -70,7 +70,7 @@ fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegi
     }
     var packageRegistry = parameterRegistry
     if parameterRegistry.optimizerUpdates <= 0 {
-        packageRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
+        packageRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, resolvedParameterRegistryLoadCap(cfg), cfg.backend)
     }
     if writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", packageRegistry) {
         files = files + 1

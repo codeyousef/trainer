@@ -1,6 +1,6 @@
 import io.file.{exists, readText}
 import adapter.{ProjectionAdapter}
-import config.{TrainerConfig}
+import config.{TrainerConfig, resolvedMiniLMLayers, resolvedParameterRegistryLoadCap}
 import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas}
 import embedding_delta.{MiniLMEmbeddingDeltas, miniLMEmbeddingDeltasPath}
 import encoder.{Encoder}
@@ -23,9 +23,10 @@ class ModelBundle {
 
     static fun load(cfg: TrainerConfig) r: ModelBundle {
         let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
+        let runtimeLayers = resolvedMiniLMLayers(cfg, modelMeta.layers)
         let tokenizer = Tokenizer.load(cfg.tokenizerPath(), cfg.maxSequenceLength)
         let weights = SafeTensorInfo.inspect(cfg.modelWeightsPath())
-        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
+        let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, runtimeLayers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
         var minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)
@@ -35,8 +36,11 @@ class ModelBundle {
         var minilmAttentionDenseDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.hiddenSize)
         var minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
         var minilmLayerNormDelta = LayerNormDeltaAdapter.identity(modelMeta.hiddenSize)
-        var minilmLayerDeltas = MiniLMLayerDeltas.identity(modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+        var minilmLayerDeltas = MiniLMLayerDeltas.identity(0, modelMeta.hiddenSize, modelMeta.intermediateSize)
         var minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.identity(modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
+        if cfg.trainAllMiniLMLayers {
+            minilmLayerDeltas = MiniLMLayerDeltas.identity(runtimeLayers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+        }
         if embeddings.loaded {
             minilmDenseAdapter = DenseLoRAAdapter.load(cfg.minilmDenseAdapterPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
             minilmDenseDelta = DenseDeltaAdapter.load(cfg.minilmDenseDeltaPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
@@ -47,7 +51,9 @@ class ModelBundle {
             minilmAttentionDenseDelta = DenseDeltaAdapter.load(cfg.minilmAttentionDenseDeltaPath(), modelMeta.hiddenSize, modelMeta.hiddenSize)
             minilmAttentionLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmAttentionLayerNormDeltaPath(), modelMeta.hiddenSize)
             minilmLayerNormDelta = LayerNormDeltaAdapter.load(cfg.minilmLayerNormDeltaPath(), modelMeta.hiddenSize)
-            minilmLayerDeltas = MiniLMLayerDeltas.load(cfg.outputModelDir, modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+            if cfg.trainAllMiniLMLayers {
+                minilmLayerDeltas = MiniLMLayerDeltas.load(cfg.outputModelDir, runtimeLayers, modelMeta.hiddenSize, modelMeta.intermediateSize)
+            }
             minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.load(miniLMEmbeddingDeltasPath(cfg.outputModelDir), modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
         }
         let minilmLayerAdapter = ProjectionAdapter.load(cfg.minilmLayerAdapterPath(), modelMeta.hiddenSize)
@@ -55,7 +61,7 @@ class ModelBundle {
         let adapter = ProjectionAdapter.load(cfg.adapterPath(), modelMeta.hiddenSize)
         let encoder = Encoder.withMiniLMEmbeddingsAndAdapter(tokenizer, modelMeta.hiddenSize, embeddings, minilmDenseAdapter, minilmDenseDelta, minilmIntermediateDelta, minilmQueryDelta, minilmKeyDelta, minilmValueDelta, minilmAttentionDenseDelta, minilmAttentionLayerNormDelta, minilmLayerNormDelta, minilmLayerDeltas, minilmEmbeddingDeltas, cfg.minilmDenseAdapterLayer, minilmLayerAdapter, cfg.minilmAdapterLayer, layerAdapter, adapter)
         let weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
-        let parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend)
+        let parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, resolvedParameterRegistryLoadCap(cfg), cfg.backend)
         return ModelBundle{
             tokenizer: tokenizer,
             encoder: encoder,

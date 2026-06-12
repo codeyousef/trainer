@@ -1,4 +1,4 @@
-import config.{TrainerConfig}
+import config.{TrainerConfig, resolvedParameterRegistryLoadCap}
 import capabilities.{trainerCapabilityFields, trainerTrainingMode}
 import base_update.{directBaseWeightsPath, writeDirectBaseWeightUpdateArtifact}
 import embedding_delta.{miniLMEmbeddingDeltasPath}
@@ -81,7 +81,7 @@ fun trainEncoder(cfg: TrainerConfig, encoder: Encoder, parameterRegistry: MiniLM
     encoder.layerAdapter.save(cfg.layerAdapterPath())
     encoder.adapter.save(cfg.adapterPath())
     let path = cfg.outputModelDir + "/training_config.json"
-    writeAtomicText(path, trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch))
+    writeAtomicText(path, trainingConfigJson(cfg, items.length(), finalLoss, batchSize, batches, examplesPerEpoch, encoder.modelEmbeddings.layers))
     writeMiniLMParameterRegistry(cfg.outputModelDir + "/minilm_parameter_registry.json", parameterRegistry)
     return TrainResult.new(items.length(), cfg.epochs, finalLoss, path)
 }
@@ -144,7 +144,7 @@ fun tripletLoss(item: TripletExample, encoder: Encoder, margin: Float) r: Float 
     return relu(simNeg - simPos + margin)
 }
 
-fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBatch: Int, batches: Int, examplesPerEpoch: Int) r: String {
+fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBatch: Int, batches: Int, examplesPerEpoch: Int, runtimeLayers: Int) r: String {
     let dropped = count - examplesPerEpoch
     return "{\n"
         + "  \"trainer\": \"seen-native\",\n"
@@ -168,6 +168,10 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"grad_clip\": " + cfg.gradClip.toString() + ",\n"
         + "  \"quality_margin\": " + cfg.qualityMargin.toString() + ",\n"
         + "  \"weight_load_cap_elements\": " + cfg.weightLoadCapElements.toString() + ",\n"
+        + "  \"parameter_registry_load_cap_elements\": " + resolvedParameterRegistryLoadCap(cfg).toString() + ",\n"
+        + "  \"train_all_minilm_layers\": " + cfg.trainAllMiniLMLayers.toString() + ",\n"
+        + "  \"max_minilm_layers\": " + cfg.maxMiniLMLayers.toString() + ",\n"
+        + "  \"effective_minilm_layers\": " + runtimeLayers.toString() + ",\n"
         + "  \"capabilities\": {\n"
         + trainerCapabilityFields(cfg) + "\n"
         + "  },\n"

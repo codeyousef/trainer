@@ -56,9 +56,15 @@ fun main() -> Int {
         + "\"source_query_column\":\"instruction\","
         + "\"source_positive_column\":\"response\","
         + "\"min_text_length\":3,"
+        + "\"parameter_registry_load_cap_elements\":7,"
+        + "\"train_all_minilm_layers\":false,"
+        + "\"max_minilm_layers\":1,"
         + "\"learning_rate\":2e-5}")
     let cfg = readConfig(sourceDir + "/config.json")
     expect(cfg.learningRate > 0.000019 and cfg.learningRate < 0.000021, "scientific config float")
+    expect(cfg.parameterRegistryLoadCapElements == 7, "registry cap config")
+    expect(not cfg.trainAllMiniLMLayers, "train all layers config")
+    expect(cfg.maxMiniLMLayers == 1, "max minilm layers config")
     let pairs = readSourcePairs(cfg)
     expect(pairs.length() == 1, "csv source adapter filter")
     expect(pairs[0].queryText == "How to reset?", "csv query column")

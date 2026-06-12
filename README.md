@@ -56,6 +56,7 @@ The package step writes SentenceTransformer-compatible files plus Seen manifests
 Packages also include `minilm_parameter_registry.json`, a Seen-native object graph of loaded MiniLM safetensors tensors as `Parameter` buffers with value, gradient, and Adam moment arrays. When MiniLM slots are loaded, sparse embedding, embedding LayerNorm, and encoder layer-surface AdamW updates run through those registry buffers and sync the resulting deltas back into the package-compatible delta artifacts.
 
 Safetensors metadata is inspected through header reads, tensor loads use byte-range reads, and materialization patches tensor-sized slices or sparse rows instead of loading the whole model file into a Seen byte array.
+For constrained real-model smokes, `weight_load_cap_elements` controls MiniLM embedding/forward tensor eligibility, while `parameter_registry_load_cap_elements` independently controls whether safetensors values are loaded into trainable registry buffers. `train_all_minilm_layers` can be set to `false` to exercise adapter-only MiniLM training without allocating all all-layer delta surfaces, and `max_minilm_layers` can bound the runtime forward/training layer count while leaving packaged model metadata intact.
 
 The direct update manifest is written to:
 

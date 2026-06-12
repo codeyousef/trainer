@@ -31,6 +31,9 @@ class TrainerConfig {
     var minTextLength: Int
     var copyBaseArtifacts: Bool
     var weightLoadCapElements: Int
+    var parameterRegistryLoadCapElements: Int
+    var trainAllMiniLMLayers: Bool
+    var maxMiniLMLayers: Int
     var minilmAdapterLayer: Int
     var minilmDenseAdapterLayer: Int
     var backendGpu: Int
@@ -68,6 +71,9 @@ class TrainerConfig {
             minTextLength: 2,
             copyBaseArtifacts: true,
             weightLoadCapElements: 0,
+            parameterRegistryLoadCapElements: -1,
+            trainAllMiniLMLayers: true,
+            maxMiniLMLayers: 0,
             minilmAdapterLayer: 0,
             minilmDenseAdapterLayer: -1,
             backendGpu: 1,
@@ -174,11 +180,31 @@ fun readConfig(path: String) r: TrainerConfig {
     cfg.minTextLength = configInt(text, "min_text_length", cfg.minTextLength)
     cfg.copyBaseArtifacts = configBool(text, "copy_base_artifacts", cfg.copyBaseArtifacts)
     cfg.weightLoadCapElements = configInt(text, "weight_load_cap_elements", cfg.weightLoadCapElements)
+    cfg.parameterRegistryLoadCapElements = configInt(text, "parameter_registry_load_cap_elements", cfg.parameterRegistryLoadCapElements)
+    cfg.trainAllMiniLMLayers = configBool(text, "train_all_minilm_layers", cfg.trainAllMiniLMLayers)
+    cfg.maxMiniLMLayers = configInt(text, "max_minilm_layers", cfg.maxMiniLMLayers)
     cfg.minilmAdapterLayer = configInt(text, "minilm_adapter_layer", cfg.minilmAdapterLayer)
     cfg.minilmDenseAdapterLayer = configInt(text, "minilm_dense_adapter_layer", cfg.minilmDenseAdapterLayer)
     cfg.backend = configString(text, "backend", cfg.backend)
     cfg.backendGpu = backendStringIsGpu(cfg.backend)
     return cfg
+}
+
+fun resolvedParameterRegistryLoadCap(cfg: TrainerConfig) r: Int {
+    if cfg.parameterRegistryLoadCapElements >= 0 {
+        return cfg.parameterRegistryLoadCapElements
+    }
+    return cfg.weightLoadCapElements
+}
+
+fun resolvedMiniLMLayers(cfg: TrainerConfig, modelLayers: Int) r: Int {
+    if modelLayers <= 0 {
+        return 0
+    }
+    if cfg.maxMiniLMLayers > 0 and cfg.maxMiniLMLayers < modelLayers {
+        return cfg.maxMiniLMLayers
+    }
+    return modelLayers
 }
 
 fun backendStringIsGpu(name: String) r: Int {
