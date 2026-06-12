@@ -1,5 +1,6 @@
 import config.{TrainerConfig}
 import encoder.{Encoder}
+import gpu_tensor_ops.{tensorGpuBackendEnabled, tensorGpuTopKInnerProductIndices}
 import io_utils.{writeAtomicText}
 import jsonl.{PairExample, TripletExample, tripletsToJsonl}
 import math_utils.{cosine}
@@ -14,12 +15,34 @@ class MineResult {
     }
 }
 
+class MiningEmbeddingMatrix {
+    var ok: Bool
+    var rows: Int
+    var cols: Int
+    var values: Array<Float>
+
+    static fun empty() r: MiningEmbeddingMatrix {
+        return MiningEmbeddingMatrix{ ok: false, rows: 0, cols: 0, values: Array<Float>() }
+    }
+
+    static fun new(rows: Int, cols: Int, values: Array<Float>) r: MiningEmbeddingMatrix {
+        return MiningEmbeddingMatrix{ ok: true, rows: rows, cols: cols, values: values }
+    }
+}
+
 fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
     let pairs = readSourcePairs(cfg)
+    let positiveMatrix = buildPositiveEmbeddingMatrix(pairs, encoder)
     let out = Array<TripletExample>()
     var i = 0
     while i < pairs.length() {
-        let negIdx = findNegativeIndex(pairs, i, encoder, cfg.topK)
+        let queryEmbedding = encoder.encode(pairs[i].queryText)
+        var negIdx = -1
+        if positiveMatrix.ok {
+            negIdx = findNegativeIndexWithMatrix(pairs, i, queryEmbedding, positiveMatrix, cfg.topK, cfg.backend)
+        } else {
+            negIdx = findNegativeIndexByEncoding(pairs, i, encoder, cfg.topK)
+        }
         var neg = ""
         if negIdx >= 0 {
             neg = pairs[negIdx].positiveChunkText
@@ -41,6 +64,15 @@ fun mineHardNegatives(cfg: TrainerConfig, encoder: Encoder) r: MineResult {
 }
 
 fun findNegativeIndex(pairs: Array<PairExample>, queryIndex: Int, encoder: Encoder, topK: Int) r: Int {
+    let positiveMatrix = buildPositiveEmbeddingMatrix(pairs, encoder)
+    let queryEmbedding = encoder.encode(pairs[queryIndex].queryText)
+    if not positiveMatrix.ok {
+        return findNegativeIndexByEncoding(pairs, queryIndex, encoder, topK)
+    }
+    return findNegativeIndexWithMatrix(pairs, queryIndex, queryEmbedding, positiveMatrix, topK, "cpu")
+}
+
+fun findNegativeIndexByEncoding(pairs: Array<PairExample>, queryIndex: Int, encoder: Encoder, topK: Int) r: Int {
     if pairs.length() <= 1 {
         return -1
     }
@@ -49,6 +81,130 @@ fun findNegativeIndex(pairs: Array<PairExample>, queryIndex: Int, encoder: Encod
     let keep = normalizedTopK(topK, candidateCount)
     let topIndices = initializedIntArray(keep, -1)
     let topScores = initializedFloatArray(keep, -999999.0)
+    var i = 0
+    while i < pairs.length() {
+        if i != queryIndex {
+            let p = encoder.encode(pairs[i].positiveChunkText)
+            let score = cosine(q, p)
+            insertTopCandidate(topIndices, topScores, i, score)
+        }
+        i = i + 1
+    }
+    let topChoice = firstValidTopIndex(pairs, queryIndex, topIndices)
+    if topChoice >= 0 {
+        return topChoice
+    }
+    return fallbackNegativeIndex(pairs, queryIndex)
+}
+
+fun buildPositiveEmbeddingMatrix(pairs: Array<PairExample>, encoder: Encoder) r: MiningEmbeddingMatrix {
+    if pairs.length() == 0 {
+        return MiningEmbeddingMatrix.empty()
+    }
+    let values = Array<Float>()
+    var cols = 0
+    var i = 0
+    while i < pairs.length() {
+        let emb = encoder.encode(pairs[i].positiveChunkText)
+        if emb.length() == 0 {
+            return MiningEmbeddingMatrix.empty()
+        }
+        if cols == 0 {
+            cols = emb.length()
+        }
+        if emb.length() != cols {
+            return MiningEmbeddingMatrix.empty()
+        }
+        var d = 0
+        while d < emb.length() {
+            values.push(emb[d])
+            d = d + 1
+        }
+        i = i + 1
+    }
+    return MiningEmbeddingMatrix.new(pairs.length(), cols, values)
+}
+
+fun findNegativeIndexWithMatrix(pairs: Array<PairExample>, queryIndex: Int, queryEmbedding: Array<Float>, matrix: MiningEmbeddingMatrix, topK: Int, backend: String) r: Int {
+    if not matrix.ok or queryEmbedding.length() != matrix.cols {
+        return fallbackNegativeIndex(pairs, queryIndex)
+    }
+    let candidateCount = pairs.length() - 1
+    let keep = normalizedTopK(topK, candidateCount)
+    if keep <= 0 {
+        return -1
+    }
+    if tensorGpuBackendEnabled(backend) {
+        var gpuKeep = keep + 1
+        if gpuKeep > matrix.rows {
+            gpuKeep = matrix.rows
+        }
+        let gpu = tensorGpuTopKInnerProductIndices(queryEmbedding, matrix.values, matrix.rows, matrix.cols, gpuKeep)
+        if gpu.ok == 1 {
+            let gpuChoice = firstValidTopIndex(pairs, queryIndex, gpu.values)
+            if gpuChoice >= 0 {
+                return gpuChoice
+            }
+            let fallback = fallbackNegativeIndex(pairs, queryIndex)
+            if fallback >= 0 {
+                return fallback
+            }
+        }
+    }
+    return findNegativeIndexScalar(pairs, queryIndex, queryEmbedding, matrix, topK)
+}
+
+fun findNegativeIndexScalar(pairs: Array<PairExample>, queryIndex: Int, queryEmbedding: Array<Float>, matrix: MiningEmbeddingMatrix, topK: Int) r: Int {
+    if pairs.length() <= 1 {
+        return -1
+    }
+    let candidateCount = pairs.length() - 1
+    let keep = normalizedTopK(topK, candidateCount)
+    let topIndices = initializedIntArray(keep, -1)
+    let topScores = initializedFloatArray(keep, -999999.0)
+    var i = 0
+    while i < pairs.length() {
+        if i != queryIndex {
+            let score = miningScore(queryEmbedding, matrix, i)
+            insertTopCandidate(topIndices, topScores, i, score)
+        }
+        i = i + 1
+    }
+
+    let topChoice = firstValidTopIndex(pairs, queryIndex, topIndices)
+    if topChoice >= 0 {
+        return topChoice
+    }
+    return fallbackNegativeIndex(pairs, queryIndex)
+}
+
+fun miningScore(queryEmbedding: Array<Float>, matrix: MiningEmbeddingMatrix, row: Int) r: Float {
+    if matrix.ok and row >= 0 and row < matrix.rows and queryEmbedding.length() == matrix.cols {
+        var sum = 0.0
+        var d = 0
+        let offset = row * matrix.cols
+        while d < matrix.cols {
+            sum = sum + queryEmbedding[d] * matrix.values[offset + d]
+            d = d + 1
+        }
+        return sum
+    }
+    return -999999.0
+}
+
+fun firstValidTopIndex(pairs: Array<PairExample>, queryIndex: Int, indices: Array<Int>) r: Int {
+    var rank = 0
+    while rank < indices.length() {
+        let idx = indices[rank]
+        if idx >= 0 and idx != queryIndex and not excludedNegativeCandidate(pairs, queryIndex, idx) {
+            return idx
+        }
+        rank = rank + 1
+    }
+    return -1
+}
+
+fun fallbackNegativeIndex(pairs: Array<PairExample>, queryIndex: Int) r: Int {
     var fallbackAny = -1
     var fallbackValid = -1
     var i = 0
@@ -57,37 +213,22 @@ fun findNegativeIndex(pairs: Array<PairExample>, queryIndex: Int, encoder: Encod
             if fallbackAny < 0 {
                 fallbackAny = i
             }
-            let sameDomain = pairs[i].domain.length() > 0 and pairs[i].domain == pairs[queryIndex].domain
-            let sameSource = pairs[i].source.length() > 0 and pairs[i].source == pairs[queryIndex].source
-            if not sameDomain and not sameSource {
-                if fallbackValid < 0 {
-                    fallbackValid = i
-                }
+            if not excludedNegativeCandidate(pairs, queryIndex, i) and fallbackValid < 0 {
+                fallbackValid = i
             }
-            let p = encoder.encode(pairs[i].positiveChunkText)
-            let score = cosine(q, p)
-            insertTopCandidate(topIndices, topScores, i, score)
         }
         i = i + 1
     }
-
-    var rank = 0
-    while rank < topIndices.length() {
-        let idx = topIndices[rank]
-        if idx >= 0 {
-            let sameDomain = pairs[idx].domain.length() > 0 and pairs[idx].domain == pairs[queryIndex].domain
-            let sameSource = pairs[idx].source.length() > 0 and pairs[idx].source == pairs[queryIndex].source
-            if not sameDomain and not sameSource {
-                return idx
-            }
-        }
-        rank = rank + 1
-    }
-
     if fallbackValid >= 0 {
         return fallbackValid
     }
     return fallbackAny
+}
+
+fun excludedNegativeCandidate(pairs: Array<PairExample>, queryIndex: Int, candidateIndex: Int) r: Bool {
+    let sameDomain = pairs[candidateIndex].domain.length() > 0 and pairs[candidateIndex].domain == pairs[queryIndex].domain
+    let sameSource = pairs[candidateIndex].source.length() > 0 and pairs[candidateIndex].source == pairs[queryIndex].source
+    return sameDomain or sameSource
 }
 
 fun normalizedTopK(requested: Int, candidates: Int) r: Int {

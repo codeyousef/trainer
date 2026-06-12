@@ -1,8 +1,11 @@
 import trainer.config.{readConfig}
+import trainer.encoder.{Encoder}
 import trainer.io.file.{exists}
 import trainer.io_utils.{writeAtomicText}
-import trainer.miner.{initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
+import trainer.jsonl.{PairExample}
+import trainer.miner.{buildPositiveEmbeddingMatrix, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, normalizedTopK}
 import trainer.pipeline.{Pipeline}
+import trainer.tokenizer.{Tokenizer}
 import trainer.training.{batchesPerEpoch, effectiveBatchSize}
 
 fun expect(condition: Bool, message: String) r: Void {
@@ -23,6 +26,20 @@ fun main() -> Int {
     expect(topIdx[1] == 12, "top k second candidate retained")
     expect(effectiveBatchSize(64, 3) == 3, "small fixtures clamp effective batch")
     expect(batchesPerEpoch(130, 64) == 2, "drop final partial batch")
+
+    let miningPairs = Array<PairExample>()
+    miningPairs.push(PairExample.new("alpha question", "alpha answer", "alpha", "one"))
+    miningPairs.push(PairExample.new("alpha related", "alpha nearby answer", "alpha", "two"))
+    miningPairs.push(PairExample.new("beta question", "beta answer", "beta", "three"))
+    let miningEncoder = Encoder.new(Tokenizer.load("/tmp/seen_trainer_missing_tokenizer/tokenizer.json", 16), 16)
+    let positiveMatrix = buildPositiveEmbeddingMatrix(miningPairs, miningEncoder)
+    expect(positiveMatrix.ok, "mining positive matrix built")
+    expect(positiveMatrix.rows == 3 and positiveMatrix.cols == 16, "mining matrix shape")
+    let queryEmbedding = miningEncoder.encode("alpha question")
+    let cpuNeg = findNegativeIndexWithMatrix(miningPairs, 0, queryEmbedding, positiveMatrix, 3, "cpu")
+    expect(cpuNeg == 2, "matrix mining excludes same domain")
+    let gpuNeg = findNegativeIndexWithMatrix(miningPairs, 0, queryEmbedding, positiveMatrix, 3, "gpu")
+    expect(gpuNeg == 2, "gpu mining path preserves fallback semantics")
 
     let dataPath = "/tmp/seen_trainer_test/train.jsonl"
     let cfgPath = "/tmp/seen_trainer_test/config.json"

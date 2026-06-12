@@ -32,6 +32,9 @@ Training JSONL rows use this triplet schema:
 ```
 
 Source adapters can also normalize CSV/TSV/JSONL rows into `(query, positive)` pairs before mining.
+Hard-negative mining precomputes normalized positive embeddings once, then uses Seen's
+`tensorTopKInnerProduct` GPU kernel when `backend` is `gpu`; if dispatch is unavailable it
+falls back to the same scalar top-k and domain/source exclusion semantics.
 
 ## Model Outputs
 

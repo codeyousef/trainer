@@ -1,4 +1,6 @@
-import trainer.graphics.gpu.{gpuInit, gpuIsAvailable}
+import env.env.{args}
+import graphics.gpu.{gpuInit, gpuIsAvailable}
+import io.file.{exists}
 
 extern fun seen_gpu_init() r: Int
 extern fun seen_gpu_is_available() r: Int
@@ -67,7 +69,23 @@ fun tensorGpuEnsureInitialized() r: Bool {
 }
 
 fun tensorGpuShaderPath(name: String) r: String {
-    return "target/trainer.shaders/" + name + ".comp.spv"
+    let fileName = name + ".comp.spv"
+    let argv = args()
+    if argv.length() > 0 and argv[0].length() > 0 {
+        let executableRelative = argv[0] + ".shaders/" + fileName
+        if exists(executableRelative) {
+            return executableRelative
+        }
+    }
+    let defaultRelative = "target/trainer.shaders/" + fileName
+    if exists(defaultRelative) {
+        return defaultRelative
+    }
+    let parentRelative = "../target/trainer.shaders/" + fileName
+    if exists(parentRelative) {
+        return parentRelative
+    }
+    return defaultRelative
 }
 
 fun tensorGpuDivCeil(value: Int, divisor: Int) r: Int {

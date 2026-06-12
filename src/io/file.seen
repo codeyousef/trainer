@@ -54,7 +54,7 @@ fun createDirectory(path: String) r: Bool {
 }
 
 fun size(path: String) r: Int {
-    let fd = __OpenFile(path, "r")
+    let fd = __OpenFile(path, "rb")
     if fd < 0 {
         return -1
     }

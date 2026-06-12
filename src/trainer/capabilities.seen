@@ -43,7 +43,10 @@ fun trainerCapabilityFields(cfg: TrainerConfig) r: String {
         + "  \"gpu_shader_artifact_format\": \"glsl_and_spirv_reflection\",\n"
         + "  \"gpu_tensor_dispatch_implemented\": true,\n"
         + "  \"cpu_scalar_reference_path\": true,\n"
-        + "  \"hard_negative_mining\": \"normalized_inner_product_top_k_with_domain_source_exclusion\",\n"
+        + "  \"hard_negative_mining\": \"precomputed_normalized_inner_product_top_k_with_domain_source_exclusion\",\n"
+        + "  \"hard_negative_mining_gpu_topk\": " + (cfg.backendGpu == 1).toString() + ",\n"
+        + "  \"hard_negative_mining_gpu_kernel\": \"tensorTopKInnerProduct\",\n"
+        + "  \"hard_negative_mining_cpu_fallback\": true,\n"
         + "  \"calibration\": \"per_domain_percentile_positive_cosine\",\n"
         + "  \"package_format\": \"sentence_transformer_compatible_with_seen_manifests\""
 }
