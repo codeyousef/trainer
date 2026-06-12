@@ -57,6 +57,12 @@ fun gelu(x: Float) r: Float {
 }
 
 fun tanhApprox(x: Float) r: Float {
+    if x > 9.0 {
+        return 1.0
+    }
+    if x < -9.0 {
+        return -1.0
+    }
     let two = 2.0 * x
     let e = exp(two)
     return (e - 1.0) / (e + 1.0)

@@ -1,4 +1,4 @@
-import trainer.math_utils.{cosine}
+import trainer.math_utils.{cosine, gelu}
 import trainer.optimizer.{AdamW, clipGlobalNorm}
 import trainer.dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
 import trainer.tensor.{Parameter, Tensor, tensorGeluDerivativeScalar, tripletMarginLoss, tripletMarginLossRows}
@@ -94,6 +94,9 @@ fun main() -> Int {
     expect(closeEnough(geluBack.at(0, 1), 0.5 * tensorGeluDerivativeScalar(0.0)), "gelu backward zero")
     expect(closeEnough(geluBack.at(1, 0), -0.25 * tensorGeluDerivativeScalar(1.0)), "gelu backward positive")
     expect(closeEnough(geluBack.at(1, 1), 2.0 * tensorGeluDerivativeScalar(2.0)), "gelu backward large")
+    let largeGelu = gelu(100.0)
+    expect(largeGelu == largeGelu, "large gelu is finite")
+    expect(largeGelu > 99.0 and largeGelu < 101.0, "large gelu saturates")
     let added = a.add(b)
     expect(added.at(0, 0) == 6.0 and added.at(1, 1) == 12.0, "elementwise add")
     let diff = b.sub(a)

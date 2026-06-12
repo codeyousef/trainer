@@ -1,4 +1,4 @@
-import io.file.{exists, readText}
+import io.file.{ensureParentDirectories, exists, readText}
 import adapter.{adapterClamp, adapterContains, adapterLowRankSeed, adapterPowFloat, adapterSqrtApprox}
 import io_utils.{writeAtomicText}
 import str.string.{StringBuilder}
@@ -406,7 +406,9 @@ class DenseDeltaAdapter {
     fun saveAs(path: String, format: String) r: Bool {
         this.path = path
         this.loaded = true
-        return writeAtomicText(path, this.toJsonWithFormat(format))
+        let builder = this.toJsonBuilderWithFormat(format)
+        ensureParentDirectories(path)
+        return builder.writeToFile(path)
     }
 
     fun toJson() r: String {
@@ -414,6 +416,10 @@ class DenseDeltaAdapter {
     }
 
     fun toJsonWithFormat(format: String) r: String {
+        return this.toJsonBuilderWithFormat(format).toString()
+    }
+
+    fun toJsonBuilderWithFormat(format: String) r: StringBuilder {
         let builder = StringBuilder.new()
         builder.append("{\n")
         builder.append("  \"format\": \"")
@@ -445,7 +451,7 @@ class DenseDeltaAdapter {
             i = i + 1
         }
         builder.append("]\n}\n")
-        return builder.toString()
+        return builder
     }
 
     fun summaryNamed(prefix: String) r: String {
