@@ -225,6 +225,30 @@ class Tensor {
         return out
     }
 
+    fun geluBackward(gradOutput: Tensor) r: Tensor {
+        if tensorGpuBackendEnabled(this.backend) {
+            let derivativeValues = Array<Float>()
+            var d = 0
+            while d < this.values.length() {
+                derivativeValues.push(tensorGeluDerivativeScalar(this.values[d]))
+                d = d + 1
+            }
+            let derivative = Tensor.fromArray(this.shape.rows, this.shape.cols, derivativeValues, this.backend)
+            let product = derivative.mulElementwise(gradOutput)
+            if product.values.length() == this.values.length() {
+                return product
+            }
+        }
+        let out = Tensor.zeros(this.shape.rows, this.shape.cols, this.backend)
+        let n = if this.values.length() < gradOutput.values.length() { this.values.length() } else { gradOutput.values.length() }
+        var i = 0
+        while i < n {
+            out.values[i] = gradOutput.values[i] * tensorGeluDerivativeScalar(this.values[i])
+            i = i + 1
+        }
+        return out
+    }
+
     fun sumRows() r: Array<Float> {
         if tensorGpuBackendEnabled(this.backend) {
             let gpu = tensorGpuRowSums(this.values, this.shape.rows, this.shape.cols)
@@ -502,6 +526,15 @@ fun tensorReluScalar(x: Float) r: Float {
 
 fun tensorGeluScalar(x: Float) r: Float {
     return 0.5 * x * (1.0 + tensorTanhApprox(0.7978845608 * (x + 0.044715 * x * x * x)))
+}
+
+fun tensorGeluDerivativeScalar(x: Float) r: Float {
+    let c = 0.7978845608
+    let inner = c * (x + 0.044715 * x * x * x)
+    let t = tensorTanhApprox(inner)
+    let sechSq = 1.0 - t * t
+    let innerGrad = c * (1.0 + 0.134145 * x * x)
+    return 0.5 * (1.0 + t) + 0.5 * x * sechSq * innerGrad
 }
 
 fun tensorTanhApprox(x: Float) r: Float {

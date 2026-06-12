@@ -1599,13 +1599,13 @@ fun layerNormDeltaEffectiveBias(base: Array<Float>, delta: LayerNormDeltaAdapter
 
 fun accumulateDenseTraceGradWithTail(info: SafeTensorInfo, trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, targetLayer: Int, readyLayers: Int, attentionHeads: Int, maxLoadElements: Int, backend: String) r: Void {
     if targetLayer == readyLayers - 1 {
-        accumulateDenseTraceGrad(trace, gradMean, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+        accumulateDenseTraceGrad(trace, gradMean, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads, backend)
         return
     }
     if targetLayer < readyLayers - 1 {
         let gradRows = tailInputGradientBackend(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, trace.inputDim, maxLoadElements, targetLayer + 1, readyLayers, gradMean, backend)
         if gradRows.length() == trace.seqLen * trace.hiddenSize {
-            accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+            accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads, backend)
         }
     }
 }
@@ -1615,16 +1615,16 @@ fun accumulateDenseTraceGradWithLayerDeltaTail(info: SafeTensorInfo, trace: Mini
         return
     }
     if targetLayer == readyLayers - 1 {
-        accumulateDenseTraceGrad(trace, gradMean, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+        accumulateDenseTraceGrad(trace, gradMean, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads, backend)
         return
     }
     let gradRows = tailInputGradientWithLayerDeltasBackend(info, trace.outputSequence, trace.seqLen, trace.hiddenSize, attentionHeads, intermediateSize, maxLoadElements, targetLayer + 1, readyLayers, gradMean, layerDeltas, backend)
     if gradRows.length() == trace.seqLen * trace.hiddenSize {
-        accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads)
+        accumulateDenseTraceGradRows(trace, gradRows, denseAdapter, layerDeltas.outputDeltas[targetLayer], layerDeltas.intermediateDeltas[targetLayer], layerDeltas.queryDeltas[targetLayer], layerDeltas.keyDeltas[targetLayer], layerDeltas.valueDeltas[targetLayer], layerDeltas.attentionDenseDeltas[targetLayer], layerDeltas.attentionLayerNormDeltas[targetLayer], layerDeltas.outputLayerNormDeltas[targetLayer], gradA, gradB, gradDW, gradDB, gradIW, gradIB, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, gradLNW, gradLNB, attentionHeads, backend)
     }
 }
 
-fun accumulateDenseTraceGrad(trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, attentionHeads: Int) r: Void {
+fun accumulateDenseTraceGrad(trace: MiniLMDenseTrace, gradMean: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, attentionHeads: Int, backend: String) r: Void {
     if not trace.ok or trace.seqLen <= 0 {
         return
     }
@@ -1646,13 +1646,13 @@ fun accumulateDenseTraceGrad(trace: MiniLMDenseTrace, gradMean: Array<Float>, de
         let ffInput = rowVector(trace.ffInput, row, trace.inputDim)
         accumulateDenseLoRAGrad(ffInput, gradZ, denseAdapter, gradA, gradB)
         accumulateDenseDeltaGrad(ffInput, gradZ, denseDelta, gradDW, gradDB)
-        accumulateIntermediateDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, gradIW, gradIB)
-        accumulateAttentionDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, attentionHeads)
+        accumulateIntermediateDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, gradIW, gradIB, backend)
+        accumulateAttentionDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, attentionHeads, backend)
         row = row + 1
     }
 }
 
-fun accumulateDenseTraceGradRows(trace: MiniLMDenseTrace, gradRows: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, attentionHeads: Int) r: Void {
+fun accumulateDenseTraceGradRows(trace: MiniLMDenseTrace, gradRows: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, gradA: Array<Float>, gradB: Array<Float>, gradDW: Array<Float>, gradDB: Array<Float>, gradIW: Array<Float>, gradIB: Array<Float>, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, gradLNW: Array<Float>, gradLNB: Array<Float>, attentionHeads: Int, backend: String) r: Void {
     if not trace.ok or trace.seqLen <= 0 {
         return
     }
@@ -1665,8 +1665,8 @@ fun accumulateDenseTraceGradRows(trace: MiniLMDenseTrace, gradRows: Array<Float>
         let ffInput = rowVector(trace.ffInput, row, trace.inputDim)
         accumulateDenseLoRAGrad(ffInput, gradZ, denseAdapter, gradA, gradB)
         accumulateDenseDeltaGrad(ffInput, gradZ, denseDelta, gradDW, gradDB)
-        accumulateIntermediateDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, gradIW, gradIB)
-        accumulateAttentionDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, attentionHeads)
+        accumulateIntermediateDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, gradIW, gradIB, backend)
+        accumulateAttentionDeltaGradFromOutput(trace, row, gradZ, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, gradADW, gradADB, gradALNW, gradALNB, attentionHeads, backend)
         row = row + 1
     }
 }
@@ -1909,7 +1909,7 @@ fun transformerLayerInputGradientBackend(info: SafeTensorInfo, sequence: Array<F
     let gradOutput = gradRows
     let gradOutputLnInput = layerNormRowsInputGradient(outputLnInput, seqLen, hiddenSize, outputLnWeight.values, gradOutput)
     let gradFfIntermediate = projectSequenceInputGradientBackend(gradOutputLnInput, seqLen, intermediateSize, outputWeight, backend)
-    let gradInterPre = applyGeluGradient(interPre, gradFfIntermediate)
+    let gradInterPre = applyGeluGradientBackend(interPre, gradFfIntermediate, backend)
     let gradAttnNorm = copyFlat(gradOutputLnInput)
     let gradAttnFromIntermediate = projectSequenceInputGradientBackend(gradInterPre, seqLen, hiddenSize, intermediateWeight, backend)
     addFlatInPlace(gradAttnNorm, gradAttnFromIntermediate)
@@ -1987,7 +1987,7 @@ fun transformerLayerInputGradientWithLayerDeltasBackend(info: SafeTensorInfo, se
 
     let gradOutputLnInput = layerNormRowsInputGradient(outputLnInput, seqLen, hiddenSize, effectiveOutputLnWeight, gradRows)
     let gradFfIntermediate = projectSequenceInputGradientWithDenseDeltaBackend(gradOutputLnInput, seqLen, intermediateSize, outputWeight, outputDelta, backend)
-    let gradInterPre = applyGeluGradient(interPre, gradFfIntermediate)
+    let gradInterPre = applyGeluGradientBackend(interPre, gradFfIntermediate, backend)
     let gradAttnNorm = copyFlat(gradOutputLnInput)
     let gradAttnFromIntermediate = projectSequenceInputGradientWithDenseDeltaBackend(gradInterPre, seqLen, hiddenSize, intermediateWeight, intermediateDelta, backend)
     addFlatInPlace(gradAttnNorm, gradAttnFromIntermediate)
@@ -2204,6 +2204,25 @@ fun applyGeluGradient(preActivation: Array<Float>, gradOutput: Array<Float>) r: 
         i = i + 1
     }
     return out
+}
+
+fun applyGeluGradientBackend(preActivation: Array<Float>, gradOutput: Array<Float>, backend: String) r: Array<Float> {
+    if miniLMBackendIsGpu(backend) and preActivation.length() > 0 and gradOutput.length() >= preActivation.length() {
+        let pre = Tensor.fromArray(1, preActivation.length(), preActivation, backend)
+        let grad = Tensor.fromArray(1, preActivation.length(), gradOutput, backend)
+        let out = pre.geluBackward(grad)
+        if out.values.length() == preActivation.length() {
+            return out.values
+        }
+    }
+    return applyGeluGradient(preActivation, gradOutput)
+}
+
+fun miniLMBackendIsGpu(backend: String) r: Bool {
+    if backend.length() != 3 {
+        return false
+    }
+    return backend.charAt(0) == 103 and backend.charAt(1) == 112 and backend.charAt(2) == 117
 }
 
 fun geluDerivativeApprox(x: Float) r: Float {
@@ -2617,31 +2636,22 @@ fun meTanhApprox(x: Float) r: Float {
     return (e - 1.0) / (e + 1.0)
 }
 
-fun accumulateIntermediateDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, gradIW: Array<Float>, gradIB: Array<Float>) r: Void {
+fun accumulateIntermediateDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, gradIW: Array<Float>, gradIB: Array<Float>, backend: String) r: Void {
     if not trace.ok {
         return
     }
     let gradFf = outputDenseInputGradientWithAdapters(gradOutputDense, trace.outputDenseWeight, trace.inputDim, trace.hiddenSize, denseAdapter, denseDelta)
     let interPre = rowVector(trace.intermediatePreActivation, row, trace.inputDim)
-    let gradInterPre = Array<Float>()
-    var i = 0
-    while i < trace.inputDim {
-        var grad = 0.0
-        if i < gradFf.length() and i < interPre.length() {
-            grad = gradFf[i] * geluDerivativeApprox(interPre[i])
-        }
-        gradInterPre.push(grad)
-        i = i + 1
-    }
+    let gradInterPre = applyGeluGradientBackend(interPre, gradFf, backend)
     let interInput = rowVector(trace.intermediateInput, row, trace.hiddenSize)
     accumulateDenseDeltaGrad(interInput, gradInterPre, intermediateDelta, gradIW, gradIB)
 }
 
-fun accumulateAttentionDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, attentionHeads: Int) r: Void {
+fun accumulateAttentionDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, gradQW: Array<Float>, gradQB: Array<Float>, gradKW: Array<Float>, gradKB: Array<Float>, gradVW: Array<Float>, gradVB: Array<Float>, gradADW: Array<Float>, gradADB: Array<Float>, gradALNW: Array<Float>, gradALNB: Array<Float>, attentionHeads: Int, backend: String) r: Void {
     if not trace.ok {
         return
     }
-    let gradAttnNorm = attentionNormGradientFromOutput(trace, row, gradOutputDense, denseAdapter, denseDelta, intermediateDelta)
+    let gradAttnNorm = attentionNormGradientFromOutput(trace, row, gradOutputDense, denseAdapter, denseDelta, intermediateDelta, backend)
     let attnLnInput = rowVector(trace.attentionLayerNormInput, row, trace.hiddenSize)
     accumulateLayerNormDeltaGrad(attnLnInput, gradAttnNorm, attentionLayerNormDelta, gradALNW, gradALNB)
     let gradAttnLnInput = layerNormInputGradient(attnLnInput, trace.attentionNormWeight, gradAttnNorm)
@@ -2651,20 +2661,11 @@ fun accumulateAttentionDeltaGradFromOutput(trace: MiniLMDenseTrace, row: Int, gr
     accumulateSelfAttentionDeltaGradForRow(trace, row, gradContext, queryDelta, keyDelta, valueDelta, gradQW, gradQB, gradKW, gradKB, gradVW, gradVB, attentionHeads)
 }
 
-fun attentionNormGradientFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter) r: Array<Float> {
+fun attentionNormGradientFromOutput(trace: MiniLMDenseTrace, row: Int, gradOutputDense: Array<Float>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, backend: String) r: Array<Float> {
     let gradAttnNorm = copyFlat(gradOutputDense)
     let gradFf = outputDenseInputGradientWithAdapters(gradOutputDense, trace.outputDenseWeight, trace.inputDim, trace.hiddenSize, denseAdapter, denseDelta)
     let interPre = rowVector(trace.intermediatePreActivation, row, trace.inputDim)
-    let gradInterPre = Array<Float>()
-    var i = 0
-    while i < trace.inputDim {
-        var grad = 0.0
-        if i < gradFf.length() and i < interPre.length() {
-            grad = gradFf[i] * geluDerivativeApprox(interPre[i])
-        }
-        gradInterPre.push(grad)
-        i = i + 1
-    }
+    let gradInterPre = applyGeluGradientBackend(interPre, gradFf, backend)
     let gradFromIntermediate = denseInputGradientWithDelta(gradInterPre, trace.intermediateDenseWeight, trace.hiddenSize, trace.inputDim, intermediateDelta)
     addFlatInPlace(gradAttnNorm, gradFromIntermediate)
     return gradAttnNorm

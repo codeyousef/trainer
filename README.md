@@ -40,7 +40,9 @@ intermediate, and output dense projections through Seen's `Tensor.matmul` dispat
 the scalar path as the correctness reference.
 MiniLM backward tail gradients now thread the configured backend into dense projection input
 gradients for FFN/output/attention paths, reusing `Tensor.matmul` through the dense-gradient
-helpers while retaining scalar fallbacks for shape diagnostics and tests.
+helpers. GELU backward keeps derivative evaluation on the scalar reference path while dispatching
+the derivative-gradient product through the existing elementwise GPU kernel when `backend` is
+`gpu`; both paths retain scalar fallbacks for shape diagnostics and tests.
 
 ## Model Outputs
 

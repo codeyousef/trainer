@@ -1,5 +1,6 @@
 import trainer.gpu_tensor_ops.{tensorGpuBinary, tensorGpuMatmul}
-import trainer.tensor.{Tensor}
+import trainer.tensor.{Tensor, tensorGeluDerivativeScalar}
+import trainer.tensor_kernels.{trainerTensorKernelDeclarationCount}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
@@ -13,6 +14,7 @@ fun approx(value: Float, expected: Float) r: Bool {
 }
 
 fun main() -> Int {
+    expect(trainerTensorKernelDeclarationCount() >= 13, "gpu tensor kernel declarations available")
     let a = Array<Float>()
     a.push(1.0)
     a.push(2.0)
@@ -70,6 +72,23 @@ fun main() -> Int {
     expect(approx(gradWeight.at(1, 1), 6.0), "gpu dense weight grad 11")
     let biasGrad = gradOut.denseBiasGradient()
     expect(approx(biasGrad[0], 4.0) and approx(biasGrad[1], 6.0), "gpu dense bias grad")
+    let geluPreVals = Array<Float>()
+    geluPreVals.push(-1.0)
+    geluPreVals.push(0.0)
+    geluPreVals.push(1.0)
+    geluPreVals.push(2.0)
+    let geluGradVals = Array<Float>()
+    geluGradVals.push(1.0)
+    geluGradVals.push(0.5)
+    geluGradVals.push(-0.25)
+    geluGradVals.push(2.0)
+    let geluPre = Tensor.fromArray(2, 2, geluPreVals, "gpu")
+    let geluGrad = Tensor.fromArray(2, 2, geluGradVals, "gpu")
+    let geluBack = geluPre.geluBackward(geluGrad)
+    expect(approx(geluBack.at(0, 0), tensorGeluDerivativeScalar(-1.0)), "gpu gelu backward negative")
+    expect(approx(geluBack.at(0, 1), 0.5 * tensorGeluDerivativeScalar(0.0)), "gpu gelu backward zero")
+    expect(approx(geluBack.at(1, 0), -0.25 * tensorGeluDerivativeScalar(1.0)), "gpu gelu backward positive")
+    expect(approx(geluBack.at(1, 1), 2.0 * tensorGeluDerivativeScalar(2.0)), "gpu gelu backward large")
     println("PASS test_gpu_tensor")
     return 0
 }

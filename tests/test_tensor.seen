@@ -1,7 +1,7 @@
 import trainer.math_utils.{cosine}
 import trainer.optimizer.{AdamW, clipGlobalNorm}
 import trainer.dense_lora.{DenseDeltaAdapter, LayerNormDeltaAdapter}
-import trainer.tensor.{Parameter, Tensor, tripletMarginLoss}
+import trainer.tensor.{Parameter, Tensor, tensorGeluDerivativeScalar, tripletMarginLoss}
 
 fun expect(condition: Bool, message: String) r: Void {
     if not condition {
@@ -77,6 +77,23 @@ fun main() -> Int {
     expect(closeEnough(gradWeight.at(1, 2), 0.0), "dense weight grad 12")
     let biasGrad = gradOut.denseBiasGradient()
     expect(closeEnough(biasGrad[0], 4.0) and closeEnough(biasGrad[1], 6.0), "dense bias grad")
+    let geluPreVals = Array<Float>()
+    geluPreVals.push(-1.0)
+    geluPreVals.push(0.0)
+    geluPreVals.push(1.0)
+    geluPreVals.push(2.0)
+    let geluGradVals = Array<Float>()
+    geluGradVals.push(1.0)
+    geluGradVals.push(0.5)
+    geluGradVals.push(-0.25)
+    geluGradVals.push(2.0)
+    let geluPre = Tensor.fromArray(2, 2, geluPreVals)
+    let geluGrad = Tensor.fromArray(2, 2, geluGradVals)
+    let geluBack = geluPre.geluBackward(geluGrad)
+    expect(closeEnough(geluBack.at(0, 0), tensorGeluDerivativeScalar(-1.0)), "gelu backward negative")
+    expect(closeEnough(geluBack.at(0, 1), 0.5 * tensorGeluDerivativeScalar(0.0)), "gelu backward zero")
+    expect(closeEnough(geluBack.at(1, 0), -0.25 * tensorGeluDerivativeScalar(1.0)), "gelu backward positive")
+    expect(closeEnough(geluBack.at(1, 1), 2.0 * tensorGeluDerivativeScalar(2.0)), "gelu backward large")
     let added = a.add(b)
     expect(added.at(0, 0) == 6.0 and added.at(1, 1) == 12.0, "elementwise add")
     let diff = b.sub(a)
