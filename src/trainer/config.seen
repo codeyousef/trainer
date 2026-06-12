@@ -40,6 +40,7 @@ class TrainerConfig {
     var trainAllMiniLMLayers: Bool
     var maxMiniLMLayers: Int
     var cacheMiniLMTensors: Bool
+    var resumeOutputArtifacts: Bool
     var minilmAdapterLayer: Int
     var minilmDenseAdapterLayer: Int
     var backendGpu: Int
@@ -86,6 +87,7 @@ class TrainerConfig {
             trainAllMiniLMLayers: true,
             maxMiniLMLayers: 0,
             cacheMiniLMTensors: false,
+            resumeOutputArtifacts: false,
             minilmAdapterLayer: 0,
             minilmDenseAdapterLayer: -1,
             backendGpu: 1,
@@ -201,6 +203,7 @@ fun readConfig(path: String) r: TrainerConfig {
     cfg.trainAllMiniLMLayers = configBool(text, "train_all_minilm_layers", cfg.trainAllMiniLMLayers)
     cfg.maxMiniLMLayers = configInt(text, "max_minilm_layers", cfg.maxMiniLMLayers)
     cfg.cacheMiniLMTensors = configBool(text, "cache_minilm_tensors", cfg.cacheMiniLMTensors)
+    cfg.resumeOutputArtifacts = configBool(text, "resume_output_artifacts", cfg.resumeOutputArtifacts)
     cfg.minilmAdapterLayer = configInt(text, "minilm_adapter_layer", cfg.minilmAdapterLayer)
     cfg.minilmDenseAdapterLayer = configInt(text, "minilm_dense_adapter_layer", cfg.minilmDenseAdapterLayer)
     cfg.backend = configString(text, "backend", cfg.backend)

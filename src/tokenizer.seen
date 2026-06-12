@@ -36,11 +36,17 @@ class Tokenizer {
     static fun load(path: String, maxLength: Int) r: Tokenizer {
         var loaded = false
         var tokenizerText = ""
-        if exists(path) {
+        let baseDir = parentDir(path)
+        let vocabPath = baseDir + "/vocab.txt"
+        let hasVocabTxt = exists(vocabPath)
+        if hasVocabTxt {
+            loaded = true
+        } else if exists(path) {
+            println("trainer: reading tokenizer.json")
             tokenizerText = readText(path)
             loaded = tokenizerText.length() > 0
         }
-        let baseDir = parentDir(path)
+        println("trainer: reading tokenizer metadata")
         let tokenizerConfig = readText(baseDir + "/tokenizer_config.json")
         let specialTokens = readText(baseDir + "/special_tokens_map.json")
         let defaultCls = if loaded { "[CLS]" } else { "<s>" }
@@ -61,12 +67,19 @@ class Tokenizer {
         let lower = findJsonBool(tokenizerConfig, "do_lower_case", true)
         let vocabTokens = Array<String>()
         let vocabIds = Array<Int>()
-        parseTokenizerVocab(tokenizerText, vocabTokens, vocabIds)
+        if hasVocabTxt {
+            println("trainer: reading vocab.txt")
+            parseTokenizerVocabTxt(readText(vocabPath), vocabTokens, vocabIds)
+        } else {
+            println("trainer: parsing tokenizer vocab")
+            parseTokenizerVocab(tokenizerText, vocabTokens, vocabIds)
+        }
         let clsId = findVocabId(vocabTokens, vocabIds, cls, stableTokenId(cls))
         let sepId = findVocabId(vocabTokens, vocabIds, sep, stableTokenId(sep))
         let padId = findVocabId(vocabTokens, vocabIds, pad, stableTokenId(pad))
         let unkId = findVocabId(vocabTokens, vocabIds, unk, stableTokenId(unk))
         let maskId = findVocabId(vocabTokens, vocabIds, mask, stableTokenId(mask))
+        println("trainer: tokenizer ready vocab=" + vocabTokens.length().toString())
         return Tokenizer{
             tokenizerPath: path,
             loaded: loaded,
@@ -369,6 +382,35 @@ fun parseTokenizerVocab(text: String, tokens: Array<String>, ids: Array<Int>) r:
     return count
 }
 
+fun parseTokenizerVocabTxt(text: String, tokens: Array<String>, ids: Array<Int>) r: Int {
+    var start = 0
+    var i = 0
+    var id = 0
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 10 or ch == 13 {
+            if i > start {
+                tokens.push(text.substring(start, i))
+                ids.push(id)
+                id = id + 1
+            }
+            i = i + 1
+            if ch == 13 and i < text.length() and text.charAt(i) == 10 {
+                i = i + 1
+            }
+            start = i
+        } else {
+            i = i + 1
+        }
+    }
+    if start < text.length() {
+        tokens.push(text.substring(start, text.length()))
+        ids.push(id)
+        id = id + 1
+    }
+    return id
+}
+
 fun findVocabId(tokens: Array<String>, ids: Array<Int>, token: String, fallback: Int) r: Int {
     var i = 0
     while i < tokens.length() and i < ids.length() {
@@ -437,6 +479,21 @@ fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String
 }
 
 fun tokenizerReadQuoted(text: String, start: Int) r: String {
+    var fast = start + 1
+    while fast < text.length() {
+        let ch = text.charAt(fast)
+        if ch == 34 {
+            return text.substring(start + 1, fast)
+        }
+        if ch == 92 {
+            return tokenizerReadQuotedEscaped(text, start)
+        }
+        fast = fast + 1
+    }
+    return ""
+}
+
+fun tokenizerReadQuotedEscaped(text: String, start: Int) r: String {
     var out = ""
     var i = start + 1
     while i < text.length() {

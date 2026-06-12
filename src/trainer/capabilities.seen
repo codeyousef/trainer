@@ -21,6 +21,7 @@ fun trainerCapabilityFields(cfg: TrainerConfig) r: String {
         + "  \"trainable_surface_summary\": \"MiniLM deltas and projection adapters\",\n"
         + "  \"copy_base_artifacts\": " + cfg.copyBaseArtifacts.toString() + ",\n"
         + "  \"train_all_minilm_layers\": " + cfg.trainAllMiniLMLayers.toString() + ",\n"
+        + "  \"resume_output_artifacts\": " + cfg.resumeOutputArtifacts.toString() + ",\n"
         + "  \"gpu_backend_requested\": " + (cfg.backendGpu == 1).toString() + ",\n"
         + "  \"hard_negative_mining\": \"normalized_top_k_with_domain_source_exclusion\",\n"
         + "  \"calibration\": \"per_domain_percentile_positive_cosine\",\n"

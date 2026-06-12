@@ -22,11 +22,16 @@ class ModelBundle {
     var parameterRegistry: MiniLMParameterRegistry
 
     static fun load(cfg: TrainerConfig) r: ModelBundle {
+        println("trainer: loading model config")
         let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
         let runtimeLayers = resolvedMiniLMLayers(cfg, modelMeta.layers)
+        println("trainer: loading tokenizer")
         let tokenizer = Tokenizer.load(cfg.tokenizerPath(), cfg.maxSequenceLength)
+        println("trainer: inspecting safetensors")
         let weights = SafeTensorInfo.inspect(cfg.modelWeightsPath())
+        println("trainer: loading MiniLM tensors")
         let embeddings = MiniLMEmbeddings.load(weights, modelMeta.hiddenSize, runtimeLayers, modelMeta.attentionHeads, modelMeta.intermediateSize, cfg.weightLoadCapElements, cfg.backend, cfg.cacheMiniLMTensors)
+        println("trainer: preparing trainable adapters")
         var minilmDenseAdapter = DenseLoRAAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmDenseDelta = DenseDeltaAdapter.identity(modelMeta.intermediateSize, modelMeta.hiddenSize)
         var minilmIntermediateDelta = DenseDeltaAdapter.identity(modelMeta.hiddenSize, modelMeta.intermediateSize)
@@ -41,7 +46,8 @@ class ModelBundle {
         if cfg.trainAllMiniLMLayers {
             minilmLayerDeltas = MiniLMLayerDeltas.identity(runtimeLayers, modelMeta.hiddenSize, modelMeta.intermediateSize)
         }
-        if embeddings.loaded {
+        if embeddings.loaded and cfg.resumeOutputArtifacts {
+            println("trainer: resuming output artifacts")
             minilmDenseAdapter = DenseLoRAAdapter.load(cfg.minilmDenseAdapterPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
             minilmDenseDelta = DenseDeltaAdapter.load(cfg.minilmDenseDeltaPath(), modelMeta.intermediateSize, modelMeta.hiddenSize)
             minilmIntermediateDelta = DenseDeltaAdapter.load(cfg.minilmIntermediateDeltaPath(), modelMeta.hiddenSize, modelMeta.intermediateSize)
@@ -56,12 +62,22 @@ class ModelBundle {
             }
             minilmEmbeddingDeltas = MiniLMEmbeddingDeltas.load(miniLMEmbeddingDeltasPath(cfg.outputModelDir), modelMeta.hiddenSize, embeddings.wordRows, embeddings.positionRows, embeddings.tokenTypeRows)
         }
-        let minilmLayerAdapter = ProjectionAdapter.load(cfg.minilmLayerAdapterPath(), modelMeta.hiddenSize)
-        let layerAdapter = ProjectionAdapter.load(cfg.layerAdapterPath(), modelMeta.hiddenSize)
-        let adapter = ProjectionAdapter.load(cfg.adapterPath(), modelMeta.hiddenSize)
+        println("trainer: preparing projection adapters")
+        var minilmLayerAdapter = ProjectionAdapter.identity(modelMeta.hiddenSize)
+        var layerAdapter = ProjectionAdapter.identity(modelMeta.hiddenSize)
+        var adapter = ProjectionAdapter.identity(modelMeta.hiddenSize)
+        if cfg.resumeOutputArtifacts {
+            println("trainer: resuming projection adapters")
+            minilmLayerAdapter = ProjectionAdapter.load(cfg.minilmLayerAdapterPath(), modelMeta.hiddenSize)
+            layerAdapter = ProjectionAdapter.load(cfg.layerAdapterPath(), modelMeta.hiddenSize)
+            adapter = ProjectionAdapter.load(cfg.adapterPath(), modelMeta.hiddenSize)
+        }
         let encoder = Encoder.withMiniLMEmbeddingsAndAdapter(tokenizer, modelMeta.hiddenSize, embeddings, minilmDenseAdapter, minilmDenseDelta, minilmIntermediateDelta, minilmQueryDelta, minilmKeyDelta, minilmValueDelta, minilmAttentionDenseDelta, minilmAttentionLayerNormDelta, minilmLayerNormDelta, minilmLayerDeltas, minilmEmbeddingDeltas, cfg.minilmDenseAdapterLayer, minilmLayerAdapter, cfg.minilmAdapterLayer, layerAdapter, adapter)
+        println("trainer: inspecting MiniLM weight map")
         let weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
+        println("trainer: inspecting MiniLM parameter registry")
         let parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, resolvedParameterRegistryLoadCap(cfg), cfg.backend)
+        println("trainer: model bundle ready")
         return ModelBundle{
             tokenizer: tokenizer,
             encoder: encoder,

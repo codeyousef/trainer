@@ -52,6 +52,17 @@ fun main() -> Int {
     expect(batch.rows == 2 and batch.cols == 5, "batch tokenization shape")
     expect(batch.ids.length() == 10 and batch.masks.length() == 10, "batch tokenization flat buffers")
 
+    let vocabDir = "/tmp/seen_trainer_tokenizer_vocab_txt"
+    writeAtomicText(vocabDir + "/vocab.txt",
+        "[PAD]\n[UNK]\n[CLS]\n[SEP]\n[MASK]\nhello\nworld\n")
+    writeAtomicText(vocabDir + "/tokenizer_config.json",
+        "{\"do_lower_case\":true,\"cls_token\":\"[CLS]\",\"sep_token\":\"[SEP]\",\"pad_token\":\"[PAD]\",\"unk_token\":\"[UNK]\",\"mask_token\":\"[MASK]\"}")
+    let vocabTokenizer = Tokenizer.load(vocabDir + "/tokenizer.json", 5)
+    expect(vocabTokenizer.loaded, "vocab txt tokenizer loaded")
+    expect(vocabTokenizer.vocabSignal == 7, "vocab txt tokenizer count")
+    let vocabIds = vocabTokenizer.tokenIds("hello world")
+    expect(vocabIds[0] == 2 and vocabIds[1] == 5 and vocabIds[2] == 6, "vocab txt tokenizer ids")
+
     let sourceDir = "/tmp/seen_trainer_source_adapter"
     writeAtomicText(sourceDir + "/pairs.csv",
         "Instruction,RESPONSE,DOMAIN,SOURCE\n"
@@ -72,6 +83,7 @@ fun main() -> Int {
         + "\"train_all_minilm_layers\":false,"
         + "\"max_minilm_layers\":1,"
         + "\"cache_minilm_tensors\":true,"
+        + "\"resume_output_artifacts\":true,"
         + "\"learning_rate\":2e-5}")
     let cfg = readConfig(sourceDir + "/config.json")
     expect(cfg.learningRate > 0.000019 and cfg.learningRate < 0.000021, "scientific config float")
@@ -84,6 +96,7 @@ fun main() -> Int {
     expect(not cfg.trainAllMiniLMLayers, "train all layers config")
     expect(cfg.maxMiniLMLayers == 1, "max minilm layers config")
     expect(cfg.cacheMiniLMTensors, "cache minilm tensors config")
+    expect(cfg.resumeOutputArtifacts, "resume output artifacts config")
     let pairs = readSourcePairs(cfg)
     expect(pairs.length() == 1, "csv source adapter filter")
     expect(pairs[0].queryText == "How to reset?", "csv query column")

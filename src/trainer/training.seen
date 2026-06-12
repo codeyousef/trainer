@@ -154,6 +154,7 @@ fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBat
         + "  \"training_mode\": \"" + trainerTrainingMode() + "\",\n"
         + "  \"pooling\": \"mean\",\n"
         + "  \"backend\": \"" + cfg.backend + "\",\n"
+        + "  \"resume_output_artifacts\": " + cfg.resumeOutputArtifacts.toString() + ",\n"
         + "  \"examples\": " + count.toString() + ",\n"
         + "  \"max_train_triplets\": " + cfg.maxTrainTriplets.toString() + ",\n"
         + "  \"bounded_training_dataset\": " + (cfg.maxTrainTriplets > 0).toString() + ",\n"

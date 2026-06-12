@@ -38,5 +38,6 @@
   "train_all_minilm_layers": true,
   "max_minilm_layers": 0,
   "cache_minilm_tensors": false,
+  "resume_output_artifacts": false,
   "backend": "gpu"
 }
