@@ -5,6 +5,7 @@ import embedding_delta.{MiniLMEmbeddingDeltas}
 import minilm_embeddings.{MiniLMEmbeddings}
 import parameter_registry.{MiniLMParameterRegistry}
 import tokenizer.{Tokenizer, stableTokenId}
+import memory.allocation.{releaseFloatArrayStorage, releaseIntArrayStorage}
 
 class Encoder {
     var tokenizer: Tokenizer
@@ -83,15 +84,30 @@ class Encoder {
     }
 
     fun encode(text: String) r: Array<Float> {
-        return normalize(this.adapter.apply(this.layerAdapter.apply(this.encodeRawMean(text))))
+        let raw = this.encodeRawMean(text)
+        let layer = this.layerAdapter.apply(raw)
+        let adapted = this.adapter.apply(layer)
+        let out = normalize(adapted)
+        releaseFloatArrayStorage(raw)
+        releaseFloatArrayStorage(layer)
+        releaseFloatArrayStorage(adapted)
+        return out
     }
 
     fun encodeBase(text: String) r: Array<Float> {
-        return normalize(this.layerAdapter.apply(this.encodeRawMean(text)))
+        let raw = this.encodeRawMean(text)
+        let layer = this.layerAdapter.apply(raw)
+        let out = normalize(layer)
+        releaseFloatArrayStorage(raw)
+        releaseFloatArrayStorage(layer)
+        return out
     }
 
     fun encodeLayerInput(text: String) r: Array<Float> {
-        return normalize(this.encodeRawMean(text))
+        let raw = this.encodeRawMean(text)
+        let out = normalize(raw)
+        releaseFloatArrayStorage(raw)
+        return out
     }
 
     fun encodeRawMean(text: String) r: Array<Float> {
@@ -106,8 +122,11 @@ class Encoder {
                 modelMean = this.modelEmbeddings.encodeMeanWithAdapters(tokenIds, mask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, this.minilmLayerAdapter, this.minilmAdapterLayer)
             }
             if modelMean.length() == this.embeddingDim {
+                releaseIntArrayStorage(tokenIds)
+                releaseIntArrayStorage(mask)
                 return modelMean
             }
+            releaseFloatArrayStorage(modelMean)
         }
 
         let sum = Array<Float>()
@@ -138,14 +157,19 @@ class Encoder {
                 d = d + 1
             }
         }
+        releaseIntArrayStorage(tokenIds)
+        releaseIntArrayStorage(mask)
         return sum
     }
 
     fun encodeMiniLMLayerInput(text: String) r: Array<Float> {
         let layerMean = this.encodeMiniLMLayerMean(text)
         if layerMean.length() == this.embeddingDim {
-            return normalize(layerMean)
+            let out = normalize(layerMean)
+            releaseFloatArrayStorage(layerMean)
+            return out
         }
+        releaseFloatArrayStorage(layerMean)
         return Array<Float>()
     }
 
@@ -158,8 +182,13 @@ class Encoder {
         let mask = tokenized.masks
         let layerMean = this.modelEmbeddings.encodeLayerMean(tokenIds, mask, this.minilmAdapterLayer)
         if layerMean.length() == this.embeddingDim {
+            releaseIntArrayStorage(tokenIds)
+            releaseIntArrayStorage(mask)
             return layerMean
         }
+        releaseIntArrayStorage(tokenIds)
+        releaseIntArrayStorage(mask)
+        releaseFloatArrayStorage(layerMean)
         return Array<Float>()
     }
 
@@ -176,10 +205,19 @@ class Encoder {
         let nTokenized = this.tokenizer.tokenized(negativeText)
         let nIds = nTokenized.ids
         let nMask = nTokenized.masks
+        var loss = 0.0
         if this.hasMiniLMAllLayerDeltaTarget() {
-            return this.modelEmbeddings.updateAllLayerDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, parameterRegistry, margin, lr, weightDecay, gradClip)
+            loss = this.modelEmbeddings.updateAllLayerDeltasTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, parameterRegistry, margin, lr, weightDecay, gradClip)
+        } else {
+            loss = this.modelEmbeddings.updateDenseAdapterTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, margin, lr, weightDecay, gradClip)
         }
-        return this.modelEmbeddings.updateDenseAdapterTriplet(qIds, qMask, pIds, pMask, nIds, nMask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, margin, lr, weightDecay, gradClip)
+        releaseIntArrayStorage(qIds)
+        releaseIntArrayStorage(qMask)
+        releaseIntArrayStorage(pIds)
+        releaseIntArrayStorage(pMask)
+        releaseIntArrayStorage(nIds)
+        releaseIntArrayStorage(nMask)
+        return loss
     }
 
     fun hasMiniLMAllLayerDeltaTarget() r: Bool {

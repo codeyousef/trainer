@@ -6,6 +6,7 @@ import json.builder.{escapeJsonString}
 import json.parser.{parseJson}
 import jsonl.{TripletExample, readTripletsLimited}
 import math_utils.{cosine, percentile, deterministicShuffleIndices}
+import memory.allocation.{releaseFloatArrayStorage}
 
 class DomainThreshold {
     var domain: String
@@ -31,14 +32,18 @@ fun calibrateThresholds(cfg: TrainerConfig, encoder: Encoder) r: Array<DomainThr
                 let q = encoder.encode(items[i].queryText)
                 let p = encoder.encode(items[i].positiveChunkText)
                 scores.push(cosine(q, p))
+                releaseFloatArrayStorage(q)
+                releaseFloatArrayStorage(p)
             }
             i = i + 1
         }
+        let threshold = percentile(scores, cfg.thresholdPercentile)
         thresholds.push(DomainThreshold.new(
             domains[d],
-            percentile(scores, cfg.thresholdPercentile),
+            threshold,
             scores.length()
         ))
+        releaseFloatArrayStorage(scores)
         d = d + 1
     }
     writeAtomicText(cfg.thresholdsPath, thresholdsJson(thresholds))

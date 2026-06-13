@@ -1,4 +1,5 @@
 import io.file.{appendText, ensureParentDirectories, exists, readText, writeText}
+import memory.allocation.{releaseFloatArrayStorage}
 
 class ProjectionAdapter {
     var dim: Int
@@ -275,6 +276,10 @@ class ProjectionAdapter {
             this.rankB[i] = adapterClamp(next, -2.0, 2.0)
             i = i + 1
         }
+        releaseFloatArrayStorage(gradDiag)
+        releaseFloatArrayStorage(gradMix)
+        releaseFloatArrayStorage(gradRankA)
+        releaseFloatArrayStorage(gradRankB)
         return loss
     }
 

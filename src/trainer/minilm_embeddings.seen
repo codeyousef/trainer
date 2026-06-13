@@ -9,6 +9,7 @@ import minilm_weights.{mwFindCandidateIndex}
 import parameter_registry.{MiniLMParameterRegistry}
 import safetensors.{SafeTensorInfo, isF32DType, tensorCols, tensorRows}
 import tensor.{Tensor}
+import memory.allocation.{releaseFloatArrayStorage}
 
 class EmbeddingTensorLoad {
     var ok: Bool
@@ -433,11 +434,13 @@ class MiniLMEmbeddings {
                     sequence.push(embedded[d])
                     d = d + 1
                 }
+                releaseFloatArrayStorage(embedded)
             }
             i = i + 1
         }
 
         if tokenCount == 0 {
+            releaseFloatArrayStorage(sequence)
             return zerosFloat(this.hiddenSize)
         }
 
@@ -452,16 +455,23 @@ class MiniLMEmbeddings {
                 layerOut = applyEncoderLayerMaybeCachedBase(this.cache, info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, this.backend)
             }
             if layerOut.length() == encoded.length() {
+                let previous = encoded
                 encoded = layerOut
+                releaseFloatArrayStorage(previous)
                 if layer == targetLayer {
-                    encoded = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
+                    let projected = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
+                    releaseFloatArrayStorage(encoded)
+                    encoded = projected
                 }
             } else {
+                releaseFloatArrayStorage(layerOut)
                 layer = this.readyLayers
             }
             layer = layer + 1
         }
-        return meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+        let mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+        releaseFloatArrayStorage(encoded)
+        return mean
     }
 
     fun encodeMeanWithAdapters(tokenIds: Array<Int>, mask: Array<Int>, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, denseAdapterLayer: Int, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
@@ -502,11 +512,13 @@ class MiniLMEmbeddings {
                     sequence.push(embedded[d])
                     d = d + 1
                 }
+                releaseFloatArrayStorage(embedded)
             }
             i = i + 1
         }
 
         if tokenCount == 0 {
+            releaseFloatArrayStorage(sequence)
             return zerosFloat(this.hiddenSize)
         }
 
@@ -517,16 +529,23 @@ class MiniLMEmbeddings {
         while layer < this.readyLayers {
             let layerOut = applyEncoderLayerMaybeCached(this.cache, info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, layer == denseTargetLayer, this.backend)
             if layerOut.length() == encoded.length() {
+                let previous = encoded
                 encoded = layerOut
+                releaseFloatArrayStorage(previous)
                 if layer == targetLayer {
-                    encoded = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
+                    let projected = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
+                    releaseFloatArrayStorage(encoded)
+                    encoded = projected
                 }
             } else {
+                releaseFloatArrayStorage(layerOut)
                 layer = this.readyLayers
             }
             layer = layer + 1
         }
-        return meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+        let mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+        releaseFloatArrayStorage(encoded)
+        return mean
     }
 
     fun encodeLayerMean(tokenIds: Array<Int>, mask: Array<Int>, adapterLayer: Int) r: Array<Float> {
@@ -570,11 +589,13 @@ class MiniLMEmbeddings {
                     sequence.push(embedded[d])
                     d = d + 1
                 }
+                releaseFloatArrayStorage(embedded)
             }
             i = i + 1
         }
 
         if tokenCount == 0 {
+            releaseFloatArrayStorage(sequence)
             return zerosFloat(this.hiddenSize)
         }
 
@@ -584,15 +605,22 @@ class MiniLMEmbeddings {
         while layer < this.readyLayers {
             let layerOut = applyEncoderLayerMaybeCachedBase(this.cache, info, encoded, tokenCount, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, this.backend)
             if layerOut.length() == encoded.length() {
+                let previous = encoded
                 encoded = layerOut
+                releaseFloatArrayStorage(previous)
                 if layer == targetLayer {
-                    return meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+                    let mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+                    releaseFloatArrayStorage(encoded)
+                    return mean
                 }
             } else {
+                releaseFloatArrayStorage(layerOut)
+                releaseFloatArrayStorage(encoded)
                 return Array<Float>()
             }
             layer = layer + 1
         }
+        releaseFloatArrayStorage(encoded)
         return Array<Float>()
     }
 
@@ -1298,6 +1326,10 @@ fun applyEncoderLayerWithDenseAdapterCachedBackend(layerCache: MiniLMEncoderLaye
     let v = projectSequenceWithDenseDeltaBackend(sequence, seqLen, hiddenSize, hiddenSize, vWeight, vBias, valueDelta, applyDenseAdapter, backend)
     let context = attentionContextBackend(q, k, v, seqLen, hiddenSize, attentionHeads, backend)
     if context.length() != sequence.length() {
+        releaseFloatArrayStorage(q)
+        releaseFloatArrayStorage(k)
+        releaseFloatArrayStorage(v)
+        releaseFloatArrayStorage(context)
         return Array<Float>()
     }
 
@@ -1307,16 +1339,34 @@ fun applyEncoderLayerWithDenseAdapterCachedBackend(layerCache: MiniLMEncoderLaye
     if applyDenseAdapter {
         let effectiveAttentionWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attentionLayerNormDelta)
         let effectiveAttentionBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
+        let previousAttnNorm = attnNorm
         attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias, backend)
+        releaseFloatArrayStorage(previousAttnNorm)
+        releaseFloatArrayStorage(effectiveAttentionWeight)
+        releaseFloatArrayStorage(effectiveAttentionBias)
     }
     let ffIntermediate = feedForwardIntermediateWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, applyDenseAdapter, backend)
     let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, applyDenseAdapter, backend)
+    var out = Array<Float>()
     if applyDenseAdapter {
         let effectiveWeight = layerNormDelta.effectiveWeight(outputLnWeight.values)
         let effectiveBias = layerNormDelta.effectiveBias(outputLnBias.values)
-        return residualLayerNormValuesBackend(ffOutput, attnNorm, seqLen, hiddenSize, effectiveWeight, effectiveBias, backend)
+        out = residualLayerNormValuesBackend(ffOutput, attnNorm, seqLen, hiddenSize, effectiveWeight, effectiveBias, backend)
+        releaseFloatArrayStorage(effectiveWeight)
+        releaseFloatArrayStorage(effectiveBias)
+    } else {
+        out = residualLayerNormBackend(ffOutput, attnNorm, seqLen, hiddenSize, outputLnWeight, outputLnBias, backend)
     }
-    return residualLayerNormBackend(ffOutput, attnNorm, seqLen, hiddenSize, outputLnWeight, outputLnBias, backend)
+    releaseFloatArrayStorage(q)
+    releaseFloatArrayStorage(k)
+    releaseFloatArrayStorage(v)
+    releaseFloatArrayStorage(context)
+    releaseFloatArrayStorage(attnDense)
+    releaseFloatArrayStorage(attnLnInput)
+    releaseFloatArrayStorage(attnNorm)
+    releaseFloatArrayStorage(ffIntermediate)
+    releaseFloatArrayStorage(ffOutput)
+    return out
 }
 
 fun normalizeMiniLMLayerAdapterLayer(adapterLayer: Int, readyLayers: Int) r: Int {
@@ -1360,6 +1410,8 @@ fun applyProjectionAdapterToSequence(sequence: Array<Float>, seqLen: Int, hidden
             }
             d = d + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(projected)
         row = row + 1
     }
     return out
@@ -1376,6 +1428,8 @@ fun projectSequence(sequence: Array<Float>, seqLen: Int, inputSize: Int, weight:
             out.push(projected[i])
             i = i + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(projected)
         row = row + 1
     }
     return out
@@ -1397,6 +1451,9 @@ fun projectSequenceWithDenseDelta(sequence: Array<Float>, seqLen: Int, inputSize
             out.push(value)
             i = i + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(projected)
+        releaseFloatArrayStorage(delta)
         row = row + 1
     }
     return out
@@ -1405,6 +1462,7 @@ fun projectSequenceWithDenseDelta(sequence: Array<Float>, seqLen: Int, inputSize
 fun projectSequenceWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, inputSize: Int, outputSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseDelta: DenseDeltaAdapter, applyDelta: Bool, backend: String) r: Array<Float> {
     let projected = projectSequenceLinearBackend(sequence, seqLen, inputSize, outputSize, weight, bias, backend)
     if projected.length() != seqLen * outputSize {
+        releaseFloatArrayStorage(projected)
         return projectSequenceWithDenseDelta(sequence, seqLen, inputSize, outputSize, weight, bias, denseDelta, applyDelta)
     }
     if not applyDelta {
@@ -1424,8 +1482,11 @@ fun projectSequenceWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, in
             out.push(value)
             i = i + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(delta)
         row = row + 1
     }
+    releaseFloatArrayStorage(projected)
     return out
 }
 
@@ -1453,6 +1514,8 @@ fun projectSequenceLinearBackend(sequence: Array<Float>, seqLen: Int, inputSize:
     let weightTensor = Tensor.fromArray(inputSize, outputSize, transposed, backend)
     let product = inputTensor.matmul(weightTensor)
     if product.values.length() != seqLen * outputSize {
+        releaseFloatArrayStorage(transposed)
+        releaseFloatArrayStorage(product.values)
         return Array<Float>()
     }
     let out = Array<Float>()
@@ -1465,6 +1528,8 @@ fun projectSequenceLinearBackend(sequence: Array<Float>, seqLen: Int, inputSize:
         }
         row = row + 1
     }
+    releaseFloatArrayStorage(transposed)
+    releaseFloatArrayStorage(product.values)
     return out
 }
 
@@ -1598,8 +1663,11 @@ fun residualLayerNormValuesBackend(values: Array<Float>, residual: Array<Float>,
         let merged = addFlatRows(values, residual, seqLen, hiddenSize)
         let normed = layerNormRowsBackend(merged, seqLen, hiddenSize, normWeight, normBias, backend)
         if normed.length() == seqLen * hiddenSize {
+            releaseFloatArrayStorage(merged)
             return normed
         }
+        releaseFloatArrayStorage(merged)
+        releaseFloatArrayStorage(normed)
     }
     let out = Array<Float>()
     var row = 0
@@ -1616,6 +1684,8 @@ fun residualLayerNormValuesBackend(values: Array<Float>, residual: Array<Float>,
             out.push(normed[d])
             d = d + 1
         }
+        releaseFloatArrayStorage(merged)
+        releaseFloatArrayStorage(normed)
         row = row + 1
     }
     return out
@@ -1651,6 +1721,9 @@ fun feedForwardPreActivationWithDenseDelta(sequence: Array<Float>, seqLen: Int, 
             out.push(value)
             i = i + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(projected)
+        releaseFloatArrayStorage(delta)
         row = row + 1
     }
     return out
@@ -1684,6 +1757,10 @@ fun feedForwardOutputWithDenseAdapter(sequence: Array<Float>, seqLen: Int, inter
             out.push(value)
             i = i + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(projected)
+        releaseFloatArrayStorage(delta)
+        releaseFloatArrayStorage(fullDelta)
         row = row + 1
     }
     return out
@@ -1692,6 +1769,7 @@ fun feedForwardOutputWithDenseAdapter(sequence: Array<Float>, seqLen: Int, inter
 fun feedForwardOutputWithDenseAdapterBackend(sequence: Array<Float>, seqLen: Int, intermediateSize: Int, hiddenSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
     let projected = projectSequenceLinearBackend(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, backend)
     if projected.length() != seqLen * hiddenSize {
+        releaseFloatArrayStorage(projected)
         return feedForwardOutputWithDenseAdapter(sequence, seqLen, intermediateSize, hiddenSize, weight, bias, denseAdapter, denseDelta, applyDenseAdapter)
     }
     if not applyDenseAdapter {
@@ -1715,8 +1793,12 @@ fun feedForwardOutputWithDenseAdapterBackend(sequence: Array<Float>, seqLen: Int
             out.push(value)
             i = i + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(delta)
+        releaseFloatArrayStorage(fullDelta)
         row = row + 1
     }
+    releaseFloatArrayStorage(projected)
     return out
 }
 
@@ -2019,13 +2101,25 @@ fun layerNormRowsBackend(values: Array<Float>, seqLen: Int, hiddenSize: Int, nor
         let input = Tensor.fromArray(seqLen, hiddenSize, values, backend)
         let normalized = input.layerNormRows()
         if normalized.values.length() == seqLen * hiddenSize {
-            let weights = Tensor.fromArray(seqLen, hiddenSize, repeatLayerNormParameters(normWeight, seqLen, hiddenSize), backend)
-            let biases = Tensor.fromArray(seqLen, hiddenSize, repeatLayerNormParameters(normBias, seqLen, hiddenSize), backend)
-            let out = normalized.mulElementwise(weights).add(biases)
+            let repeatedWeights = repeatLayerNormParameters(normWeight, seqLen, hiddenSize)
+            let repeatedBiases = repeatLayerNormParameters(normBias, seqLen, hiddenSize)
+            let weights = Tensor.fromArray(seqLen, hiddenSize, repeatedWeights, backend)
+            let biases = Tensor.fromArray(seqLen, hiddenSize, repeatedBiases, backend)
+            let scaled = normalized.mulElementwise(weights)
+            let out = scaled.add(biases)
             if out.values.length() == seqLen * hiddenSize {
+                releaseFloatArrayStorage(normalized.values)
+                releaseFloatArrayStorage(scaled.values)
+                releaseFloatArrayStorage(repeatedWeights)
+                releaseFloatArrayStorage(repeatedBiases)
                 return out.values
             }
+            releaseFloatArrayStorage(out.values)
+            releaseFloatArrayStorage(scaled.values)
+            releaseFloatArrayStorage(repeatedWeights)
+            releaseFloatArrayStorage(repeatedBiases)
         }
+        releaseFloatArrayStorage(normalized.values)
     }
     let out = Array<Float>()
     var row = 0
@@ -2037,6 +2131,8 @@ fun layerNormRowsBackend(values: Array<Float>, seqLen: Int, hiddenSize: Int, nor
             out.push(normed[d])
             d = d + 1
         }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(normed)
         row = row + 1
     }
     return out
@@ -3620,7 +3716,10 @@ fun encodeTokenRawWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSi
 fun embeddingLayerNormWithEmbeddingDeltas(values: Array<Float>, normWeight: Array<Float>, normBias: Array<Float>, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {
     let effectiveWeight = embeddingDeltas.effectiveLayerNormWeight(normWeight)
     let effectiveBias = embeddingDeltas.effectiveLayerNormBias(normBias)
-    return embeddingLayerNorm(values, effectiveWeight, effectiveBias)
+    let out = embeddingLayerNorm(values, effectiveWeight, effectiveBias)
+    releaseFloatArrayStorage(effectiveWeight)
+    releaseFloatArrayStorage(effectiveBias)
+    return out
 }
 
 fun embeddingLayerNorm(values: Array<Float>, normWeight: Array<Float>, normBias: Array<Float>) r: Array<Float> {

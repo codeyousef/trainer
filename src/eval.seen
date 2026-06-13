@@ -6,6 +6,7 @@ import io_utils.{writeAtomicText}
 import json.builder.{escapeJsonString}
 import jsonl.{TripletExample, readTripletsLimited}
 import math_utils.{cosine}
+import memory.allocation.{releaseFloatArrayStorage}
 
 class EvalResult {
     var total: Int
@@ -29,7 +30,11 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
     while i < items.length() {
         let domain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
         let threshold = thresholdFor(thresholds, domain)
-        let score = cosine(encoder.encode(items[i].queryText), encoder.encode(items[i].positiveChunkText))
+        let q = encoder.encode(items[i].queryText)
+        let p = encoder.encode(items[i].positiveChunkText)
+        let score = cosine(q, p)
+        releaseFloatArrayStorage(q)
+        releaseFloatArrayStorage(p)
         let domainIndex = findDomainIndex(domains, domain)
         if domainIndex >= 0 {
             totals[domainIndex] = totals[domainIndex] + 1

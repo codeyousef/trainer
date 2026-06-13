@@ -7,6 +7,7 @@ import io_utils.{writeAtomicText}
 import jsonl.{TripletExample, readTripletsLimited}
 import math_utils.{cosine, relu, deterministicShuffleIndices, normalize}
 import parameter_registry.{MiniLMParameterRegistry, writeMiniLMParameterRegistry}
+import memory.allocation.{releaseFloatArrayStorage}
 
 class TrainResult {
     var examples: Int
@@ -155,27 +156,48 @@ fun trainAdapterTriplet(item: TripletExample, encoder: Encoder, parameterRegistr
         if miniQ.length() == encoder.embeddingDim and miniP.length() == encoder.embeddingDim and miniN.length() == encoder.embeddingDim {
             minilmLoss = encoder.minilmLayerAdapter.updateTriplet(miniQ, miniP, miniN, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
         }
+        releaseFloatArrayStorage(miniQ)
+        releaseFloatArrayStorage(miniP)
+        releaseFloatArrayStorage(miniN)
     }
     var rawMeanQ = miniMeanQ
     var rawMeanP = miniMeanP
     var rawMeanN = miniMeanN
     if cfg.trainMiniLMDeltas or rawMeanQ.length() != encoder.embeddingDim {
+        releaseFloatArrayStorage(miniMeanQ)
         rawMeanQ = encoder.encodeRawMean(item.queryText)
     }
     if cfg.trainMiniLMDeltas or rawMeanP.length() != encoder.embeddingDim {
+        releaseFloatArrayStorage(miniMeanP)
         rawMeanP = encoder.encodeRawMean(item.positiveChunkText)
     }
     if cfg.trainMiniLMDeltas or rawMeanN.length() != encoder.embeddingDim {
+        releaseFloatArrayStorage(miniMeanN)
         rawMeanN = encoder.encodeRawMean(item.hardNegativeChunkText)
     }
     let rawQ = normalize(rawMeanQ)
     let rawP = normalize(rawMeanP)
     let rawN = normalize(rawMeanN)
     let layerLoss = encoder.layerAdapter.updateTriplet(rawQ, rawP, rawN, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
-    let q = normalize(encoder.layerAdapter.apply(rawMeanQ))
-    let p = normalize(encoder.layerAdapter.apply(rawMeanP))
-    let n = normalize(encoder.layerAdapter.apply(rawMeanN))
+    let layerQ = encoder.layerAdapter.apply(rawMeanQ)
+    let layerP = encoder.layerAdapter.apply(rawMeanP)
+    let layerN = encoder.layerAdapter.apply(rawMeanN)
+    let q = normalize(layerQ)
+    let p = normalize(layerP)
+    let n = normalize(layerN)
     let adapterLoss = encoder.adapter.updateTriplet(q, p, n, cfg.margin, cfg.learningRate, cfg.weightDecay, cfg.gradClip)
+    releaseFloatArrayStorage(rawQ)
+    releaseFloatArrayStorage(rawP)
+    releaseFloatArrayStorage(rawN)
+    releaseFloatArrayStorage(layerQ)
+    releaseFloatArrayStorage(layerP)
+    releaseFloatArrayStorage(layerN)
+    releaseFloatArrayStorage(q)
+    releaseFloatArrayStorage(p)
+    releaseFloatArrayStorage(n)
+    releaseFloatArrayStorage(rawMeanQ)
+    releaseFloatArrayStorage(rawMeanP)
+    releaseFloatArrayStorage(rawMeanN)
     return denseLoss + minilmLoss + layerLoss + adapterLoss
 }
 
@@ -188,7 +210,11 @@ fun tripletLoss(item: TripletExample, encoder: Encoder, margin: Float) r: Float 
     let n = encoder.encode(item.hardNegativeChunkText)
     let simPos = cosine(q, p)
     let simNeg = cosine(q, n)
-    return relu(simNeg - simPos + margin)
+    let loss = relu(simNeg - simPos + margin)
+    releaseFloatArrayStorage(q)
+    releaseFloatArrayStorage(p)
+    releaseFloatArrayStorage(n)
+    return loss
 }
 
 fun trainingConfigJson(cfg: TrainerConfig, count: Int, loss: Float, effectiveBatch: Int, batches: Int, examplesPerEpoch: Int, runtimeLayers: Int) r: String {
