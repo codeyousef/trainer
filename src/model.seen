@@ -149,6 +149,34 @@ class ModelBundle {
         out = out + encoderSummary
         return out
     }
+
+    fun briefSummary() r: String {
+        var out = "hidden="
+        out = out + this.hiddenSize.toString()
+        out = out + " layers="
+        out = out + this.layers.toString()
+        out = out + " heads="
+        out = out + this.attentionHeads.toString()
+        out = out + " tokenizer_loaded="
+        out = out + this.tokenizer.loaded.toString()
+        out = out + " vocab_signal="
+        out = out + this.tokenizer.vocabSignal.toString()
+        out = out + " weights_valid="
+        out = out + this.weights.validHeader.toString()
+        out = out + " tensors="
+        out = out + this.weights.tensorCount.toString()
+        out = out + " model_backend="
+        out = out + this.encoder.modelEmbeddings.backend
+        out = out + " model_layers_ready="
+        out = out + this.encoder.modelEmbeddings.readyLayers.toString()
+        out = out + "/"
+        out = out + this.encoder.modelEmbeddings.layers.toString()
+        out = out + " model_cache_layers="
+        out = out + this.encoder.modelEmbeddings.cache.cachedLayers.toString()
+        out = out + "/"
+        out = out + this.encoder.modelEmbeddings.cache.requestedLayers.toString()
+        return out
+    }
 }
 
 class BertConfigMeta {

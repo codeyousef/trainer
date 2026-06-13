@@ -50,7 +50,7 @@ fun trainerMain() r: Int {
         return 2
     }
 
-    let modelSummary = pipeline.bundle.summary()
+    let modelSummary = if command == "mine" or command == "calibrate" or command == "eval" { pipeline.bundle.briefSummary() } else { pipeline.bundle.summary() }
     var modelLine = "trainer: model "
     modelLine = modelLine + modelSummary
     println(modelLine)

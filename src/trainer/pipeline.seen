@@ -25,7 +25,6 @@ class Pipeline {
         let required = backendRequiresGpu(this.cfg)
         let backend = GpuBackend.new(required)
         let ok = backend.initialize()
-        backend.shutdown()
         return ok
     }
 
