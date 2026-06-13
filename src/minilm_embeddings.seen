@@ -314,6 +314,46 @@ class MiniLMForwardCache {
     }
 }
 
+class MiniLMBatchSequence {
+    var ok: Bool
+    var rows: Int
+    var hiddenSize: Int
+    var totalTokens: Int
+    var offsets: Array<Int>
+    var lengths: Array<Int>
+    var values: Array<Float>
+
+    static fun failure() r: MiniLMBatchSequence {
+        return MiniLMBatchSequence{
+            ok: false,
+            rows: 0,
+            hiddenSize: 0,
+            totalTokens: 0,
+            offsets: Array<Int>(),
+            lengths: Array<Int>(),
+            values: Array<Float>()
+        }
+    }
+
+    static fun success(rows: Int, hiddenSize: Int, totalTokens: Int, offsets: Array<Int>, lengths: Array<Int>, values: Array<Float>) r: MiniLMBatchSequence {
+        return MiniLMBatchSequence{
+            ok: true,
+            rows: rows,
+            hiddenSize: hiddenSize,
+            totalTokens: totalTokens,
+            offsets: offsets,
+            lengths: lengths,
+            values: values
+        }
+    }
+}
+
+fun releaseMiniLMBatchSequenceStorage(batch: MiniLMBatchSequence) r: Void {
+    releaseIntArrayStorage(batch.offsets)
+    releaseIntArrayStorage(batch.lengths)
+    releaseFloatArrayStorage(batch.values)
+}
+
 class MiniLMEmbeddings {
     var loaded: Bool
     var hiddenSize: Int
@@ -587,6 +627,102 @@ class MiniLMEmbeddings {
             mean = projectedMean
         }
         return mean
+    }
+
+    fun encodeMeansBatchWithLayerDeltas(tokenIds: Array<Int>, mask: Array<Int>, rows: Int, cols: Int, layerDeltas: MiniLMLayerDeltas, embeddingDeltas: MiniLMEmbeddingDeltas, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
+        let info = this.info
+        if not info.validHeader or rows <= 0 or cols <= 0 {
+            return Array<Float>()
+        }
+        let batch = buildMiniLMBatchSequenceWithEmbeddingDeltas(this.cache, info, tokenIds, mask, rows, cols, this.hiddenSize, this.maxLoadElements, embeddingDeltas)
+        if not batch.ok {
+            return Array<Float>()
+        }
+        var encoded = batch.values
+        let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        let applyLayerAdapterAfterPooling = targetLayer >= 0 and targetLayer == this.readyLayers - 1
+        var layer = 0
+        while layer < this.readyLayers {
+            var layerOut = Array<Float>()
+            if layerDeltas.hasLayer(layer) {
+                layerOut = applyEncoderLayerBatchMaybeCached(this.cache, info, encoded, batch.offsets, batch.lengths, batch.rows, batch.totalTokens, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, DenseLoRAAdapter.identity(this.intermediateSize, this.hiddenSize), layerDeltas.outputDeltas[layer], layerDeltas.intermediateDeltas[layer], layerDeltas.queryDeltas[layer], layerDeltas.keyDeltas[layer], layerDeltas.valueDeltas[layer], layerDeltas.attentionDenseDeltas[layer], layerDeltas.attentionLayerNormDeltas[layer], layerDeltas.outputLayerNormDeltas[layer], true, this.backend)
+            } else {
+                layerOut = applyEncoderLayerBatchMaybeCachedBase(this.cache, info, encoded, batch.offsets, batch.lengths, batch.rows, batch.totalTokens, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, this.backend)
+            }
+            if layerOut.length() == encoded.length() {
+                let previous = encoded
+                encoded = layerOut
+                releaseFloatArrayStorage(previous)
+                if layer == targetLayer and not applyLayerAdapterAfterPooling {
+                    let projected = applyProjectionAdapterToSequence(encoded, batch.totalTokens, this.hiddenSize, layerAdapter)
+                    releaseFloatArrayStorage(encoded)
+                    encoded = projected
+                }
+            } else {
+                releaseFloatArrayStorage(layerOut)
+                releaseIntArrayStorage(batch.offsets)
+                releaseIntArrayStorage(batch.lengths)
+                releaseFloatArrayStorage(encoded)
+                return Array<Float>()
+            }
+            layer = layer + 1
+        }
+        var means = meanPoolBatchFlat(encoded, batch.offsets, batch.lengths, batch.rows, this.hiddenSize)
+        releaseFloatArrayStorage(encoded)
+        if applyLayerAdapterAfterPooling {
+            let projectedMeans = applyProjectionAdapterToRows(means, batch.rows, this.hiddenSize, layerAdapter)
+            releaseFloatArrayStorage(means)
+            means = projectedMeans
+        }
+        releaseIntArrayStorage(batch.offsets)
+        releaseIntArrayStorage(batch.lengths)
+        return means
+    }
+
+    fun encodeMeansBatchWithAdapters(tokenIds: Array<Int>, mask: Array<Int>, rows: Int, cols: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, denseAdapterLayer: Int, layerAdapter: ProjectionAdapter, adapterLayer: Int) r: Array<Float> {
+        let info = this.info
+        if not info.validHeader or rows <= 0 or cols <= 0 {
+            return Array<Float>()
+        }
+        let batch = buildMiniLMBatchSequence(this.cache, info, tokenIds, mask, rows, cols, this.hiddenSize, this.maxLoadElements)
+        if not batch.ok {
+            return Array<Float>()
+        }
+        var encoded = batch.values
+        let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        let applyLayerAdapterAfterPooling = targetLayer >= 0 and targetLayer == this.readyLayers - 1
+        let denseTargetLayer = normalizeMiniLMDenseAdapterLayer(denseAdapterLayer, this.readyLayers)
+        var layer = 0
+        while layer < this.readyLayers {
+            let layerOut = applyEncoderLayerBatchMaybeCached(this.cache, info, encoded, batch.offsets, batch.lengths, batch.rows, batch.totalTokens, this.hiddenSize, this.attentionHeads, this.intermediateSize, this.maxLoadElements, layer, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, layer == denseTargetLayer, this.backend)
+            if layerOut.length() == encoded.length() {
+                let previous = encoded
+                encoded = layerOut
+                releaseFloatArrayStorage(previous)
+                if layer == targetLayer and not applyLayerAdapterAfterPooling {
+                    let projected = applyProjectionAdapterToSequence(encoded, batch.totalTokens, this.hiddenSize, layerAdapter)
+                    releaseFloatArrayStorage(encoded)
+                    encoded = projected
+                }
+            } else {
+                releaseFloatArrayStorage(layerOut)
+                releaseIntArrayStorage(batch.offsets)
+                releaseIntArrayStorage(batch.lengths)
+                releaseFloatArrayStorage(encoded)
+                return Array<Float>()
+            }
+            layer = layer + 1
+        }
+        var means = meanPoolBatchFlat(encoded, batch.offsets, batch.lengths, batch.rows, this.hiddenSize)
+        releaseFloatArrayStorage(encoded)
+        if applyLayerAdapterAfterPooling {
+            let projectedMeans = applyProjectionAdapterToRows(means, batch.rows, this.hiddenSize, layerAdapter)
+            releaseFloatArrayStorage(means)
+            means = projectedMeans
+        }
+        releaseIntArrayStorage(batch.offsets)
+        releaseIntArrayStorage(batch.lengths)
+        return means
     }
 
     fun encodeLayerMean(tokenIds: Array<Int>, mask: Array<Int>, adapterLayer: Int) r: Array<Float> {
@@ -1448,6 +1584,215 @@ fun applyEncoderLayerMaybeCached(cache: MiniLMForwardCache, info: SafeTensorInfo
 
 fun applyEncoderLayerMaybeCachedBase(cache: MiniLMForwardCache, info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, backend: String) r: Array<Float> {
     return applyEncoderLayerMaybeCached(cache, info, sequence, seqLen, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), false, backend)
+}
+
+fun buildMiniLMBatchSequence(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, rows: Int, cols: Int, hiddenSize: Int, maxLoadElements: Int) r: MiniLMBatchSequence {
+    let word = wordEmbeddingTensorForTokens(cache, info, tokenIds, mask, maxLoadElements)
+    if not word.ok { return MiniLMBatchSequence.failure() }
+    let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
+    if not position.ok { return MiniLMBatchSequence.failure() }
+    let tokenType = cachedEmbeddingTensor(cache, info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    if not tokenType.ok { return MiniLMBatchSequence.failure() }
+    let normWeight = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.weight", maxLoadElements)
+    if not normWeight.ok { return MiniLMBatchSequence.failure() }
+    let normBias = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.bias", maxLoadElements)
+    if not normBias.ok { return MiniLMBatchSequence.failure() }
+    let offsets = Array<Int>()
+    let lengths = Array<Int>()
+    let values = Array<Float>()
+    var totalTokens = 0
+    var row = 0
+    while row < rows {
+        offsets.push(totalTokens)
+        var rowTokens = 0
+        var col = 0
+        while col < cols {
+            let idx = row * cols + col
+            if idx < tokenIds.length() and idx < mask.length() and mask[idx] == 1 {
+                let embedded = encodeTokenWithTables(tokenIds[idx], col, hiddenSize, word, position, tokenType, normWeight, normBias)
+                var d = 0
+                while d < hiddenSize {
+                    values.push(embedded[d])
+                    d = d + 1
+                }
+                releaseFloatArrayStorage(embedded)
+                rowTokens = rowTokens + 1
+                totalTokens = totalTokens + 1
+            }
+            col = col + 1
+        }
+        lengths.push(rowTokens)
+        row = row + 1
+    }
+    releaseTemporarySparseWordTensor(word)
+    return MiniLMBatchSequence.success(rows, hiddenSize, totalTokens, offsets, lengths, values)
+}
+
+fun buildMiniLMBatchSequenceWithEmbeddingDeltas(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, rows: Int, cols: Int, hiddenSize: Int, maxLoadElements: Int, embeddingDeltas: MiniLMEmbeddingDeltas) r: MiniLMBatchSequence {
+    let word = wordEmbeddingTensorForTokens(cache, info, tokenIds, mask, maxLoadElements)
+    if not word.ok { return MiniLMBatchSequence.failure() }
+    let position = cachedEmbeddingTensor(cache, info, "embeddings.position_embeddings.weight", maxLoadElements)
+    if not position.ok { return MiniLMBatchSequence.failure() }
+    let tokenType = cachedEmbeddingTensor(cache, info, "embeddings.token_type_embeddings.weight", maxLoadElements)
+    if not tokenType.ok { return MiniLMBatchSequence.failure() }
+    let normWeight = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.weight", maxLoadElements)
+    if not normWeight.ok { return MiniLMBatchSequence.failure() }
+    let normBias = cachedEmbeddingTensor(cache, info, "embeddings.LayerNorm.bias", maxLoadElements)
+    if not normBias.ok { return MiniLMBatchSequence.failure() }
+    let offsets = Array<Int>()
+    let lengths = Array<Int>()
+    let values = Array<Float>()
+    var totalTokens = 0
+    var row = 0
+    while row < rows {
+        offsets.push(totalTokens)
+        var rowTokens = 0
+        var col = 0
+        while col < cols {
+            let idx = row * cols + col
+            if idx < tokenIds.length() and idx < mask.length() and mask[idx] == 1 {
+                let embedded = encodeTokenWithEmbeddingDeltas(tokenIds[idx], col, hiddenSize, word, position, tokenType, normWeight, normBias, embeddingDeltas)
+                var d = 0
+                while d < hiddenSize {
+                    values.push(embedded[d])
+                    d = d + 1
+                }
+                releaseFloatArrayStorage(embedded)
+                rowTokens = rowTokens + 1
+                totalTokens = totalTokens + 1
+            }
+            col = col + 1
+        }
+        lengths.push(rowTokens)
+        row = row + 1
+    }
+    releaseTemporarySparseWordTensor(word)
+    return MiniLMBatchSequence.success(rows, hiddenSize, totalTokens, offsets, lengths, values)
+}
+
+fun applyEncoderLayerBatchMaybeCachedBase(cache: MiniLMForwardCache, info: SafeTensorInfo, sequence: Array<Float>, offsets: Array<Int>, lengths: Array<Int>, rows: Int, totalTokens: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, backend: String) r: Array<Float> {
+    return applyEncoderLayerBatchMaybeCached(cache, info, sequence, offsets, lengths, rows, totalTokens, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, DenseLoRAAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), DenseDeltaAdapter.identity(0, 0), LayerNormDeltaAdapter.identity(0), LayerNormDeltaAdapter.identity(0), false, backend)
+}
+
+fun applyEncoderLayerBatchMaybeCached(cache: MiniLMForwardCache, info: SafeTensorInfo, sequence: Array<Float>, offsets: Array<Int>, lengths: Array<Int>, rows: Int, totalTokens: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
+    if cache.hasLayer(layer) {
+        return applyEncoderLayerBatchCachedBackend(cache.layerAt(layer), sequence, offsets, lengths, rows, totalTokens, hiddenSize, attentionHeads, intermediateSize, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, applyDenseAdapter, backend)
+    }
+    let layerCache = MiniLMEncoderLayerCache.load(info, layer, maxLoadElements)
+    let result = applyEncoderLayerBatchCachedBackend(layerCache, sequence, offsets, lengths, rows, totalTokens, hiddenSize, attentionHeads, intermediateSize, denseAdapter, denseDelta, intermediateDelta, queryDelta, keyDelta, valueDelta, attentionDenseDelta, attentionLayerNormDelta, layerNormDelta, applyDenseAdapter, backend)
+    releaseMiniLMEncoderLayerCacheStorage(layerCache)
+    return result
+}
+
+fun applyEncoderLayerBatchCachedBackend(layerCache: MiniLMEncoderLayerCache, sequence: Array<Float>, offsets: Array<Int>, lengths: Array<Int>, rows: Int, totalTokens: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
+    if not layerCache.ok or totalTokens <= 0 {
+        return Array<Float>()
+    }
+    let q = projectSequenceWithDenseDeltaBackend(sequence, totalTokens, hiddenSize, hiddenSize, layerCache.qWeight, layerCache.qBias, queryDelta, applyDenseAdapter, backend)
+    let k = projectSequenceWithDenseDeltaBackend(sequence, totalTokens, hiddenSize, hiddenSize, layerCache.kWeight, layerCache.kBias, keyDelta, applyDenseAdapter, backend)
+    let v = projectSequenceWithDenseDeltaBackend(sequence, totalTokens, hiddenSize, hiddenSize, layerCache.vWeight, layerCache.vBias, valueDelta, applyDenseAdapter, backend)
+    let context = attentionContextBatchBackend(q, k, v, offsets, lengths, rows, totalTokens, hiddenSize, attentionHeads, backend)
+    if context.length() != sequence.length() {
+        releaseFloatArrayStorage(q)
+        releaseFloatArrayStorage(k)
+        releaseFloatArrayStorage(v)
+        releaseFloatArrayStorage(context)
+        return Array<Float>()
+    }
+    releaseFloatArrayStorage(q)
+    releaseFloatArrayStorage(k)
+    releaseFloatArrayStorage(v)
+    let attnDense = projectSequenceWithDenseDeltaBackend(context, totalTokens, hiddenSize, hiddenSize, layerCache.attentionOutputWeight, layerCache.attentionOutputBias, attentionDenseDelta, applyDenseAdapter, backend)
+    let attnLnInput = addFlatRows(attnDense, sequence, totalTokens, hiddenSize)
+    var attnNorm = Array<Float>()
+    if applyDenseAdapter {
+        let effectiveAttentionWeight = layerNormDeltaEffectiveWeight(layerCache.attentionNormWeight.values, attentionLayerNormDelta)
+        let effectiveAttentionBias = layerNormDeltaEffectiveBias(layerCache.attentionNormBias.values, attentionLayerNormDelta)
+        attnNorm = layerNormRowsBackend(attnLnInput, totalTokens, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias, backend)
+        releaseFloatArrayStorage(effectiveAttentionWeight)
+        releaseFloatArrayStorage(effectiveAttentionBias)
+    } else {
+        attnNorm = layerNormRowsBackend(attnLnInput, totalTokens, hiddenSize, layerCache.attentionNormWeight.values, layerCache.attentionNormBias.values, backend)
+    }
+    releaseFloatArrayStorage(attnDense)
+    releaseFloatArrayStorage(attnLnInput)
+    let ffIntermediate = feedForwardIntermediateWithDenseDeltaBackend(attnNorm, totalTokens, hiddenSize, intermediateSize, layerCache.intermediateWeight, layerCache.intermediateBias, intermediateDelta, applyDenseAdapter, backend)
+    let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, totalTokens, intermediateSize, hiddenSize, layerCache.outputWeight, layerCache.outputBias, denseAdapter, denseDelta, applyDenseAdapter, backend)
+    releaseFloatArrayStorage(ffIntermediate)
+    var out = Array<Float>()
+    if applyDenseAdapter {
+        let effectiveWeight = layerNormDelta.effectiveWeight(layerCache.outputNormWeight.values)
+        let effectiveBias = layerNormDelta.effectiveBias(layerCache.outputNormBias.values)
+        out = residualLayerNormValuesBackend(ffOutput, attnNorm, totalTokens, hiddenSize, effectiveWeight, effectiveBias, backend)
+        releaseFloatArrayStorage(effectiveWeight)
+        releaseFloatArrayStorage(effectiveBias)
+    } else {
+        out = residualLayerNormValuesBackend(ffOutput, attnNorm, totalTokens, hiddenSize, layerCache.outputNormWeight.values, layerCache.outputNormBias.values, backend)
+    }
+    releaseFloatArrayStorage(context)
+    releaseFloatArrayStorage(attnNorm)
+    releaseFloatArrayStorage(ffOutput)
+    return out
+}
+
+fun attentionContextBatchBackend(q: Array<Float>, k: Array<Float>, v: Array<Float>, offsets: Array<Int>, lengths: Array<Int>, rows: Int, totalTokens: Int, hiddenSize: Int, attentionHeads: Int, backend: String) r: Array<Float> {
+    let out = Array<Float>(totalTokens * hiddenSize, 0.0)
+    var row = 0
+    while row < rows and row < offsets.length() and row < lengths.length() {
+        let start = offsets[row]
+        let len = lengths[row]
+        if len > 0 {
+            let qSlice = sliceFlatRows(q, start, len, hiddenSize)
+            let kSlice = sliceFlatRows(k, start, len, hiddenSize)
+            let vSlice = sliceFlatRows(v, start, len, hiddenSize)
+            let context = attentionContextBackend(qSlice, kSlice, vSlice, len, hiddenSize, attentionHeads, backend)
+            if context.length() != len * hiddenSize {
+                releaseFloatArrayStorage(qSlice)
+                releaseFloatArrayStorage(kSlice)
+                releaseFloatArrayStorage(vSlice)
+                releaseFloatArrayStorage(context)
+                releaseFloatArrayStorage(out)
+                return Array<Float>()
+            }
+            copyFlatRowsInto(out, start, len, hiddenSize, context)
+            releaseFloatArrayStorage(qSlice)
+            releaseFloatArrayStorage(kSlice)
+            releaseFloatArrayStorage(vSlice)
+            releaseFloatArrayStorage(context)
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun sliceFlatRows(values: Array<Float>, startRow: Int, rowCount: Int, cols: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < rowCount {
+        var col = 0
+        while col < cols {
+            out.push(flatAt(values, startRow + row, col, cols))
+            col = col + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun copyFlatRowsInto(out: Array<Float>, startRow: Int, rowCount: Int, cols: Int, values: Array<Float>) r: Void {
+    var row = 0
+    while row < rowCount {
+        var col = 0
+        while col < cols {
+            let outIndex = (startRow + row) * cols + col
+            let valueIndex = row * cols + col
+            if outIndex >= 0 and outIndex < out.length() and valueIndex >= 0 and valueIndex < values.length() {
+                out[outIndex] = values[valueIndex]
+            }
+            col = col + 1
+        }
+        row = row + 1
+    }
 }
 
 fun applyEncoderLayerWithDenseAdapterCachedBackend(layerCache: MiniLMEncoderLayerCache, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, applyDenseAdapter: Bool, backend: String) r: Array<Float> {
@@ -2354,6 +2699,54 @@ fun meanPoolFlat(sequence: Array<Float>, seqLen: Int, hiddenSize: Int) r: Array<
     while i < hiddenSize {
         out[i] = out[i] / seqLen.toFloat()
         i = i + 1
+    }
+    return out
+}
+
+fun meanPoolBatchFlat(sequence: Array<Float>, offsets: Array<Int>, lengths: Array<Int>, rows: Int, hiddenSize: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < rows {
+        let start = if row < offsets.length() { offsets[row] } else { 0 }
+        let len = if row < lengths.length() { lengths[row] } else { 0 }
+        var d = 0
+        while d < hiddenSize {
+            var sum = 0.0
+            var token = 0
+            while token < len {
+                sum = sum + flatAt(sequence, start + token, d, hiddenSize)
+                token = token + 1
+            }
+            if len > 0 {
+                out.push(sum / len.toFloat())
+            } else {
+                out.push(0.0)
+            }
+            d = d + 1
+        }
+        row = row + 1
+    }
+    return out
+}
+
+fun applyProjectionAdapterToRows(values: Array<Float>, rows: Int, hiddenSize: Int, adapter: ProjectionAdapter) r: Array<Float> {
+    let out = Array<Float>()
+    var row = 0
+    while row < rows {
+        let input = rowVector(values, row, hiddenSize)
+        let projected = adapter.apply(input)
+        var d = 0
+        while d < hiddenSize {
+            if d < projected.length() {
+                out.push(projected[d])
+            } else {
+                out.push(0.0)
+            }
+            d = d + 1
+        }
+        releaseFloatArrayStorage(input)
+        releaseFloatArrayStorage(projected)
+        row = row + 1
     }
     return out
 }

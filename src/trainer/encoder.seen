@@ -102,6 +102,38 @@ class Encoder {
         return out
     }
 
+    fun encodeTokenizedBatch(tokenIds: Array<Int>, mask: Array<Int>, rows: Int, cols: Int) r: Array<Float> {
+        let raw = this.encodeRawMeanBatchTokenized(tokenIds, mask, rows, cols)
+        if raw.length() != rows * this.embeddingDim {
+            releaseFloatArrayStorage(raw)
+            return Array<Float>()
+        }
+        let out = Array<Float>()
+        var row = 0
+        while row < rows {
+            let rawRow = encoderRowVector(raw, row, this.embeddingDim)
+            let layer = this.layerAdapter.apply(rawRow)
+            let adapted = this.adapter.apply(layer)
+            let normalized = normalize(adapted)
+            var d = 0
+            while d < this.embeddingDim {
+                if d < normalized.length() {
+                    out.push(normalized[d])
+                } else {
+                    out.push(0.0)
+                }
+                d = d + 1
+            }
+            releaseFloatArrayStorage(rawRow)
+            releaseFloatArrayStorage(layer)
+            releaseFloatArrayStorage(adapted)
+            releaseFloatArrayStorage(normalized)
+            row = row + 1
+        }
+        releaseFloatArrayStorage(raw)
+        return out
+    }
+
     fun encodeBase(text: String) r: Array<Float> {
         let tokenized = this.tokenizer.tokenized(text)
         let raw = this.encodeRawMeanTokenized(tokenized.ids, tokenized.masks)
@@ -177,6 +209,56 @@ class Encoder {
             }
         }
         return sum
+    }
+
+    fun encodeRawMeanBatchTokenized(tokenIds: Array<Int>, mask: Array<Int>, rows: Int, cols: Int) r: Array<Float> {
+        if this.modelEmbeddings.loaded {
+            var modelMeans = Array<Float>()
+            if this.hasMiniLMAllLayerDeltaTarget() {
+                modelMeans = this.modelEmbeddings.encodeMeansBatchWithLayerDeltas(tokenIds, mask, rows, cols, this.minilmLayerDeltas, this.minilmEmbeddingDeltas, this.minilmLayerAdapter, this.minilmAdapterLayer)
+            } else {
+                modelMeans = this.modelEmbeddings.encodeMeansBatchWithAdapters(tokenIds, mask, rows, cols, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, this.minilmLayerAdapter, this.minilmAdapterLayer)
+            }
+            if modelMeans.length() == rows * this.embeddingDim {
+                return modelMeans
+            }
+            releaseFloatArrayStorage(modelMeans)
+        }
+
+        let out = Array<Float>()
+        var row = 0
+        while row < rows {
+            var d = 0
+            while d < this.embeddingDim {
+                out.push(0.0)
+                d = d + 1
+            }
+            var tokenCount = 0
+            var col = 0
+            while col < cols {
+                let idx = row * cols + col
+                if idx < tokenIds.length() and idx < mask.length() and mask[idx] == 1 {
+                    tokenCount = tokenCount + 1
+                    d = 0
+                    while d < this.embeddingDim {
+                        let outIndex = row * this.embeddingDim + d
+                        out[outIndex] = out[outIndex] + tokenFeature(tokenIds[idx], d)
+                        d = d + 1
+                    }
+                }
+                col = col + 1
+            }
+            if tokenCount > 0 {
+                d = 0
+                while d < this.embeddingDim {
+                    let outIndex = row * this.embeddingDim + d
+                    out[outIndex] = out[outIndex] / tokenCount.toFloat()
+                    d = d + 1
+                }
+            }
+            row = row + 1
+        }
+        return out
     }
 
     fun encodeMiniLMLayerInput(text: String) r: Array<Float> {
@@ -322,4 +404,19 @@ fun tokenFeature(tokenId: Int, dim: Int) r: Float {
         bucket = 0 - bucket
     }
     return (bucket.toFloat() / 1000.0) - 1.0
+}
+
+fun encoderRowVector(values: Array<Float>, row: Int, width: Int) r: Array<Float> {
+    let out = Array<Float>()
+    var d = 0
+    while d < width {
+        let idx = row * width + d
+        if idx >= 0 and idx < values.length() {
+            out.push(values[idx])
+        } else {
+            out.push(0.0)
+        }
+        d = d + 1
+    }
+    return out
 }

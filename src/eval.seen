@@ -98,6 +98,24 @@ class EvalEmbeddingCache {
         return this.dotAt(qIndex, pIndex)
     }
 
+    fun loadBatch(texts: Array<String>, embeddings: Array<Float>) r: Void {
+        var i = 0
+        while i < texts.length() {
+            this.texts.push(texts[i])
+            var d = 0
+            while d < this.dim {
+                let idx = i * this.dim + d
+                if idx < embeddings.length() {
+                    this.embeddings.push(embeddings[idx])
+                } else {
+                    this.embeddings.push(0.0)
+                }
+                d = d + 1
+            }
+            i = i + 1
+        }
+    }
+
     fun release() r: Void {
         releaseFloatArrayStorage(this.embeddings)
     }
@@ -113,6 +131,7 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
     let totals = evalInitializedIntArray(domains.length(), 0)
     let answeredTotals = evalInitializedIntArray(domains.length(), 0)
     let cache = EvalEmbeddingCache.new(encoder.embeddingDim)
+    preloadEvalEmbeddingCache(encoder, items, cache, timing)
     var total = 0
     var answered = 0
     var i = 0
@@ -158,6 +177,51 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
     result.resultWriteMs = writeMs
     result.totalEvalMs = totalMs
     return result
+}
+
+fun preloadEvalEmbeddingCache(encoder: Encoder, items: Array<TripletExample>, cache: EvalEmbeddingCache, timing: EvalTiming) r: Void {
+    let texts = uniqueEvalTexts(items)
+    if texts.length() <= 0 {
+        return
+    }
+    let tokenizeStart = __GetTime()
+    let tokenBatch = encoder.tokenizer.batchTokenize(texts)
+    timing.tokenizeMs = timing.tokenizeMs + evalElapsedMillis(tokenizeStart)
+    let encodeStart = __GetTime()
+    let embeddings = encoder.encodeTokenizedBatch(tokenBatch.ids, tokenBatch.masks, tokenBatch.rows, tokenBatch.cols)
+    timing.encodeMs = timing.encodeMs + evalElapsedMillis(encodeStart)
+    if embeddings.length() == texts.length() * cache.dim {
+        cache.loadBatch(texts, embeddings)
+    }
+    releaseIntArrayStorage(tokenBatch.ids)
+    releaseIntArrayStorage(tokenBatch.masks)
+    releaseFloatArrayStorage(embeddings)
+}
+
+fun uniqueEvalTexts(items: Array<TripletExample>) r: Array<String> {
+    let texts = Array<String>()
+    var i = 0
+    while i < items.length() {
+        if not evalStringArrayContains(texts, items[i].queryText) {
+            texts.push(items[i].queryText)
+        }
+        if not evalStringArrayContains(texts, items[i].positiveChunkText) {
+            texts.push(items[i].positiveChunkText)
+        }
+        i = i + 1
+    }
+    return texts
+}
+
+fun evalStringArrayContains(values: Array<String>, needle: String) r: Bool {
+    var i = 0
+    while i < values.length() {
+        if values[i] == needle {
+            return true
+        }
+        i = i + 1
+    }
+    return false
 }
 
 fun readEvalDataset(cfg: TrainerConfig) r: Array<TripletExample> {

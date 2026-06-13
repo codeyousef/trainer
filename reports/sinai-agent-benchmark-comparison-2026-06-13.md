@@ -51,7 +51,7 @@ Thresholds:
 
 ## Median Results
 
-Three cold-process runs were executed for the earlier rows. The current Seen trainer row uses five cold-process runs after phase timing, sparse word-row caching, final-layer adapter pooling, transient trace-buffer cleanup, and the corrected GPU B-transposed matmul shader.
+Three cold-process runs were executed for the earlier rows. The current Seen trainer row uses five cold-process runs after phase timing, sparse word-row caching, final-layer adapter pooling, transient trace-buffer cleanup, corrected GPU B-transposed matmul, and batched eval encode.
 
 | Implementation | Device Path | Status | Median Cold Process Wall | Median Peak RSS | Throughput, Cold Process | Answer Rate |
 |---|---|---|---:|---:|---:|---:|
@@ -60,6 +60,7 @@ Three cold-process runs were executed for the earlier rows. The current Seen tra
 | Seen trainer CLI after adapter/load optimization | Vulkan GPU | Passed | 15.083s | 1,433,248 KB | 6.63 pairs/s, 13.26 row-texts/s | 0.86 |
 | Seen trainer CLI after encoder-layer cache optimization | Vulkan GPU | Superseded by shader fix | 10.171s | 724,300 KB | 9.83 pairs/s, 19.66 row-texts/s | 0.86 |
 | Seen trainer CLI after corrected GPU matmul + sparse/cache cleanup | Vulkan GPU | Passed | 11.352s | 664,592 KB | 8.81 pairs/s, 17.62 row-texts/s | 1.00 |
+| Seen trainer CLI after batched eval encode | Vulkan GPU | Passed | 5.504s | 1,167,572 KB | 18.17 pairs/s, 36.34 row-texts/s | 1.00 |
 | Python SentenceTransformer | CPU | Passed | 4.404s | 1,242,472 KB | 22.70 pairs/s, 45.41 texts/s | 1.00 |
 | Python SentenceTransformer | CUDA | Failed | Failed at model-to-CUDA | 1,314,296 KB at failure | n/a | n/a |
 
@@ -72,8 +73,11 @@ Performance ratios:
 - The encoder-layer cache optimization row is retained as historical data, but it was superseded after discovering that the older installed compiler emitted an empty `tensorMatmulBTransposed` shader body. That row should not be treated as the corrected GPU projection path.
 - The corrected GPU matmul + sparse/cache cleanup path makes Seen CLI eval `3.42x` faster than the baseline, reducing median wall time by `70.7%`.
 - The corrected GPU matmul + sparse/cache cleanup path reduces Seen CLI peak RSS by `63.0%` versus baseline.
-- Python SentenceTransformer CPU cold-process eval remains `2.58x` faster than the corrected Seen CLI GPU/Vulkan eval for this activity.
-- Corrected Seen CLI peak RSS is now `0.53x` the Python CPU path for this activity.
+- The batched eval encode path makes Seen CLI eval `7.05x` faster than the baseline, reducing median wall time by `85.8%`.
+- The batched eval encode path is `2.06x` faster than the corrected sparse/cache cleanup row. Its peak RSS is `1.76x` that lower-memory row because it holds batched valid-token intermediates.
+- The batched eval encode path reduces Seen CLI peak RSS by `35.0%` versus baseline.
+- Python SentenceTransformer CPU cold-process eval remains `1.25x` faster than batched Seen CLI GPU/Vulkan eval for this activity.
+- Batched Seen CLI peak RSS is now `0.94x` the Python CPU path for this activity.
 - Python CUDA was not comparable under the cap because all full-activity attempts failed before encoding.
 
 ## Seen CLI Internal Timing
@@ -82,14 +86,14 @@ The corrected Seen CLI now records eval phase timings from inside the Seen execu
 
 | Phase | Median Time |
 |---|---:|
-| Read eval dataset | 0.308s |
-| Tokenize 173 unique texts | 0.045s |
-| Encode 173 unique texts | 6.519s |
-| Score and threshold 100 pairs | 0.000313s |
-| Write results | 0.000084s |
-| Internal eval total | 6.879s |
+| Read eval dataset | 0.209s |
+| Tokenize 173 unique texts | 0.024s |
+| Encode 173 unique texts | 2.172s |
+| Score and threshold 100 pairs | 0.000090s |
+| Write results | 0.000099s |
+| Internal eval total | 2.419s |
 
-The cold-process wall time includes roughly `4.47s` outside the measured eval loop, mostly model/tokenizer/safetensors load, adapter resume, backend initialization, and process startup.
+The cold-process wall time includes roughly `3.09s` outside the measured eval loop, mostly model/tokenizer/safetensors load, adapter resume, backend initialization, and process startup.
 
 ## Python CPU Internal Timing
 
@@ -111,23 +115,25 @@ The cold-process number is the fairer cross-implementation headline because the 
 
 ## Run Details
 
-Seen trainer CLI after corrected GPU matmul + sparse/cache cleanup, Vulkan GPU:
+Seen trainer CLI after batched eval encode, Vulkan GPU:
 
 | Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed | Internal Encode |
 |---:|---:|---:|---:|---|---:|
-| 1 | 11.401s | 664,336 KB | 1.00 | yes | 6.578s |
-| 2 | 11.076s | 664,592 KB | 1.00 | yes | 6.287s |
-| 3 | 11.352s | 666,088 KB | 1.00 | yes | 6.519s |
-| 4 | 11.280s | 664,504 KB | 1.00 | yes | 6.509s |
-| 5 | 11.487s | 664,952 KB | 1.00 | yes | 6.686s |
+| 1 | 5.504s | 1,167,280 KB | 1.00 | yes | 2.205s |
+| 2 | 5.514s | 1,168,552 KB | 1.00 | yes | 2.172s |
+| 3 | 5.410s | 1,167,168 KB | 1.00 | yes | 2.079s |
+| 4 | 5.445s | 1,168,500 KB | 1.00 | yes | 2.141s |
+| 5 | 5.565s | 1,167,572 KB | 1.00 | yes | 2.200s |
 
-This corrected path adds:
+This current path adds:
 
 - Seen-native eval phase timing in `eval_results.json` and `trainer eval` logs.
 - Tokenized encode entry points so eval can separate tokenization from model encode timing.
 - Final-layer linear adapter pooling: when the MiniLM layer adapter is attached to the final ready layer, the trainer mean-pools first and applies the linear adapter once to the pooled vector.
 - Sparse word-row caching for MiniLM embedding rows touched during the process, avoiding repeated safetensors row reads without loading the full vocabulary table.
 - Raw embedding and training-trace transient buffer reclamation, reducing resident memory while preserving the corrected eval answer rate.
+- Batched eval encode: eval preloads unique texts, tokenizes once, batches valid-token MiniLM linear projections/layer norms across the GPU path, and keeps self-attention isolated per text.
+- Earlier release of batched layer intermediates, reducing peak RSS from the first batched attempt.
 - A Seen compiler/runtime declaration fix so the newer compiler can build trainer and emit the real `tensorMatmulBTransposed` GPU shader body.
 
 Seen trainer CLI after encoder-layer cache optimization, Vulkan GPU:
@@ -211,21 +217,21 @@ Python SentenceTransformer CUDA:
 
 ## Interpretation
 
-For this exact eval-style retrieval activity, Python SentenceTransformer CPU is still much faster than the Seen trainer CLI even though Seen initializes the Vulkan GPU path.
+For this exact eval-style retrieval activity, Python SentenceTransformer CPU is still faster than the Seen trainer CLI, but the gap is now much smaller even with Seen initializing the Vulkan GPU path.
 
-The Seen optimization work moved the corrected median from `38.780s` to `11.352s` and reduced peak RSS from `1,796,844 KB` to `664,592 KB`. This is a substantial improvement and now restores answer-rate parity with the Python CPU package path, but it does not close the full performance gap.
+The Seen optimization work moved the corrected median from `38.780s` to `5.504s` and reduced peak RSS from `1,796,844 KB` to `1,167,572 KB`. This restores answer-rate parity with the Python CPU package path and gets cold-process wall time within `1.25x` of Python CPU for this activity.
 
 The most likely reasons are implementation-level rather than model-level:
 
-- The Seen CLI performs this eval through the trainer runtime path, with per-unique-text encode behavior and many small GPU dispatches/readbacks.
+- The Seen CLI still performs this eval through the trainer runtime path, with per-text attention dispatch/readback overhead inside the new batched encode path.
 - The Python path uses optimized HuggingFace tokenizer/runtime and batched SentenceTransformer encode.
-- The Seen GPU backend is active, but this eval path is not yet optimized to batch the full 200-text workload into a single high-throughput GPU execution plan.
+- The Seen GPU backend is active, but the attention stage is not yet a single fully fused batched GPU execution plan.
 
 The answer rates are included to prove each path completed the same activity, but they should not be read as pure quality parity:
 
 - Seen uses the Seen tokenizer/MiniLM/runtime and adapter JSON path.
 - Python uses the SentenceTransformer package path with the composed `2_Dense` adapter module and `3_Normalize`.
-- The corrected GPU matmul path now reaches the same answer rate as Python on this 100-row benchmark, but the paths are still not guaranteed to be numerically identical.
+- The batched GPU path now reaches the same answer rate as Python on this 100-row benchmark, but the paths are still not guaranteed to be numerically identical.
 
 ## Training Note, Not Part Of This Benchmark
 
@@ -269,4 +275,4 @@ TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_TH
 
 ## Follow-Up Needed
 
-The benchmark shows the Seen trainer is functionally runnable on GPU and now much faster than the first measured implementation, but not performance competitive with Python SentenceTransformer CPU for this eval workload yet. FEL-601 removed duplicate eval encodes, redundant score normalization, training-only inference setup, repeated encoder-layer safetensors loads, avoidable adapter/layer-norm allocation, repeated sparse word-row reads, raw embedding/trace-buffer leaks, and a compiler/runtime declaration blocker that prevented the corrected shader-emitting compiler from building trainer. The remaining high-leverage task is FEL-602: batch the eval text encoding path so Vulkan work amortizes dispatch/readback overhead across the full text batch.
+The benchmark shows the Seen trainer is functionally runnable on GPU and now close to Python SentenceTransformer CPU for this eval workload. FEL-601 removed duplicate eval encodes, redundant score normalization, training-only inference setup, repeated encoder-layer safetensors loads, avoidable adapter/layer-norm allocation, repeated sparse word-row reads, raw embedding/trace-buffer leaks, and a compiler/runtime declaration blocker that prevented the corrected shader-emitting compiler from building trainer. It also added trainer-side batched eval encode for valid-token MiniLM linear projections/layer norms. The remaining high-leverage task is FEL-602: fuse or batch the attention/readback path so Vulkan work is closer to the Python runtime's full-batch execution model.

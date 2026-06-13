@@ -207,6 +207,8 @@ class Tokenizer {
                 masks.push(row.masks[j])
                 j = j + 1
             }
+            releaseIntArrayStorage(row.ids)
+            releaseIntArrayStorage(row.masks)
             i = i + 1
         }
         return TokenBatch.new(texts.length(), this.maxLength, ids, masks)
