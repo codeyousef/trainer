@@ -392,7 +392,7 @@ class MiniLMEmbeddings {
         }
         var cache = MiniLMForwardCache.empty()
         if cacheTensors {
-            cache = MiniLMForwardCache.loadEmbeddingsOnly(info, readyLayers, maxLoadElements)
+            cache = MiniLMForwardCache.load(info, readyLayers, maxLoadElements)
         }
 
         return MiniLMEmbeddings{
@@ -1380,15 +1380,15 @@ fun applyEncoderLayerWithDenseAdapterCachedBackend(layerCache: MiniLMEncoderLaye
 
     let attnDense = projectSequenceWithDenseDeltaBackend(context, seqLen, hiddenSize, hiddenSize, attnOutWeight, attnOutBias, attentionDenseDelta, applyDenseAdapter, backend)
     let attnLnInput = addFlatRows(attnDense, sequence, seqLen, hiddenSize)
-    var attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values, backend)
+    var attnNorm = Array<Float>()
     if applyDenseAdapter {
         let effectiveAttentionWeight = layerNormDeltaEffectiveWeight(attnLnWeight.values, attentionLayerNormDelta)
         let effectiveAttentionBias = layerNormDeltaEffectiveBias(attnLnBias.values, attentionLayerNormDelta)
-        let previousAttnNorm = attnNorm
         attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, effectiveAttentionWeight, effectiveAttentionBias, backend)
-        releaseFloatArrayStorage(previousAttnNorm)
         releaseFloatArrayStorage(effectiveAttentionWeight)
         releaseFloatArrayStorage(effectiveAttentionBias)
+    } else {
+        attnNorm = layerNormRowsBackend(attnLnInput, seqLen, hiddenSize, attnLnWeight.values, attnLnBias.values, backend)
     }
     let ffIntermediate = feedForwardIntermediateWithDenseDeltaBackend(attnNorm, seqLen, hiddenSize, intermediateSize, intermediateWeight, intermediateBias, intermediateDelta, applyDenseAdapter, backend)
     let ffOutput = feedForwardOutputWithDenseAdapterBackend(ffIntermediate, seqLen, intermediateSize, hiddenSize, outputWeight, outputBias, denseAdapter, denseDelta, applyDenseAdapter, backend)
@@ -1843,7 +1843,9 @@ fun feedForwardIntermediateWithDenseDelta(sequence: Array<Float>, seqLen: Int, h
 
 fun feedForwardIntermediateWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool, backend: String) r: Array<Float> {
     let pre = feedForwardPreActivationWithDenseDeltaBackend(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, intermediateDelta, applyDelta, backend)
-    return geluFlat(pre)
+    let activated = geluFlat(pre)
+    releaseFloatArrayStorage(pre)
+    return activated
 }
 
 fun feedForwardPreActivationWithDenseDelta(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool) r: Array<Float> {
@@ -2244,23 +2246,17 @@ fun layerNormRowsBackend(values: Array<Float>, seqLen: Int, hiddenSize: Int, nor
         let input = Tensor.fromArray(seqLen, hiddenSize, values, backend)
         let normalized = input.layerNormRows()
         if normalized.values.length() == seqLen * hiddenSize {
-            let repeatedWeights = repeatLayerNormParameters(normWeight, seqLen, hiddenSize)
-            let repeatedBiases = repeatLayerNormParameters(normBias, seqLen, hiddenSize)
-            let weights = Tensor.fromArray(seqLen, hiddenSize, repeatedWeights, backend)
-            let biases = Tensor.fromArray(seqLen, hiddenSize, repeatedBiases, backend)
-            let scaled = normalized.mulElementwise(weights)
-            let out = scaled.add(biases)
-            if out.values.length() == seqLen * hiddenSize {
-                releaseFloatArrayStorage(normalized.values)
-                releaseFloatArrayStorage(scaled.values)
-                releaseFloatArrayStorage(repeatedWeights)
-                releaseFloatArrayStorage(repeatedBiases)
-                return out.values
+            var row = 0
+            while row < seqLen {
+                var d = 0
+                while d < hiddenSize {
+                    let idx = row * hiddenSize + d
+                    normalized.values[idx] = normalized.values[idx] * normWeight[d] + normBias[d]
+                    d = d + 1
+                }
+                row = row + 1
             }
-            releaseFloatArrayStorage(out.values)
-            releaseFloatArrayStorage(scaled.values)
-            releaseFloatArrayStorage(repeatedWeights)
-            releaseFloatArrayStorage(repeatedBiases)
+            return normalized.values
         }
         releaseFloatArrayStorage(normalized.values)
     }

@@ -51,13 +51,14 @@ Thresholds:
 
 ## Median Results
 
-Three cold-process runs were executed for each runnable path.
+Three cold-process runs were executed for the earlier rows. The final Seen trainer row uses five cold-process runs after the encoder-layer cache optimization.
 
 | Implementation | Device Path | Status | Median Cold Process Wall | Median Peak RSS | Throughput, Cold Process | Answer Rate |
 |---|---|---|---:|---:|---:|---:|
 | Seen trainer CLI baseline | Vulkan GPU | Passed | 38.780s | 1,796,844 KB | 2.58 pairs/s, 5.16 row-texts/s | 0.86 |
 | Seen trainer CLI after FEL-601 cache | Vulkan GPU | Passed | 31.739s | 1,672,192 KB | 3.15 pairs/s, 6.30 row-texts/s | 0.86 |
 | Seen trainer CLI after adapter/load optimization | Vulkan GPU | Passed | 15.083s | 1,433,248 KB | 6.63 pairs/s, 13.26 row-texts/s | 0.86 |
+| Seen trainer CLI after encoder-layer cache optimization | Vulkan GPU | Passed | 10.171s | 724,300 KB | 9.83 pairs/s, 19.66 row-texts/s | 0.86 |
 | Python SentenceTransformer | CPU | Passed | 4.404s | 1,242,472 KB | 22.70 pairs/s, 45.41 texts/s | 1.00 |
 | Python SentenceTransformer | CUDA | Failed | Failed at model-to-CUDA | 1,314,296 KB at failure | n/a | n/a |
 
@@ -67,8 +68,11 @@ Performance ratios:
 - FEL-601 reduced Seen CLI peak RSS by `6.9%`.
 - The adapter/load optimization pass made Seen CLI eval `2.57x` faster than the baseline, reducing median wall time by `61.1%`.
 - The adapter/load optimization pass made Seen CLI eval `2.10x` faster than the first FEL-601 cache pass.
-- Python SentenceTransformer CPU cold-process eval remains `3.43x` faster than optimized Seen CLI GPU/Vulkan eval for this activity.
-- Optimized Seen CLI peak RSS remains `1.15x` the Python CPU path for this activity.
+- The encoder-layer cache optimization made Seen CLI eval `3.81x` faster than the baseline, reducing median wall time by `73.8%`.
+- The encoder-layer cache optimization made Seen CLI eval `1.48x` faster than the adapter/load optimization pass.
+- The encoder-layer cache optimization reduced Seen CLI peak RSS by `59.7%` versus baseline.
+- Python SentenceTransformer CPU cold-process eval remains `2.31x` faster than optimized Seen CLI GPU/Vulkan eval for this activity.
+- Optimized Seen CLI peak RSS is now `0.58x` the Python CPU path for this activity.
 - Python CUDA was not comparable under the cap because all full-activity attempts failed before encoding.
 
 ## Python CPU Internal Timing
@@ -91,6 +95,30 @@ The cold-process number is the fairer cross-implementation headline because the 
 
 ## Run Details
 
+Seen trainer CLI after encoder-layer cache optimization, Vulkan GPU:
+
+| Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
+|---:|---:|---:|---:|---|
+| 1 | 10.171s | 724,848 KB | 0.86 | yes |
+| 2 | 10.274s | 723,164 KB | 0.86 | yes |
+| 3 | 10.275s | 726,272 KB | 0.86 | yes |
+| 4 | 9.832s | 722,176 KB | 0.86 | yes |
+| 5 | 10.033s | 724,300 KB | 0.86 | yes |
+
+The optimized eval path now:
+
+- Caches ready MiniLM encoder layers when `cache_minilm_tensors` is enabled, avoiding repeated safetensors layer reloads for each unique eval text.
+- Uses a lean inference bundle for `mine`, `calibrate`, and `eval`, skipping training-only weight-map and parameter-registry inspection.
+- Adds an eval-local flat embedding cache so duplicate query/chunk texts are encoded once.
+- Scores cached normalized embeddings with direct dot product, avoiding a second normalize-per-score pass.
+- Reuses low-rank adapter bottlenecks instead of recomputing them for every output dimension.
+- Applies layer projection adapters directly over flat token sequences, avoiding row-vector and projected-vector allocation per token.
+- Uses a rank-4 fast path for the active Sinai adapter shape.
+- Applies layer-norm weight/bias in-place after GPU row normalization instead of expanding per-row weight/bias tensors and launching extra elementwise GPU passes.
+- Releases feed-forward pre-activation storage after GELU.
+- Avoids computing attention layer norm twice when dense MiniLM adapter deltas are active.
+- Releases the temporary normalized arrays allocated by `math_utils.cosine` for call sites that still use that helper.
+
 Seen trainer CLI after adapter/load optimization, Vulkan GPU:
 
 | Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
@@ -99,20 +127,13 @@ Seen trainer CLI after adapter/load optimization, Vulkan GPU:
 | 2 | 15.083s | 1,431,832 KB | 0.86 | yes |
 | 3 | 14.879s | 1,433,248 KB | 0.86 | yes |
 
-The optimized eval path now:
-
-- Uses a lean inference bundle for `mine`, `calibrate`, and `eval`, skipping training-only weight-map and parameter-registry inspection.
-- Adds an eval-local flat embedding cache so duplicate query/chunk texts are encoded once.
-- Scores cached normalized embeddings with direct dot product, avoiding a second normalize-per-score pass.
-- Reuses low-rank adapter bottlenecks instead of recomputing them for every output dimension.
-- Applies layer projection adapters directly over flat token sequences, avoiding row-vector and projected-vector allocation per token.
-- Uses a rank-4 fast path for the active Sinai adapter shape.
-- Releases the temporary normalized arrays allocated by `math_utils.cosine` for call sites that still use that helper.
-
 Measured but reverted:
 
 - Process-local Vulkan pipeline caching regressed median wall time to `16.189s` and peak RSS to `1,628,772 KB`.
 - In-place GPU matmul bias addition regressed median wall time to `16.241s`.
+- GPU GELU dispatch regressed median wall time to `13.729s`.
+- Folding layer-norm adapter deltas directly into the affine loop regressed median wall time to `13.226s`.
+- Full word-embedding-table cache regressed median wall time to `11.174s` and peak RSS to `1,441,004 KB`; sparse word row loading remains better for this 100-row eval size.
 
 Seen trainer CLI after FEL-601 cache, Vulkan GPU:
 
@@ -155,7 +176,7 @@ Python SentenceTransformer CUDA:
 
 For this exact eval-style retrieval activity, Python SentenceTransformer CPU is still much faster than the Seen trainer CLI even though Seen initializes the Vulkan GPU path.
 
-The Seen optimization work moved the median from `38.780s` to `15.083s`. This is a substantial improvement, but it does not close the full gap to Python SentenceTransformer CPU.
+The Seen optimization work moved the median from `38.780s` to `10.171s`. This is a substantial improvement, but it does not close the full gap to Python SentenceTransformer CPU.
 
 The most likely reasons are implementation-level rather than model-level:
 
@@ -211,4 +232,4 @@ TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_TH
 
 ## Follow-Up Needed
 
-The benchmark shows the Seen trainer is functionally runnable on GPU and now much faster than the first measured implementation, but not performance competitive with Python SentenceTransformer CPU for this eval workload yet. FEL-601 removed duplicate eval encodes, redundant score normalization, training-only inference setup, and avoidable adapter recomputation/allocation. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes dispatch overhead across the full text batch.
+The benchmark shows the Seen trainer is functionally runnable on GPU and now much faster than the first measured implementation, but not performance competitive with Python SentenceTransformer CPU for this eval workload yet. FEL-601 removed duplicate eval encodes, redundant score normalization, training-only inference setup, repeated encoder-layer safetensors loads, and avoidable adapter/layer-norm allocation. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes dispatch overhead across the full text batch.
