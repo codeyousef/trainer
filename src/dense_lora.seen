@@ -2,6 +2,7 @@ import io.file.{ensureParentDirectories, exists, readBytes, readText, writeBytes
 import adapter.{adapterClamp, adapterContains, adapterLowRankSeed, adapterPowFloat, adapterSqrtApprox}
 import collections.byte_buffer.{f32ArrayAppendLittleEndianBytes, f32ArrayCopyFromLittleEndianBytes}
 import io_utils.{writeAtomicText}
+import memory.allocation.{releaseFloatArrayStorage}
 import str.string.{StringBuilder}
 
 class DenseLoRAAdapter {
@@ -83,20 +84,27 @@ class DenseLoRAAdapter {
 
     fun apply(input: Array<Float>) r: Array<Float> {
         let out = denseZeros(this.outputDim)
+        let bottlenecks = Array<Float>()
+        var rankIndex = 0
+        while rankIndex < this.rank {
+            bottlenecks.push(denseRankBottleneckAt(input, this.rankA, this.rank, this.inputDim, rankIndex))
+            rankIndex = rankIndex + 1
+        }
         var o = 0
         while o < this.outputDim {
             var value = 0.0
-            var rankIndex = 0
+            rankIndex = 0
             while rankIndex < this.rank {
                 let b = denseRankBAt(this.rankB, o, rankIndex, this.rank)
-                if b != 0.0 {
-                    value = value + b * denseRankBottleneckAt(input, this.rankA, this.rank, this.inputDim, rankIndex)
+                if b != 0.0 and rankIndex < bottlenecks.length() {
+                    value = value + b * bottlenecks[rankIndex]
                 }
                 rankIndex = rankIndex + 1
             }
             out[o] = value
             o = o + 1
         }
+        releaseFloatArrayStorage(bottlenecks)
         return out
     }
 

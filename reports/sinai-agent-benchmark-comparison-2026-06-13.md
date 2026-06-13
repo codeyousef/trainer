@@ -57,6 +57,7 @@ Three cold-process runs were executed for each runnable path.
 |---|---|---|---:|---:|---:|---:|
 | Seen trainer CLI baseline | Vulkan GPU | Passed | 38.780s | 1,796,844 KB | 2.58 pairs/s, 5.16 row-texts/s | 0.86 |
 | Seen trainer CLI after FEL-601 cache | Vulkan GPU | Passed | 31.739s | 1,672,192 KB | 3.15 pairs/s, 6.30 row-texts/s | 0.86 |
+| Seen trainer CLI after adapter/load optimization | Vulkan GPU | Passed | 15.083s | 1,433,248 KB | 6.63 pairs/s, 13.26 row-texts/s | 0.86 |
 | Python SentenceTransformer | CPU | Passed | 4.404s | 1,242,472 KB | 22.70 pairs/s, 45.41 texts/s | 1.00 |
 | Python SentenceTransformer | CUDA | Failed | Failed at model-to-CUDA | 1,314,296 KB at failure | n/a | n/a |
 
@@ -64,8 +65,10 @@ Performance ratios:
 
 - FEL-601 made Seen CLI eval `1.22x` faster than the baseline, reducing median wall time by `18.2%`.
 - FEL-601 reduced Seen CLI peak RSS by `6.9%`.
-- Python SentenceTransformer CPU cold-process eval remains `7.21x` faster than optimized Seen CLI GPU/Vulkan eval for this activity.
-- Optimized Seen CLI peak RSS remains `1.35x` the Python CPU path for this activity.
+- The adapter/load optimization pass made Seen CLI eval `2.57x` faster than the baseline, reducing median wall time by `61.1%`.
+- The adapter/load optimization pass made Seen CLI eval `2.10x` faster than the first FEL-601 cache pass.
+- Python SentenceTransformer CPU cold-process eval remains `3.43x` faster than optimized Seen CLI GPU/Vulkan eval for this activity.
+- Optimized Seen CLI peak RSS remains `1.15x` the Python CPU path for this activity.
 - Python CUDA was not comparable under the cap because all full-activity attempts failed before encoding.
 
 ## Python CPU Internal Timing
@@ -88,6 +91,29 @@ The cold-process number is the fairer cross-implementation headline because the 
 
 ## Run Details
 
+Seen trainer CLI after adapter/load optimization, Vulkan GPU:
+
+| Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
+|---:|---:|---:|---:|---|
+| 1 | 15.182s | 1,434,008 KB | 0.86 | yes |
+| 2 | 15.083s | 1,431,832 KB | 0.86 | yes |
+| 3 | 14.879s | 1,433,248 KB | 0.86 | yes |
+
+The optimized eval path now:
+
+- Uses a lean inference bundle for `mine`, `calibrate`, and `eval`, skipping training-only weight-map and parameter-registry inspection.
+- Adds an eval-local flat embedding cache so duplicate query/chunk texts are encoded once.
+- Scores cached normalized embeddings with direct dot product, avoiding a second normalize-per-score pass.
+- Reuses low-rank adapter bottlenecks instead of recomputing them for every output dimension.
+- Applies layer projection adapters directly over flat token sequences, avoiding row-vector and projected-vector allocation per token.
+- Uses a rank-4 fast path for the active Sinai adapter shape.
+- Releases the temporary normalized arrays allocated by `math_utils.cosine` for call sites that still use that helper.
+
+Measured but reverted:
+
+- Process-local Vulkan pipeline caching regressed median wall time to `16.189s` and peak RSS to `1,628,772 KB`.
+- In-place GPU matmul bias addition regressed median wall time to `16.241s`.
+
 Seen trainer CLI after FEL-601 cache, Vulkan GPU:
 
 | Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
@@ -95,12 +121,6 @@ Seen trainer CLI after FEL-601 cache, Vulkan GPU:
 | 1 | 31.812s | 1,672,192 KB | 0.86 | yes |
 | 2 | 31.662s | 1,669,240 KB | 0.86 | yes |
 | 3 | 31.739s | 1,672,544 KB | 0.86 | yes |
-
-The optimized eval path:
-
-- Adds an eval-local flat embedding cache so duplicate query/chunk texts are encoded once.
-- Scores cached normalized embeddings with direct dot product, avoiding a second normalize-per-score pass.
-- Releases the temporary normalized arrays allocated by `math_utils.cosine` for call sites that still use that helper.
 
 Seen trainer CLI baseline, Vulkan GPU:
 
@@ -135,11 +155,11 @@ Python SentenceTransformer CUDA:
 
 For this exact eval-style retrieval activity, Python SentenceTransformer CPU is still much faster than the Seen trainer CLI even though Seen initializes the Vulkan GPU path.
 
-The first Seen optimization pass removed obvious eval overhead and moved the median from `38.780s` to `31.739s`, but it did not change the main shape of the result.
+The Seen optimization work moved the median from `38.780s` to `15.083s`. This is a substantial improvement, but it does not close the full gap to Python SentenceTransformer CPU.
 
 The most likely reasons are implementation-level rather than model-level:
 
-- The Seen CLI performs this eval through the trainer runtime path, with per-unique-text encode behavior and substantial model/runtime setup overhead.
+- The Seen CLI performs this eval through the trainer runtime path, with per-unique-text encode behavior and many small GPU dispatches.
 - The Python path uses optimized HuggingFace tokenizer/runtime and batched SentenceTransformer encode.
 - The Seen GPU backend is active, but this eval path is not yet optimized to batch the full 200-text workload into a single high-throughput GPU execution plan.
 
@@ -191,4 +211,4 @@ TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_TH
 
 ## Follow-Up Needed
 
-The benchmark shows the Seen trainer is functionally runnable on GPU but not performance competitive for this eval workload yet. FEL-601 removed duplicate eval encodes and redundant score normalization. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes startup and dispatch overhead.
+The benchmark shows the Seen trainer is functionally runnable on GPU and now much faster than the first measured implementation, but not performance competitive with Python SentenceTransformer CPU for this eval workload yet. FEL-601 removed duplicate eval encodes, redundant score normalization, training-only inference setup, and avoidable adapter recomputation/allocation. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes dispatch overhead across the full text batch.

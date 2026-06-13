@@ -37,7 +37,11 @@ fun trainerMain() r: Int {
         }
     }
 
-    let pipeline = Pipeline.new(cfg)
+    let pipeline = if command == "mine" or command == "calibrate" or command == "eval" {
+        Pipeline.inference(cfg)
+    } else {
+        Pipeline.new(cfg)
+    }
 
     println("trainer: backend " + cfg.backend + " requires_gpu " + cfg.backendGpu.toString())
     let backendReady = pipeline.prepareBackend()

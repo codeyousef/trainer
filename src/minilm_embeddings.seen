@@ -1442,21 +1442,98 @@ fun normalizeMiniLMDenseAdapterLayer(adapterLayer: Int, readyLayers: Int) r: Int
 
 fun applyProjectionAdapterToSequence(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, adapter: ProjectionAdapter) r: Array<Float> {
     let out = Array<Float>()
+    if adapter.rank == 4 {
+        var fastRow = 0
+        while fastRow < seqLen {
+            var b0 = 0.0
+            var b1 = 0.0
+            var b2 = 0.0
+            var b3 = 0.0
+            var bd = 0
+            while bd < adapter.dim {
+                let value = flatAt(sequence, fastRow, bd, hiddenSize)
+                if bd < adapter.rankA.length() {
+                    b0 = b0 + adapter.rankA[bd] * value
+                }
+                if adapter.dim + bd < adapter.rankA.length() {
+                    b1 = b1 + adapter.rankA[adapter.dim + bd] * value
+                }
+                if adapter.dim * 2 + bd < adapter.rankA.length() {
+                    b2 = b2 + adapter.rankA[adapter.dim * 2 + bd] * value
+                }
+                if adapter.dim * 3 + bd < adapter.rankA.length() {
+                    b3 = b3 + adapter.rankA[adapter.dim * 3 + bd] * value
+                }
+                bd = bd + 1
+            }
+            var fastD = 0
+            while fastD < hiddenSize {
+                let inputValue = flatAt(sequence, fastRow, fastD, hiddenSize)
+                var value = inputValue
+                if fastD < adapter.values.length() {
+                    value = inputValue * adapter.values[fastD]
+                }
+                if fastD < adapter.mixValues.length() and hiddenSize > 0 {
+                    let next = if fastD + 1 >= hiddenSize { 0 } else { fastD + 1 }
+                    value = value + adapter.mixValues[fastD] * flatAt(sequence, fastRow, next, hiddenSize)
+                }
+                let upBase = fastD * 4
+                if upBase + 3 < adapter.rankB.length() {
+                    value = value + adapter.rankB[upBase] * b0
+                    value = value + adapter.rankB[upBase + 1] * b1
+                    value = value + adapter.rankB[upBase + 2] * b2
+                    value = value + adapter.rankB[upBase + 3] * b3
+                }
+                out.push(value)
+                fastD = fastD + 1
+            }
+            fastRow = fastRow + 1
+        }
+        return out
+    }
     var row = 0
     while row < seqLen {
-        let input = rowVector(sequence, row, hiddenSize)
-        let projected = adapter.apply(input)
+        let bottlenecks = Array<Float>()
+        var rankIndex = 0
+        while rankIndex < adapter.rank {
+            var bottle = 0.0
+            var bd = 0
+            while bd < adapter.dim {
+                let idx = rankIndex * adapter.dim + bd
+                if idx < adapter.rankA.length() {
+                    bottle = bottle + adapter.rankA[idx] * flatAt(sequence, row, bd, hiddenSize)
+                }
+                bd = bd + 1
+            }
+            bottlenecks.push(bottle)
+            rankIndex = rankIndex + 1
+        }
         var d = 0
         while d < hiddenSize {
-            if d < projected.length() {
-                out.push(projected[d])
-            } else {
-                out.push(flatAt(sequence, row, d, hiddenSize))
+            let inputValue = flatAt(sequence, row, d, hiddenSize)
+            var value = inputValue
+            if d < adapter.values.length() {
+                value = inputValue * adapter.values[d]
             }
+            if d < adapter.mixValues.length() and hiddenSize > 0 {
+                let next = if d + 1 >= hiddenSize { 0 } else { d + 1 }
+                value = value + adapter.mixValues[d] * flatAt(sequence, row, next, hiddenSize)
+            }
+            rankIndex = 0
+            while rankIndex < adapter.rank {
+                let upIndex = d * adapter.rank + rankIndex
+                if upIndex < adapter.rankB.length() and rankIndex < bottlenecks.length() {
+                    let up = adapter.rankB[upIndex]
+                    if up != 0.0 {
+                        value = value + up * bottlenecks[rankIndex]
+                    }
+                }
+                rankIndex = rankIndex + 1
+            }
+            out.push(value)
             d = d + 1
         }
-        releaseFloatArrayStorage(input)
-        releaseFloatArrayStorage(projected)
+        releaseFloatArrayStorage(bottlenecks)
         row = row + 1
     }
     return out

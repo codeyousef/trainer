@@ -16,6 +16,11 @@ class Pipeline {
         return Pipeline{ cfg: cfg, bundle: bundle }
     }
 
+    static fun inference(cfg: TrainerConfig) r: Pipeline {
+        let bundle = ModelBundle.loadInference(cfg)
+        return Pipeline{ cfg: cfg, bundle: bundle }
+    }
+
     fun prepareBackend() r: Bool {
         let required = backendRequiresGpu(this.cfg)
         let backend = GpuBackend.new(required)

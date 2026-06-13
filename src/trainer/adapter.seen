@@ -125,6 +125,38 @@ class ProjectionAdapter {
 
     fun apply(input: Array<Float>) r: Array<Float> {
         let out = Array<Float>()
+        if this.rank == 4 {
+            let b0 = adapterLowRankBottleneckAt(input, this.rankA, this.rank, this.dim, 0)
+            let b1 = adapterLowRankBottleneckAt(input, this.rankA, this.rank, this.dim, 1)
+            let b2 = adapterLowRankBottleneckAt(input, this.rankA, this.rank, this.dim, 2)
+            let b3 = adapterLowRankBottleneckAt(input, this.rankA, this.rank, this.dim, 3)
+            var fastIndex = 0
+            while fastIndex < input.length() {
+                var fastValue = input[fastIndex]
+                if fastIndex < this.values.length() {
+                    fastValue = input[fastIndex] * this.values[fastIndex]
+                }
+                if fastIndex < this.mixValues.length() and input.length() > 0 {
+                    fastValue = fastValue + this.mixValues[fastIndex] * input[adapterNextIndex(fastIndex, input.length())]
+                }
+                let upBase = fastIndex * 4
+                if upBase + 3 < this.rankB.length() {
+                    fastValue = fastValue + this.rankB[upBase] * b0
+                    fastValue = fastValue + this.rankB[upBase + 1] * b1
+                    fastValue = fastValue + this.rankB[upBase + 2] * b2
+                    fastValue = fastValue + this.rankB[upBase + 3] * b3
+                }
+                out.push(fastValue)
+                fastIndex = fastIndex + 1
+            }
+            return out
+        }
+        let bottlenecks = Array<Float>()
+        var rankIndex = 0
+        while rankIndex < this.rank {
+            bottlenecks.push(adapterLowRankBottleneckAt(input, this.rankA, this.rank, this.dim, rankIndex))
+            rankIndex = rankIndex + 1
+        }
         var i = 0
         while i < input.length() {
             var value = input[i]
@@ -134,10 +166,18 @@ class ProjectionAdapter {
             if i < this.mixValues.length() and input.length() > 0 {
                 value = value + this.mixValues[i] * input[adapterNextIndex(i, input.length())]
             }
-            value = value + adapterLowRankContribution(input, this.rankA, this.rankB, this.rank, this.dim, i)
+            rankIndex = 0
+            while rankIndex < this.rank {
+                let up = adapterLowRankBAt(this.rankB, i, rankIndex, this.rank)
+                if up != 0.0 and rankIndex < bottlenecks.length() {
+                    value = value + up * bottlenecks[rankIndex]
+                }
+                rankIndex = rankIndex + 1
+            }
             out.push(value)
             i = i + 1
         }
+        releaseFloatArrayStorage(bottlenecks)
         return out
     }
 

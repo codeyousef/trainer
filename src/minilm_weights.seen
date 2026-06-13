@@ -18,9 +18,9 @@ class MiniLMWeightMap {
     var slotsJson: String
     var firstMissing: String
 
-    static fun inspect(info: SafeTensorInfo, hiddenSize: Int, layersExpected: Int, intermediateSize: Int, maxLoadElements: Int) r: MiniLMWeightMap {
-        let map = MiniLMWeightMap{
-            validSource: info.validHeader,
+    static fun empty(hiddenSize: Int, layersExpected: Int, intermediateSize: Int, validSource: Bool) r: MiniLMWeightMap {
+        return MiniLMWeightMap{
+            validSource: validSource,
             hiddenSize: hiddenSize,
             layersExpected: layersExpected,
             intermediateSize: intermediateSize,
@@ -35,6 +35,10 @@ class MiniLMWeightMap {
             slotsJson: "",
             firstMissing: ""
         }
+    }
+
+    static fun inspect(info: SafeTensorInfo, hiddenSize: Int, layersExpected: Int, intermediateSize: Int, maxLoadElements: Int) r: MiniLMWeightMap {
+        let map = MiniLMWeightMap.empty(hiddenSize, layersExpected, intermediateSize, info.validHeader)
         if not info.validHeader {
             return map
         }

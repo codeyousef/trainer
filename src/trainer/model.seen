@@ -22,6 +22,14 @@ class ModelBundle {
     var parameterRegistry: MiniLMParameterRegistry
 
     static fun load(cfg: TrainerConfig) r: ModelBundle {
+        return ModelBundle.loadWithTrainingState(cfg, true)
+    }
+
+    static fun loadInference(cfg: TrainerConfig) r: ModelBundle {
+        return ModelBundle.loadWithTrainingState(cfg, false)
+    }
+
+    static fun loadWithTrainingState(cfg: TrainerConfig, loadTrainingState: Bool) r: ModelBundle {
         println("trainer: loading model config")
         let modelMeta = readBertConfig(cfg.modelConfigPath(), cfg.embeddingDim)
         let runtimeLayers = resolvedMiniLMLayers(cfg, modelMeta.layers)
@@ -87,10 +95,16 @@ class ModelBundle {
             adapter = ProjectionAdapter.load(cfg.adapterPath(), modelMeta.hiddenSize)
         }
         let encoder = Encoder.withMiniLMEmbeddingsAndAdapter(tokenizer, modelMeta.hiddenSize, embeddings, minilmDenseAdapter, minilmDenseDelta, minilmIntermediateDelta, minilmQueryDelta, minilmKeyDelta, minilmValueDelta, minilmAttentionDenseDelta, minilmAttentionLayerNormDelta, minilmLayerNormDelta, minilmLayerDeltas, minilmEmbeddingDeltas, cfg.minilmDenseAdapterLayer, minilmLayerAdapter, cfg.minilmAdapterLayer, layerAdapter, adapter)
-        println("trainer: inspecting MiniLM weight map")
-        let weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
-        println("trainer: inspecting MiniLM parameter registry")
-        let parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, resolvedParameterRegistryLoadCap(cfg), cfg.backend)
+        var weightMap = MiniLMWeightMap.empty(modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, weights.validHeader)
+        var parameterRegistry = MiniLMParameterRegistry.empty(modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, resolvedParameterRegistryLoadCap(cfg), cfg.backend, weights.validHeader)
+        if loadTrainingState {
+            println("trainer: inspecting MiniLM weight map")
+            weightMap = MiniLMWeightMap.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, cfg.weightLoadCapElements)
+            println("trainer: inspecting MiniLM parameter registry")
+            parameterRegistry = MiniLMParameterRegistry.inspect(weights, modelMeta.hiddenSize, modelMeta.layers, modelMeta.intermediateSize, resolvedParameterRegistryLoadCap(cfg), cfg.backend)
+        } else {
+            println("trainer: inference bundle skips training registry")
+        }
         println("trainer: model bundle ready")
         return ModelBundle{
             tokenizer: tokenizer,
