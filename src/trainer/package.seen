@@ -337,9 +337,7 @@ fun modulesJson() r: String {
 fun sentenceBertConfigJson(cfg: TrainerConfig) r: String {
     return "{\n"
         + "  \"max_seq_length\": " + cfg.maxSequenceLength.toString() + ",\n"
-        + "  \"do_lower_case\": true,\n"
-        + "  \"seen_trainer\": true,\n"
-        + "  \"pooling\": \"mean\"\n"
+        + "  \"do_lower_case\": true\n"
         + "}\n"
 }
 
