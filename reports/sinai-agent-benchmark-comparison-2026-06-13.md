@@ -1,4 +1,4 @@
-# sinai-agent benchmark comparison
+# sinai-agent same-activity performance benchmark
 
 Date: 2026-06-13
 
@@ -6,190 +6,168 @@ Issue context: FEL-593, FEL-600
 
 Trainer branch: `feat/FEL-593-sinai-agent-training-roadmap`
 
-Trainer commit: `284b80d FEL-600 export adapter dense module for ST packages`
+Benchmarked trainer code commit: `02ec556 FEL-593 add sinai-agent benchmark report`
 
-Catbelly artifact commit: `0be01c018 FEL-600 refresh sinai-agent ST package` local only, not pushed.
+## What Was Benchmarked
 
-## Scope
+This is an apples-to-apples performance comparison for the same retrieval activity:
 
-This report compares the Seen-native trainer path against the closest Catbelly Python/SentenceTransformer path for the `sinai-agent` MiniLM-based action evidence retriever.
+1. Start a cold process.
+2. Load the `sinai-agent` model/package.
+3. Read the same 100 Agentic-EI test rows.
+4. Encode the same 200 texts: 100 query texts and 100 positive chunk texts.
+5. Compute 100 cosine scores.
+6. Apply the same packaged per-domain thresholds.
+7. Report wall time, peak resident memory, throughput, answer rate, and GPU availability.
 
-The Seen trainer is the source of truth for training. Catbelly Python code was used only as the historical recipe reference and for SentenceTransformer package compatibility checks.
+This report does not compare Seen training against Python eval-only. Training feasibility is noted only at the end because it is a different activity.
 
-All Seen build, package, calibration, eval, and training commands were run with the required memory cap:
+All commands were run under the required memory cap:
 
 ```bash
 CAP_KB=$(awk '/MemAvailable/ { v=int($2/2); if (v>16777216) v=16777216; if (v<1048576) v=1048576; print v }' /proc/meminfo)
 ulimit -v "$CAP_KB"
 ```
 
-## Artifacts
+## Inputs
 
-Seen trainer repo:
-
-`/mnt/Storage/Projects/seen/trainer`
-
-Trainer config:
-
-`/mnt/Storage/Projects/seen/trainer/config/sinai-agent.v0.1.adapter-full.resume.json`
-
-Model package:
+Model/package:
 
 `/mnt/Storage/Projects/catbelly_studio/sinai/models/sinai-agent`
 
-Dataset:
+Seen config:
 
-`/mnt/Storage/Projects/catbelly_studio/sinai/agentic_ei/v0.1`
+`/mnt/Storage/Projects/seen/trainer/config/sinai-agent.v0.1.adapter-full.resume.json`
 
-Package contents relevant to benchmarking:
+Test set:
 
-- `config.json` with `num_hidden_layers: 1`
-- `modules.json` with `0_Transformer`, `1_Pooling`, `2_Dense`, `3_Normalize`
-- `2_Dense/model.safetensors` containing the composed Seen adapter projection
-- `thresholds.json`
-- `eval_results.json`
-- `training_config.json`
+`/mnt/Storage/Projects/catbelly_studio/sinai/agentic_ei/v0.1/test.jsonl`
 
-## Benchmark Summary
+Thresholds:
 
-| Path | Result | Wall Time | Peak RSS | Notes |
-|---|---:|---:|---:|---|
-| Seen native eval | 86/100, answer rate 0.86 | 37.207s | 1,801,968 KB | GPU path confirmed with `backend gpu requires_gpu 1` and `Vulkan device type 2`. |
-| SentenceTransformer package compatibility eval | 100/100, answer rate 1.00 | load 0.424s, eval 0.443s | 1,241,056 KB | CPU path under cap with tokenizer/BLAS single-thread caps. |
-| Catbelly Python base MiniLM eval-only | 87/100, answer rate 0.87 | load 0.730s, calibration 0.292s, eval 0.167s | 1,752,704 KB | Eval-only baseline from the historical Python stack. |
-| Catbelly Python batch-64 training | Failed | n/a | n/a | CUDA OOM during first transformer forward under the required cap. |
-| Catbelly Python microbatch-8 training | Failed | n/a | n/a | CUDA OOM at AdamW optimizer step under the required cap. |
+`/mnt/Storage/Projects/catbelly_studio/sinai/models/sinai-agent/thresholds.json`
 
-## Seen Trainer Measurements
+## Median Results
 
-Full trained Seen artifact:
+Three cold-process runs were executed for each runnable path.
 
-- Training used the Seen trainer CLI, not Python ML training code.
-- GPU path initialized during training/package/eval.
-- Three effective GPU epochs completed via bounded runs.
-- Loss progression: `0.464458 -> 0.459494 -> 0.454278`.
+| Implementation | Device Path | Status | Median Cold Process Wall | Median Peak RSS | Throughput, Cold Process | Answer Rate |
+|---|---|---|---:|---:|---:|---:|
+| Seen trainer CLI | Vulkan GPU | Passed | 38.780s | 1,796,844 KB | 2.58 pairs/s, 5.16 texts/s | 0.86 |
+| Python SentenceTransformer | CPU | Passed | 4.404s | 1,242,472 KB | 22.70 pairs/s, 45.41 texts/s | 1.00 |
+| Python SentenceTransformer | CUDA | Failed | Failed at model-to-CUDA | 1,314,296 KB at failure | n/a | n/a |
 
-Current native eval after fresh calibration:
+Performance ratios:
 
-- Total: `100`
-- Answered: `86`
-- Answer rate: `0.86`
-- Wall time: `37.207165s`
-- Peak RSS: `1,801,968 KB`
-- GPU confirmation: `backend gpu requires_gpu 1`, `Vulkan device type 2`
+- Python SentenceTransformer CPU cold-process eval was `8.80x` faster than Seen CLI GPU/Vulkan eval for this activity.
+- Seen CLI peak RSS was `1.45x` the Python CPU path for this activity.
+- Python CUDA was not comparable under the cap because all full-activity attempts failed before encoding.
 
-Per-domain native Seen eval:
+## Python CPU Internal Timing
 
-| Domain | Answered | Total | Answer Rate |
-|---|---:|---:|---:|
-| customer_support | 10 | 10 | 1.000 |
-| engineering | 8 | 8 | 1.000 |
-| finance | 10 | 11 | 0.909 |
-| hr | 7 | 13 | 0.538 |
-| legal | 5 | 5 | 1.000 |
-| marketing | 7 | 8 | 0.875 |
-| operations | 13 | 13 | 1.000 |
-| procurement | 4 | 8 | 0.500 |
-| project_management | 9 | 9 | 1.000 |
-| sales | 8 | 10 | 0.800 |
-| security_it | 5 | 5 | 1.000 |
+The Python CPU process also recorded internal timings after imports completed:
 
-Earlier 64-example Seen benchmark:
+| Phase | Median Time |
+|---|---:|
+| Model load | 0.454s |
+| Encode 200 texts | 0.464s |
+| Score and threshold 100 pairs | 0.000224s |
+| Internal activity total | 0.928s |
 
-- Train: final loss `0.475822`, wall `40.115s`, peak RSS `2,017,628 KB`.
-- Calibrate: 11 domains, wall `16.046s`, peak RSS `1,490,612 KB`.
-- Eval: answer rate `0.875`, wall `18.050s`, peak RSS `1,664,372 KB`.
+Using the internal activity timer, Python CPU processed:
 
-## SentenceTransformer Compatibility
+- 107.78 pairs/s
+- 215.56 texts/s
 
-The previous package loaded in SentenceTransformer only after metadata cleanup, but it scored `0/100` with Seen thresholds because the Python path was effectively using base MiniLM embeddings and did not apply Seen adapters.
+The cold-process number is the fairer cross-implementation headline because the Seen measurement is also process-level.
 
-The fixed package now exports the Seen projection adapters as a standard SentenceTransformer Dense module:
+## Run Details
 
-- `minilm_layer_adapter`
-- `layer_adapter`
-- `adapter`
+Seen trainer CLI, Vulkan GPU:
 
-Those are composed into `2_Dense/model.safetensors` as `linear.weight`, followed by `3_Normalize`.
+| Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
+|---:|---:|---:|---:|---|
+| 1 | 38.780s | 1,796,968 KB | 0.86 | yes |
+| 2 | 38.770s | 1,796,844 KB | 0.86 | yes |
+| 3 | 38.855s | 1,796,020 KB | 0.86 | yes |
 
-Current compatibility benchmark with refreshed thresholds:
+Seen GPU confirmation came from the eval logs:
 
-- Total: `100`
-- Answered: `100`
-- Answer rate: `1.00`
-- Load wall time: `0.423627s`
-- Eval wall time: `0.442577s`
-- Peak RSS: `1,241,056 KB`
-- Score min: `0.869157`
-- Score p5: `0.873494`
-- Score mean: `0.894674`
-- Score median: `0.894158`
-- Score max: `0.921517`
+- `backend gpu requires_gpu 1`
+- `Vulkan device type 2`
 
-SentenceTransformer CUDA load still failed under the required virtual-memory cap while moving tensors to CUDA. The compatibility benchmark therefore uses CPU under the cap, while Seen native eval confirms the GPU/Vulkan path.
+Python SentenceTransformer CPU:
 
-## Catbelly Python Training Comparison
+| Run | Cold Process Wall | Internal Activity Wall | Load | Encode | Score | Peak RSS | Answer Rate |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 | 4.426s | 0.928s | 0.452s | 0.475s | 0.000240s | 1,242,272 KB | 1.00 |
+| 2 | 4.404s | 0.930s | 0.470s | 0.460s | 0.000218s | 1,242,620 KB | 1.00 |
+| 3 | 4.378s | 0.918s | 0.454s | 0.464s | 0.000224s | 1,242,472 KB | 1.00 |
 
-The closest Catbelly Python setup uses the historical MiniLM triplet recipe. It was tested as a reference path only.
+Python SentenceTransformer CUDA:
 
-Results under the required memory cap:
-
-- Batch size 64 training failed with CUDA OOM during the first transformer forward.
-- Microbatch size 8 training also failed with CUDA OOM at the AdamW optimizer step.
-- Eval-only base MiniLM succeeded and answered `87/100`.
-
-This means the Python setup can provide a baseline eval number, but not a successful capped training comparison on this machine without changing the recipe.
+| Run | Status | Wall Time To Failure | Peak RSS At Failure | Failure |
+|---:|---|---:|---:|---|
+| 1 | failed | 4.038s | 1,316,496 KB | CUDA driver out of memory while moving model to CUDA |
+| 2 | failed | 3.941s | 1,314,188 KB | CUDA driver out of memory while moving model to CUDA |
+| 3 | failed | 4.093s | 1,314,296 KB | CUDA driver out of memory while moving model to CUDA |
 
 ## Interpretation
 
-The benchmarking goal is now executable:
+For this exact eval-style retrieval activity, Python SentenceTransformer CPU is currently much faster than the Seen trainer CLI even though Seen initializes the Vulkan GPU path.
 
-- Seen trainer can package, calibrate, and evaluate the model under the cap.
-- Seen native path runs on GPU/Vulkan.
-- SentenceTransformer can load and use the packaged model through standard modules.
-- Catbelly Python training does not complete under the same cap, so it is not a viable capped training path for this comparison.
+The most likely reasons are implementation-level rather than model-level:
 
-Important caveat:
+- The Seen CLI performs this eval through the trainer runtime path, with per-example encode/scoring behavior and substantial model/runtime setup overhead.
+- The Python path uses optimized HuggingFace tokenizer/runtime and batched SentenceTransformer encode.
+- The Seen GPU backend is active, but this eval path is not yet optimized to batch the full 200-text workload into a single high-throughput GPU execution plan.
 
-SentenceTransformer package scores are compatible with the package thresholds but are not numerically identical to Seen runtime scores. The likely causes are tokenizer/runtime math differences between HuggingFace/SentenceTransformer and the Seen MiniLM/tokenizer implementation. Exact Seen/ST parity should be tracked as a separate follow-up if required.
+The answer rates are included to prove each path completed the same activity, but they should not be read as pure quality parity:
 
-## Reproduction Commands
+- Seen uses the Seen tokenizer/MiniLM/runtime and adapter JSON path.
+- Python uses the SentenceTransformer package path with the composed `2_Dense` adapter module and `3_Normalize`.
+- These paths are compatible, but not numerically identical.
 
-Seen check:
+## Training Note, Not Part Of This Benchmark
 
-```bash
-cd /mnt/Storage/Projects/seen/trainer
-CAP_KB=$(awk '/MemAvailable/ { v=int($2/2); if (v>16777216) v=16777216; if (v<1048576) v=1048576; print v }' /proc/meminfo)
-ulimit -v "$CAP_KB"
-SEEN_JOBS=1 SEEN_OPT_JOBS=1 seen check src/main.seen
-```
+The historical Catbelly Python training recipe was also tested earlier under the same memory cap:
 
-Seen compile:
+- Batch size 64 training failed with CUDA OOM during the first transformer forward.
+- Microbatch size 8 training failed with CUDA OOM at the AdamW optimizer step.
 
-```bash
-cd /mnt/Storage/Projects/seen/trainer
-CAP_KB=$(awk '/MemAvailable/ { v=int($2/2); if (v>16777216) v=16777216; if (v<1048576) v=1048576; print v }' /proc/meminfo)
-ulimit -v "$CAP_KB"
-SEEN_JOBS=1 SEEN_OPT_JOBS=1 seen compile src/main.seen target/trainer --fast --no-fork --emit-glsl --no-cache --jobs=1 --opt-jobs=1
-```
+That is a training-feasibility result, not part of the same-activity performance comparison above.
 
-Seen calibrate/eval/package:
+## Reproduction
+
+Seen CLI activity:
 
 ```bash
 cd /mnt/Storage/Projects/seen/trainer
 CAP_KB=$(awk '/MemAvailable/ { v=int($2/2); if (v>16777216) v=16777216; if (v<1048576) v=1048576; print v }' /proc/meminfo)
 ulimit -v "$CAP_KB"
-target/trainer calibrate --config config/sinai-agent.v0.1.adapter-full.resume.json
 target/trainer eval --config config/sinai-agent.v0.1.adapter-full.resume.json
-target/trainer package --config config/sinai-agent.v0.1.adapter-full.resume.json
 ```
 
-SentenceTransformer compatibility eval:
+Python CPU activity:
 
 ```bash
 cd /mnt/Storage/Projects/seen/trainer
 CAP_KB=$(awk '/MemAvailable/ { v=int($2/2); if (v>16777216) v=16777216; if (v<1048576) v=1048576; print v }' /proc/meminfo)
 ulimit -v "$CAP_KB"
 TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
-  /mnt/Storage/Projects/catbelly_studio/.venv/bin/python <compatibility-eval-snippet>
+  /mnt/Storage/Projects/catbelly_studio/.venv/bin/python <same-activity-sentencetransformer-script>
 ```
+
+Python CUDA activity:
+
+```bash
+cd /mnt/Storage/Projects/seen/trainer
+CAP_KB=$(awk '/MemAvailable/ { v=int($2/2); if (v>16777216) v=16777216; if (v<1048576) v=1048576; print v }' /proc/meminfo)
+ulimit -v "$CAP_KB"
+TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 \
+  /mnt/Storage/Projects/catbelly_studio/.venv/bin/python <same-activity-sentencetransformer-cuda-script>
+```
+
+## Follow-Up Needed
+
+The benchmark shows the Seen trainer is functionally runnable on GPU but not performance competitive for this eval workload yet. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes startup and dispatch overhead.
