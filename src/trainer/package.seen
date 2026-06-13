@@ -1,13 +1,15 @@
 import io.file.{copyFileBytes, exists, readText}
+import adapter.{ProjectionAdapter}
 import capabilities.{trainerCapabilitiesJson, trainerPackageReadmeNote}
-import config.{TrainerConfig, resolvedParameterRegistryLoadCap}
+import config.{TrainerConfig, resolvedMiniLMLayers, resolvedParameterRegistryLoadCap}
 import dense_lora.{miniLMLayerAttentionDenseDeltaPath, miniLMLayerAttentionLayerNormDeltaPath, miniLMLayerIntermediateDeltaPath, miniLMLayerKeyDeltaPath, miniLMLayerOutputDeltaPath, miniLMLayerOutputLayerNormDeltaPath, miniLMLayerQueryDeltaPath, miniLMLayerValueDeltaPath}
 import embedding_delta.{miniLMEmbeddingDeltasPath}
 import io_utils.{writeAtomicText}
+import memory.allocation.{releaseFloatArrayStorage}
 import minilm_weights.{MiniLMWeightMap, writeMiniLMWeightMap}
 import model.{readBertConfig}
 import parameter_registry.{MiniLMParameterRegistry, writeMiniLMParameterRegistry}
-import safetensors.{SafeTensorInfo, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors, writeSeenWeightsManifest}
+import safetensors.{SafeTensorInfo, materializeDenseDeltaSafetensors, materializeEmbeddingDeltasSafetensors, materializeLayerNormDeltaSafetensors, writeSeenWeightsManifest, writeSingleTensorF32}
 
 class PackageResult {
     var outputDir: String
@@ -27,6 +29,7 @@ fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegi
     if cfg.copyBaseArtifacts {
         files = files + copyBaseModelArtifacts(cfg)
     }
+    if writeRuntimeBertConfig(cfg, modelMeta.layers) { files = files + 1 }
     let embeddingDeltaMaterialized = materializePackagedEmbeddingDeltas(cfg, modelMeta.hiddenSize)
     let allLayerDeltaMaterialized = materializePackagedAllLayerDeltas(cfg, modelMeta.layers, modelMeta.hiddenSize, modelMeta.intermediateSize)
     var denseDeltaMaterialized = false
@@ -50,6 +53,8 @@ fun writeModelPackage(cfg: TrainerConfig, parameterRegistry: MiniLMParameterRegi
     if writeAtomicText(cfg.outputModelDir + "/modules.json", modulesJson()) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/sentence_bert_config.json", sentenceBertConfigJson(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/1_Pooling/config.json", poolingConfigJson(cfg)) { files = files + 1 }
+    files = files + writeSentenceTransformerDenseAdapter(cfg, modelMeta.hiddenSize, resolvedMiniLMLayers(cfg, modelMeta.layers))
+    if writeAtomicText(cfg.outputModelDir + "/3_Normalize/.seen_keep", "") { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/README.md", packageReadme(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/seen_adapter_manifest.json", adapterManifestJson(cfg)) { files = files + 1 }
     if writeAtomicText(cfg.outputModelDir + "/seen_layer_adapter_manifest.json", layerAdapterManifestJson(cfg)) { files = files + 1 }
@@ -330,7 +335,9 @@ fun copyIfPresent(src: String, dst: String) r: Bool {
 fun modulesJson() r: String {
     return "[\n"
         + "  {\"idx\": 0, \"name\": \"0_Transformer\", \"path\": \"\", \"type\": \"sentence_transformers.models.Transformer\"},\n"
-        + "  {\"idx\": 1, \"name\": \"1_Pooling\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"}\n"
+        + "  {\"idx\": 1, \"name\": \"1_Pooling\", \"path\": \"1_Pooling\", \"type\": \"sentence_transformers.models.Pooling\"},\n"
+        + "  {\"idx\": 2, \"name\": \"2_Dense\", \"path\": \"2_Dense\", \"type\": \"sentence_transformers.base.modules.dense.Dense\"},\n"
+        + "  {\"idx\": 3, \"name\": \"3_Normalize\", \"path\": \"3_Normalize\", \"type\": \"sentence_transformers.sentence_transformer.modules.normalize.Normalize\"}\n"
         + "]\n"
 }
 
@@ -349,6 +356,167 @@ fun poolingConfigJson(cfg: TrainerConfig) r: String {
         + "  \"pooling_mode_max_tokens\": false,\n"
         + "  \"pooling_mode_mean_sqrt_len_tokens\": false\n"
         + "}\n"
+}
+
+fun denseConfigJson(dim: Int) r: String {
+    return "{\n"
+        + "    \"in_features\": " + dim.toString() + ",\n"
+        + "    \"out_features\": " + dim.toString() + ",\n"
+        + "    \"bias\": false,\n"
+        + "    \"activation_function\": \"torch.nn.modules.linear.Identity\",\n"
+        + "    \"module_input_name\": \"sentence_embedding\",\n"
+        + "    \"module_output_name\": \"sentence_embedding\"\n"
+        + "}\n"
+}
+
+fun writeSentenceTransformerDenseAdapter(cfg: TrainerConfig, dim: Int, runtimeLayers: Int) r: Int {
+    if dim <= 0 {
+        return 0
+    }
+    let includeMiniLMLayerAdapter = packageMiniLMLayerAdapterIsFinal(cfg.minilmAdapterLayer, runtimeLayers)
+    var minilmLayerAdapter = ProjectionAdapter.identity(dim)
+    if includeMiniLMLayerAdapter {
+        minilmLayerAdapter = ProjectionAdapter.load(cfg.minilmLayerAdapterPath(), dim)
+    }
+    let layerAdapter = ProjectionAdapter.load(cfg.layerAdapterPath(), dim)
+    let adapter = ProjectionAdapter.load(cfg.adapterPath(), dim)
+    let weights = composedProjectionDenseWeights(minilmLayerAdapter, layerAdapter, adapter, dim)
+    var files = 0
+    if writeAtomicText(cfg.outputModelDir + "/2_Dense/config.json", denseConfigJson(dim)) {
+        files = files + 1
+    }
+    if writeSingleTensorF32(cfg.outputModelDir + "/2_Dense/model.safetensors", "linear.weight", dim, dim, weights) {
+        files = files + 1
+    }
+    releaseFloatArrayStorage(weights)
+    return files
+}
+
+fun composedProjectionDenseWeights(minilmLayerAdapter: ProjectionAdapter, layerAdapter: ProjectionAdapter, adapter: ProjectionAdapter, dim: Int) r: Array<Float> {
+    let weights = Array<Float>()
+    var i = 0
+    while i < dim * dim {
+        weights.push(0.0)
+        i = i + 1
+    }
+    var col = 0
+    while col < dim {
+        let basis = projectionBasisVector(dim, col)
+        let afterMiniLM = minilmLayerAdapter.apply(basis)
+        releaseFloatArrayStorage(basis)
+        let afterLayer = layerAdapter.apply(afterMiniLM)
+        releaseFloatArrayStorage(afterMiniLM)
+        let afterAdapter = adapter.apply(afterLayer)
+        releaseFloatArrayStorage(afterLayer)
+        var row = 0
+        while row < dim {
+            let index = row * dim + col
+            if row < afterAdapter.length() and index < weights.length() {
+                weights[index] = afterAdapter[row]
+            }
+            row = row + 1
+        }
+        releaseFloatArrayStorage(afterAdapter)
+        col = col + 1
+    }
+    return weights
+}
+
+fun projectionBasisVector(dim: Int, active: Int) r: Array<Float> {
+    let values = Array<Float>()
+    var i = 0
+    while i < dim {
+        if i == active {
+            values.push(1.0)
+        } else {
+            values.push(0.0)
+        }
+        i = i + 1
+    }
+    return values
+}
+
+fun packageMiniLMLayerAdapterIsFinal(adapterLayer: Int, runtimeLayers: Int) r: Bool {
+    if runtimeLayers <= 0 or adapterLayer < 0 {
+        return false
+    }
+    if adapterLayer >= runtimeLayers {
+        return true
+    }
+    return adapterLayer == runtimeLayers - 1
+}
+
+fun writeRuntimeBertConfig(cfg: TrainerConfig, modelLayers: Int) r: Bool {
+    let runtimeLayers = resolvedMiniLMLayers(cfg, modelLayers)
+    if runtimeLayers <= 0 or runtimeLayers == modelLayers {
+        return false
+    }
+    var text = readText(cfg.outputModelDir + "/config.json")
+    if text.length() == 0 {
+        text = readText(cfg.modelConfigPath())
+    }
+    if text.length() == 0 {
+        return false
+    }
+    let rewritten = replaceJsonIntField(text, "num_hidden_layers", runtimeLayers)
+    if rewritten == text {
+        return false
+    }
+    return writeAtomicText(cfg.outputModelDir + "/config.json", rewritten)
+}
+
+fun replaceJsonIntField(text: String, key: String, value: Int) r: String {
+    let needle = "\"" + key + "\""
+    if needle.length() == 0 or text.length() < needle.length() {
+        return text
+    }
+    var i = 0
+    while i <= text.length() - needle.length() {
+        if packageRegionMatches(text, i, needle) {
+            var colon = i + needle.length()
+            while colon < text.length() and text.charAt(colon) != 58 {
+                colon = colon + 1
+            }
+            if colon >= text.length() {
+                return text
+            }
+            var start = colon + 1
+            while start < text.length() and packageIsWhitespace(text.charAt(start)) {
+                start = start + 1
+            }
+            var end = start
+            if end < text.length() and text.charAt(end) == 45 {
+                end = end + 1
+            }
+            while end < text.length() and text.charAt(end) >= 48 and text.charAt(end) <= 57 {
+                end = end + 1
+            }
+            if end <= start {
+                return text
+            }
+            return text.substring(0, start) + value.toString() + text.substring(end, text.length())
+        }
+        i = i + 1
+    }
+    return text
+}
+
+fun packageRegionMatches(text: String, offset: Int, needle: String) r: Bool {
+    if offset < 0 or offset + needle.length() > text.length() {
+        return false
+    }
+    var i = 0
+    while i < needle.length() {
+        if text.charAt(offset + i) != needle.charAt(i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fun packageIsWhitespace(ch: Int) r: Bool {
+    return ch == 32 or ch == 9 or ch == 10 or ch == 13
 }
 
 fun packageReadme(cfg: TrainerConfig) r: String {

@@ -585,7 +585,8 @@ fun writeSingleTensorF32(path: String, name: String, rows: Int, cols: Int, value
         + "\"dtype\":\"F32\","
         + "\"shape\":" + shape + ","
         + "\"data_offsets\":[0," + byteCount.toString() + "]"
-        + "}}"
+        + "}"
+        + "}"
     let bytes = Array<Int>()
     stAppendLe64(bytes, header.length())
     stAppendStringBytes(bytes, header)
