@@ -91,6 +91,36 @@ fun tensorMatmulBTransposed(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Floa
     }
 }
 
+@compute(workgroup: 16, 16, 1)
+fun tensorMatmulBiasBTransposed(a: Buffer<Float>, b: Buffer<Float>, bias: Buffer<Float>, out: Buffer<Float>, rows: Int, shared: Int, cols: Int) {
+    let col = globalInvocationId.x
+    let row = globalInvocationId.y
+    if row < rows and col < cols {
+        var sum = bias[col]
+        var k = 0
+        while k < shared {
+            sum = sum + a[row * shared + k] * b[col * shared + k]
+            k = k + 1
+        }
+        out[row * cols + col] = sum
+    }
+}
+
+@compute(workgroup: 16, 16, 1)
+fun tensorMatmulBiasGeluBTransposed(a: Buffer<Float>, b: Buffer<Float>, bias: Buffer<Float>, out: Buffer<Float>, rows: Int, shared: Int, cols: Int) {
+    let col = globalInvocationId.x
+    let row = globalInvocationId.y
+    if row < rows and col < cols {
+        var sum = bias[col]
+        var k = 0
+        while k < shared {
+            sum = sum + a[row * shared + k] * b[col * shared + k]
+            k = k + 1
+        }
+        out[row * cols + col] = 0.5 * sum * (1.0 + kernelTanhApprox(0.7978845608 * (sum + 0.044715 * sum * sum * sum)))
+    }
+}
+
 @compute(workgroup: 256)
 fun tensorRowSums(input: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int) {
     let row = globalInvocationId.x
@@ -156,6 +186,66 @@ fun tensorLayerNormRows(input: Buffer<Float>, out: Buffer<Float>, rows: Int, col
     col = 0
     while col < cols {
         out[row * cols + col] = (input[row * cols + col] - mean) * invStd
+        col = col + 1
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorLayerNormAffineRows(input: Buffer<Float>, weight: Buffer<Float>, bias: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int, epsilon: Float) {
+    let row = globalInvocationId.x
+    if row >= rows {
+        return
+    }
+    var mean = 0.0
+    var col = 0
+    while col < cols {
+        mean = mean + input[row * cols + col]
+        col = col + 1
+    }
+    mean = mean / cols.toFloat()
+    var variance = 0.0
+    col = 0
+    while col < cols {
+        let centered = input[row * cols + col] - mean
+        variance = variance + centered * centered
+        col = col + 1
+    }
+    variance = variance / cols.toFloat()
+    let invStd = 1.0 / kernelSqrt(variance + epsilon)
+    col = 0
+    while col < cols {
+        out[row * cols + col] = (input[row * cols + col] - mean) * invStd * weight[col] + bias[col]
+        col = col + 1
+    }
+}
+
+@compute(workgroup: 256)
+fun tensorResidualLayerNormAffineRows(input: Buffer<Float>, residual: Buffer<Float>, weight: Buffer<Float>, bias: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int, epsilon: Float) {
+    let row = globalInvocationId.x
+    if row >= rows {
+        return
+    }
+    var mean = 0.0
+    var col = 0
+    while col < cols {
+        mean = mean + input[row * cols + col] + residual[row * cols + col]
+        col = col + 1
+    }
+    mean = mean / cols.toFloat()
+    var variance = 0.0
+    col = 0
+    while col < cols {
+        let merged = input[row * cols + col] + residual[row * cols + col]
+        let centered = merged - mean
+        variance = variance + centered * centered
+        col = col + 1
+    }
+    variance = variance / cols.toFloat()
+    let invStd = 1.0 / kernelSqrt(variance + epsilon)
+    col = 0
+    while col < cols {
+        let merged = input[row * cols + col] + residual[row * cols + col]
+        out[row * cols + col] = (merged - mean) * invStd * weight[col] + bias[col]
         col = col + 1
     }
 }
@@ -289,6 +379,79 @@ fun tensorAttentionContext(q: Buffer<Float>, k: Buffer<Float>, v: Buffer<Float>,
     }
 }
 
+@compute(workgroup: 8, 8, 1)
+fun tensorAttentionContextSegmented(q: Buffer<Float>, k: Buffer<Float>, v: Buffer<Float>, out: Buffer<Float>, segments: Buffer<Int>) {
+    let dim = globalInvocationId.x
+    let token = globalInvocationId.y
+    let head = globalInvocationId.z
+    let rows = segments[0]
+    let totalTokens = segments[1]
+    let hiddenSize = segments[2]
+    let attentionHeads = segments[3]
+    if attentionHeads <= 0 or hiddenSize <= 0 or token >= totalTokens or head >= attentionHeads {
+        return
+    }
+    var row = 0
+    var seqLen = 0
+    var start = 0
+    var found = 0
+    while row < rows and found == 0 {
+        start = segments[4 + row]
+        seqLen = segments[4 + rows + row]
+        if token >= start and token < start + seqLen {
+            found = 1
+        } else {
+            row = row + 1
+        }
+    }
+    if found == 0 {
+        return
+    }
+    let headDim = hiddenSize / attentionHeads
+    if dim >= headDim {
+        return
+    }
+    let offset = head * headDim
+    let scale = kernelSqrt(headDim.toFloat())
+    var maxScore = -99999999.0
+    var other = 0
+    while other < seqLen {
+        let otherToken = start + other
+        var score = 0.0
+        var inner = 0
+        while inner < headDim {
+            score = score + q[token * hiddenSize + offset + inner] * k[otherToken * hiddenSize + offset + inner]
+            inner = inner + 1
+        }
+        score = score / scale
+        if score > maxScore {
+            maxScore = score
+        }
+        other = other + 1
+    }
+    var denom = 0.0
+    var weighted = 0.0
+    other = 0
+    while other < seqLen {
+        let otherToken = start + other
+        var score = 0.0
+        var inner = 0
+        while inner < headDim {
+            score = score + q[token * hiddenSize + offset + inner] * k[otherToken * hiddenSize + offset + inner]
+            inner = inner + 1
+        }
+        let weight = kernelExpApprox(score / scale - maxScore)
+        denom = denom + weight
+        weighted = weighted + weight * v[otherToken * hiddenSize + offset + dim]
+        other = other + 1
+    }
+    if denom > 0.0 {
+        out[token * hiddenSize + offset + dim] = weighted / denom
+    } else {
+        out[token * hiddenSize + offset + dim] = 0.0
+    }
+}
+
 @compute(workgroup: 256)
 fun tensorTripletMarginLoss(q: Buffer<Float>, p: Buffer<Float>, n: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int, margin: Float) {
     let row = globalInvocationId.x
@@ -352,7 +515,7 @@ fun tensorTopKInnerProduct(query: Buffer<Float>, candidates: Buffer<Float>, indi
 }
 
 fun trainerTensorKernelDeclarationCount() r: Int {
-    return 16
+    return 21
 }
 
 fun kernelMax(a: Float, b: Float) r: Float {

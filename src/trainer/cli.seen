@@ -1,7 +1,7 @@
 import env.env.{args}
 import config.{TrainerConfig, readConfig, resolvedMiniLMLayers, writeTrainerConfigJson}
 import eval.{EvalResult}
-import io.file.{readText}
+import io.file.{appendText, readText}
 import io_utils.{writeAtomicText}
 import jsonl.{readTripletsLimited, tripletToJson}
 import math_utils.{deterministicShuffleIndices}
@@ -25,6 +25,9 @@ fun trainerMain() r: Int {
 
     let configPath = parseConfigArg(argv)
     let cfg = readConfig(configPath)
+    if command == "bench-eval" {
+        return runBenchEval(argv, cfg)
+    }
     if command == "run-all" {
         if shouldRunAllInProcess(cfg) {
             return runAllInProcess(cfg)
@@ -98,6 +101,109 @@ fun runAllIsolated(executable: String, cfg: TrainerConfig, configPath: String) r
     if not runTrainerStage(executable, "eval", resumeConfigPath) { return 1 }
     if not runTrainerStage(executable, "package", resumeConfigPath) { return 1 }
     return 0
+}
+
+fun runBenchEval(argv: Array<String>, cfg: TrainerConfig) r: Int {
+    let runs = parseIntArg(argv, "--runs", 7)
+    let warmup = parseIntArg(argv, "--warmup", 2)
+    let resultPath = parseStringArg(argv, "--result", "target/bench/seen-bench-eval.json")
+    let loadStart = __GetTime()
+    let pipeline = Pipeline.inference(cfg)
+    println("trainer: backend " + cfg.backend + " requires_gpu " + cfg.backendGpu.toString())
+    let backendReady = pipeline.prepareBackend()
+    if backendReady == false {
+        return 2
+    }
+    let loadMs = cliElapsedMillis(loadStart)
+    println("trainer: model " + pipeline.bundle.briefSummary())
+    var i = 0
+    while i < warmup {
+        let warm = pipeline.eval()
+        println("trainer: bench warmup " + (i + 1).toString() + " answer_rate=" + warm.answerRate.toString() + " encode_ms=" + warm.encodeMs.toString())
+        i = i + 1
+    }
+    let measuredRuns = if runs > 0 { runs } else { 1 }
+    let json = benchEvalJsonStart(cfg, loadMs, warmup, measuredRuns)
+    if not writeAtomicText(resultPath, json) {
+        println("trainer: failed to write bench result: " + resultPath)
+        return 1
+    }
+    i = 0
+    while i < measuredRuns {
+        let runStart = __GetTime()
+        let result = pipeline.eval()
+        let wallMs = cliElapsedMillis(runStart)
+        let entry = benchEvalRunJson(i + 1, result, wallMs, i + 1 < measuredRuns)
+        if not appendBenchResult(resultPath, entry) {
+            println("trainer: failed to append bench result: " + resultPath)
+            return 1
+        }
+        println("trainer: bench run " + (i + 1).toString() + " answer_rate=" + result.answerRate.toString() + " wall_ms=" + wallMs.toString() + " encode_ms=" + result.encodeMs.toString())
+        i = i + 1
+    }
+    if not appendBenchResult(resultPath, "  ]\n}\n") {
+        println("trainer: failed to finish bench result: " + resultPath)
+        return 1
+    }
+    println("trainer: bench result -> " + resultPath)
+    return 0
+}
+
+fun appendBenchResult(path: String, text: String) r: Bool {
+    return appendText(path, text)
+}
+
+fun benchEvalJsonStart(cfg: TrainerConfig, loadMs: Float, warmup: Int, runs: Int) r: String {
+    return "{\n"
+        + "  \"implementation\": \"seen-trainer\",\n"
+        + "  \"device\": \"vulkan\",\n"
+        + "  \"gpu_required\": " + cfg.backendGpu.toString() + ",\n"
+        + "  \"config_path\": \"\",\n"
+        + "  \"test_jsonl_path\": \"" + escapeBenchJson(cfg.testJsonlPath) + "\",\n"
+        + "  \"thresholds_path\": \"" + escapeBenchJson(cfg.thresholdsPath) + "\",\n"
+        + "  \"output_model_dir\": \"" + escapeBenchJson(cfg.outputModelDir) + "\",\n"
+        + "  \"load_ms\": " + loadMs.toString() + ",\n"
+        + "  \"warmup_runs\": " + warmup.toString() + ",\n"
+        + "  \"measured_runs\": " + runs.toString() + ",\n"
+        + "  \"runs\": [\n"
+}
+
+fun benchEvalRunJson(index: Int, result: EvalResult, wallMs: Float, comma: Bool) r: String {
+    var out = "    {"
+        + "\"run\": " + index.toString()
+        + ", \"wall_ms\": " + wallMs.toString()
+        + ", \"total_eval_ms\": " + result.totalEvalMs.toString()
+        + ", \"read_dataset_ms\": " + result.readDatasetMs.toString()
+        + ", \"tokenize_ms\": " + result.tokenizeMs.toString()
+        + ", \"encode_ms\": " + result.encodeMs.toString()
+        + ", \"score_threshold_ms\": " + result.scoreThresholdMs.toString()
+        + ", \"write_ms\": " + result.resultWriteMs.toString()
+        + ", \"unique_texts\": " + result.uniqueTexts.toString()
+        + ", \"total\": " + result.total.toString()
+        + ", \"answered\": " + result.answered.toString()
+        + ", \"answer_rate\": " + result.answerRate.toString()
+        + "}"
+    if comma {
+        out = out + ","
+    }
+    return out + "\n"
+}
+
+fun escapeBenchJson(text: String) r: String {
+    var out = ""
+    var i = 0
+    while i < text.length() {
+        let ch = text.charAt(i)
+        if ch == 34 {
+            out = out + "\\\""
+        } else if ch == 92 {
+            out = out + "\\\\"
+        } else {
+            out = out + text.substring(i, i + 1)
+        }
+        i = i + 1
+    }
+    return out
 }
 
 fun shouldRunAllInProcess(cfg: TrainerConfig) r: Bool {
@@ -348,6 +454,55 @@ fun parseConfigArg(argv: Array<String>) r: String {
     return "config/example.config.json"
 }
 
+fun parseStringArg(argv: Array<String>, flag: String, fallback: String) r: String {
+    var i = 2
+    let eqPrefix = flag + "="
+    while i < argv.length() {
+        if argv[i] == flag {
+            if i + 1 < argv.length() {
+                return argv[i + 1]
+            }
+        }
+        if startsWithFlag(argv[i], eqPrefix) {
+            return argv[i].substring(eqPrefix.length(), argv[i].length())
+        }
+        i = i + 1
+    }
+    return fallback
+}
+
+fun parseIntArg(argv: Array<String>, flag: String, fallback: Int) r: Int {
+    let text = parseStringArg(argv, flag, "")
+    if text.length() == 0 {
+        return fallback
+    }
+    return cliParseInt(text, fallback)
+}
+
+fun cliParseInt(text: String, fallback: Int) r: Int {
+    var sign = 1
+    var i = 0
+    if text.length() > 0 and text.charAt(0) == 45 {
+        sign = -1
+        i = 1
+    }
+    var value = 0
+    var digits = 0
+    while i < text.length() and text.charAt(i) >= 48 and text.charAt(i) <= 57 {
+        value = value * 10 + (text.charAt(i) - 48)
+        digits = digits + 1
+        i = i + 1
+    }
+    if digits == 0 {
+        return fallback
+    }
+    return value * sign
+}
+
+fun cliElapsedMillis(startSeconds: Float) r: Float {
+    return (__GetTime() - startSeconds) * 1000.0
+}
+
 fun startsWithFlag(text: String, prefix: String) r: Bool {
     if text.length() < prefix.length() {
         return false
@@ -357,5 +512,5 @@ fun startsWithFlag(text: String, prefix: String) r: Bool {
 
 fun printUsage() r: Void {
     println("Seen Sinai trainer")
-    println("usage: trainer <mine|train|calibrate|eval|package|run-all> --config config.json")
+    println("usage: trainer <mine|train|calibrate|eval|bench-eval|package|run-all> --config config.json")
 }

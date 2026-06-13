@@ -2,7 +2,7 @@ import io.file.{readBytesRange}
 import adapter.{ProjectionAdapter}
 import dense_lora.{DenseDeltaAdapter, DenseLoRAAdapter, LayerNormDeltaAdapter, MiniLMLayerDeltas, denseRankBAt, denseRankBottleneckAt, denseZeros}
 import embedding_delta.{MiniLMEmbeddingDeltas}
-import gpu_tensor_ops.{tensorGpuAttentionContext, tensorGpuMatmulBTransposed}
+import gpu_tensor_ops.{tensorGpuAttentionContext, tensorGpuAttentionContextSegmented, tensorGpuLayerNormAffineRows, tensorGpuMatmulBTransposed, tensorGpuMatmulBiasBTransposed, tensorGpuMatmulBiasGeluBTransposed, tensorGpuResidualLayerNormAffineRows}
 import math.math.{sqrt, exp}
 import math_utils.{gelu}
 import minilm_weights.{mwFindCandidateIndex}
@@ -52,6 +52,39 @@ class EmbeddingTensorLoad {
                 return 0.0
             }
             slot = slot + 1
+        }
+        return 0.0
+    }
+
+    fun slotForRow(row: Int) r: Int {
+        if row < 0 or row >= this.rows {
+            return -1
+        }
+        if this.rowIds.length() == 0 {
+            return row
+        }
+        var slot = 0
+        while slot < this.rowIds.length() {
+            if this.rowIds[slot] == row {
+                return slot
+            }
+            slot = slot + 1
+        }
+        return -1
+    }
+
+    fun valueAtResolvedSlot(row: Int, slot: Int, col: Int) r: Float {
+        if row < 0 or row >= this.rows or col < 0 or col >= this.cols or slot < 0 {
+            return 0.0
+        }
+        var index = 0
+        if this.rowIds.length() == 0 {
+            index = row * this.cols + col
+        } else {
+            index = slot * this.cols + col
+        }
+        if index >= 0 and index < this.values.length() {
+            return this.values[index]
         }
         return 0.0
     }
@@ -1736,6 +1769,13 @@ fun applyEncoderLayerBatchCachedBackend(layerCache: MiniLMEncoderLayerCache, seq
 }
 
 fun attentionContextBatchBackend(q: Array<Float>, k: Array<Float>, v: Array<Float>, offsets: Array<Int>, lengths: Array<Int>, rows: Int, totalTokens: Int, hiddenSize: Int, attentionHeads: Int, backend: String) r: Array<Float> {
+    if miniLMBackendIsGpu(backend) {
+        let fused = tensorGpuAttentionContextSegmented(q, k, v, offsets, lengths, rows, totalTokens, hiddenSize, attentionHeads)
+        if fused.ok == 1 and fused.values.length() == totalTokens * hiddenSize {
+            return fused.values
+        }
+        releaseFloatArrayStorage(fused.values)
+    }
     let out = Array<Float>(totalTokens * hiddenSize, 0.0)
     var row = 0
     while row < rows and row < offsets.length() and row < lengths.length() {
@@ -2073,6 +2113,11 @@ fun projectSequenceLinearBackend(sequence: Array<Float>, seqLen: Int, inputSize:
         return Array<Float>()
     }
     if miniLMBackendIsGpu(backend) {
+        let productBiasGpu = tensorGpuMatmulBiasBTransposed(sequence, weight.values, bias.values, seqLen, inputSize, outputSize)
+        if productBiasGpu.ok == 1 and productBiasGpu.values.length() == seqLen * outputSize {
+            return productBiasGpu.values
+        }
+        releaseFloatArrayStorage(productBiasGpu.values)
         let productGpu = tensorGpuMatmulBTransposed(sequence, weight.values, seqLen, inputSize, outputSize)
         if productGpu.ok == 1 and productGpu.values.length() == seqLen * outputSize {
             let outGpu = Array<Float>(seqLen * outputSize, 0.0)
@@ -2251,6 +2296,11 @@ fun residualLayerNormValues(values: Array<Float>, residual: Array<Float>, seqLen
 
 fun residualLayerNormValuesBackend(values: Array<Float>, residual: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>, backend: String) r: Array<Float> {
     if miniLMBackendIsGpu(backend) {
+        let fused = tensorGpuResidualLayerNormAffineRows(values, residual, normWeight, normBias, seqLen, hiddenSize, 0.000000000001)
+        if fused.ok == 1 and fused.values.length() == seqLen * hiddenSize {
+            return fused.values
+        }
+        releaseFloatArrayStorage(fused.values)
         let merged = addFlatRows(values, residual, seqLen, hiddenSize)
         let normed = layerNormRowsBackend(merged, seqLen, hiddenSize, normWeight, normBias, backend)
         if normed.length() == seqLen * hiddenSize {
@@ -2292,6 +2342,13 @@ fun feedForwardIntermediateWithDenseDelta(sequence: Array<Float>, seqLen: Int, h
 }
 
 fun feedForwardIntermediateWithDenseDeltaBackend(sequence: Array<Float>, seqLen: Int, hiddenSize: Int, intermediateSize: Int, weight: EmbeddingTensorLoad, bias: EmbeddingTensorLoad, intermediateDelta: DenseDeltaAdapter, applyDelta: Bool, backend: String) r: Array<Float> {
+    if miniLMBackendIsGpu(backend) and not applyDelta and weight.ok and bias.ok and sequence.length() >= seqLen * hiddenSize and weight.values.length() >= intermediateSize * hiddenSize and bias.values.length() >= intermediateSize {
+        let fused = tensorGpuMatmulBiasGeluBTransposed(sequence, weight.values, bias.values, seqLen, hiddenSize, intermediateSize)
+        if fused.ok == 1 and fused.values.length() == seqLen * intermediateSize {
+            return fused.values
+        }
+        releaseFloatArrayStorage(fused.values)
+    }
     let pre = feedForwardPreActivationWithDenseDeltaBackend(sequence, seqLen, hiddenSize, intermediateSize, weight, bias, intermediateDelta, applyDelta, backend)
     let activated = geluFlat(pre)
     releaseFloatArrayStorage(pre)
@@ -2775,6 +2832,11 @@ fun layerNormRows(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight
 
 fun layerNormRowsBackend(values: Array<Float>, seqLen: Int, hiddenSize: Int, normWeight: Array<Float>, normBias: Array<Float>, backend: String) r: Array<Float> {
     if miniLMBackendIsGpu(backend) and seqLen > 0 and hiddenSize > 0 and values.length() >= seqLen * hiddenSize and normWeight.length() >= hiddenSize and normBias.length() >= hiddenSize {
+        let affine = tensorGpuLayerNormAffineRows(values, normWeight, normBias, seqLen, hiddenSize, 0.000000000001)
+        if affine.ok == 1 and affine.values.length() == seqLen * hiddenSize {
+            return affine.values
+        }
+        releaseFloatArrayStorage(affine.values)
         let input = Tensor.fromArray(seqLen, hiddenSize, values, backend)
         let normalized = input.layerNormRows()
         if normalized.values.length() == seqLen * hiddenSize {
@@ -4349,11 +4411,12 @@ fun zerosFloat(count: Int) r: Array<Float> {
 fun encodeTokenWithTables(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, normWeight: EmbeddingTensorLoad, normBias: EmbeddingTensorLoad) r: Array<Float> {
     let raw = Array<Float>()
     let wordRow = positiveMod(tokenId, word.rows)
+    let wordSlot = word.slotForRow(wordRow)
     let posRow = positiveMod(positionIndex, position.rows)
     let typeRow = 0
     var d = 0
     while d < hiddenSize {
-        raw.push(word.valueAt(wordRow, d)
+        raw.push(word.valueAtResolvedSlot(wordRow, wordSlot, d)
             + position.valueAt(posRow, d)
             + tokenType.valueAt(typeRow, d))
         d = d + 1
@@ -4373,11 +4436,12 @@ fun encodeTokenWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSize:
 fun encodeTokenRawWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {
     let raw = Array<Float>()
     let wordRow = positiveMod(tokenId, word.rows)
+    let wordSlot = word.slotForRow(wordRow)
     let posRow = positiveMod(positionIndex, position.rows)
     let typeRow = 0
     var d = 0
     while d < hiddenSize {
-        raw.push(word.valueAt(wordRow, d)
+        raw.push(word.valueAtResolvedSlot(wordRow, wordSlot, d)
             + embeddingDeltas.wordDeltaAt(wordRow, d)
             + position.valueAt(posRow, d)
             + embeddingDeltas.positionDeltaAt(posRow, d)
