@@ -76,6 +76,21 @@ fun tensorMatmul(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, rows: I
     }
 }
 
+@compute(workgroup: 16, 16, 1)
+fun tensorMatmulBTransposed(a: Buffer<Float>, b: Buffer<Float>, out: Buffer<Float>, rows: Int, shared: Int, cols: Int) {
+    let col = globalInvocationId.x
+    let row = globalInvocationId.y
+    if row < rows and col < cols {
+        var sum = 0.0
+        var k = 0
+        while k < shared {
+            sum = sum + a[row * shared + k] * b[col * shared + k]
+            k = k + 1
+        }
+        out[row * cols + col] = sum
+    }
+}
+
 @compute(workgroup: 256)
 fun tensorRowSums(input: Buffer<Float>, out: Buffer<Float>, rows: Int, cols: Int) {
     let row = globalInvocationId.x

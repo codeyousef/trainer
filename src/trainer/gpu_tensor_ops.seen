@@ -96,23 +96,11 @@ fun tensorGpuDivCeil(value: Int, divisor: Int) r: Int {
 }
 
 fun tensorGpuFloatArray(count: Int, value: Float) r: Array<Float> {
-    let out = Array<Float>()
-    var i = 0
-    while i < count {
-        out.push(value)
-        i = i + 1
-    }
-    return out
+    return Array<Float>(count, value)
 }
 
 fun tensorGpuIntArray(count: Int, value: Int) r: Array<Int> {
-    let out = Array<Int>()
-    var i = 0
-    while i < count {
-        out.push(value)
-        i = i + 1
-    }
-    return out
+    return Array<Int>(count, value)
 }
 
 fun tensorGpuDestroyBuffer(handle: Int) r: Void {
@@ -387,6 +375,56 @@ fun tensorGpuMatmul(a: Array<Float>, b: Array<Float>, rows: Int, shared: Int,
     handles.push(sharedBuf)
     handles.push(colsBuf)
     let ok = tensorGpuRun("tensorMatmul", 6, tensorGpuDivCeil(cols, 16), tensorGpuDivCeil(rows, 16), 1, handles)
+    if ok {
+        let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
+    }
+    tensorGpuDestroyBuffer(aBuf)
+    tensorGpuDestroyBuffer(bBuf)
+    tensorGpuDestroyBuffer(outBuf)
+    tensorGpuDestroyBuffer(rowsBuf)
+    tensorGpuDestroyBuffer(sharedBuf)
+    tensorGpuDestroyBuffer(colsBuf)
+    if ok {
+        return TensorGpuFloatResult.success(outValues)
+    }
+    return TensorGpuFloatResult.failure()
+}
+
+fun tensorGpuMatmulBTransposed(a: Array<Float>, b: Array<Float>, rows: Int, shared: Int,
+    cols: Int) r: TensorGpuFloatResult {
+
+    if rows <= 0 or shared <= 0 or cols <= 0 {
+        return TensorGpuFloatResult.failure()
+    }
+    if a.length() < rows * shared or b.length() < cols * shared {
+        return TensorGpuFloatResult.failure()
+    }
+
+    let outValues = tensorGpuFloatArray(rows * cols, 0.0)
+    let aBuf = tensorGpuFloatBuffer(a)
+    let bBuf = tensorGpuFloatBuffer(b)
+    let outBuf = tensorGpuFloatBuffer(outValues)
+    let rowsBuf = tensorGpuIntScalar(rows)
+    let sharedBuf = tensorGpuIntScalar(shared)
+    let colsBuf = tensorGpuIntScalar(cols)
+    if aBuf == 0 or bBuf == 0 or outBuf == 0 or rowsBuf == 0 or sharedBuf == 0 or colsBuf == 0 {
+        tensorGpuDestroyBuffer(aBuf)
+        tensorGpuDestroyBuffer(bBuf)
+        tensorGpuDestroyBuffer(outBuf)
+        tensorGpuDestroyBuffer(rowsBuf)
+        tensorGpuDestroyBuffer(sharedBuf)
+        tensorGpuDestroyBuffer(colsBuf)
+        return TensorGpuFloatResult.failure()
+    }
+
+    let handles = Array<Int>()
+    handles.push(aBuf)
+    handles.push(bBuf)
+    handles.push(outBuf)
+    handles.push(rowsBuf)
+    handles.push(sharedBuf)
+    handles.push(colsBuf)
+    let ok = tensorGpuRun("tensorMatmulBTransposed", 6, tensorGpuDivCeil(cols, 16), tensorGpuDivCeil(rows, 16), 1, handles)
     if ok {
         let _ = seen_gpu_buffer_read_float_array(outBuf, outValues, outValues.length())
     }

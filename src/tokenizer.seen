@@ -1,4 +1,5 @@
 import io.file.{exists, readBytes, readText}
+import memory.allocation.{releaseIntArrayStorage, releaseStringArrayStorage}
 import str.string.{splitWhitespace}
 
 class TokenBatch {
@@ -135,6 +136,7 @@ class Tokenizer {
         while tokens.length() < this.maxLength {
             tokens.push(this.padToken)
         }
+        releaseStringArrayStorage(raw)
         return tokens
     }
 
@@ -167,19 +169,25 @@ class Tokenizer {
     }
 
     fun tokenized(text: String) r: TokenizedText {
-        let tokens = this.tokenize(text)
+        let normalized = if this.doLowerCase { asciiLower(text) } else { text }
+        let raw = splitWhitespace(normalized, true)
         let ids = Array<Int>()
         let mask = Array<Int>()
+        ids.push(this.clsId)
+        mask.push(1)
         var i = 0
-        while i < tokens.length() {
-            ids.push(this.tokenIdForToken(tokens[i]))
-            if tokenizerStringEquals(tokens[i], this.padToken) {
-                mask.push(0)
-            } else {
-                mask.push(1)
-            }
+        let limit = this.maxLength - 1
+        while i < raw.length() and ids.length() < limit {
+            appendTokenizerPieceIds(ids, mask, raw[i], this.vocabTokens, this.vocabIds, this.vocabBuckets, this.vocabNext, this.unkId, limit, this.vocabStyle)
             i = i + 1
         }
+        ids.push(this.sepId)
+        mask.push(1)
+        while ids.length() < this.maxLength {
+            ids.push(this.padId)
+            mask.push(0)
+        }
+        releaseStringArrayStorage(raw)
         return TokenizedText.new(ids, mask)
     }
 
@@ -801,6 +809,120 @@ fun appendTokenizerPieces(out: Array<String>, word: String, vocabTokens: Array<S
     appendWordPieces(out, word, vocabTokens, vocabBuckets, vocabNext, unkToken, limit)
 }
 
+fun appendTokenizerPieceIds(out: Array<Int>, mask: Array<Int>, word: String, vocabTokens: Array<String>, vocabIds: Array<Int>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkId: Int, limit: Int, style: Int) r: Void {
+    if style == 2 {
+        appendMetaspacePieceIds(out, mask, word, vocabTokens, vocabIds, vocabBuckets, vocabNext, unkId, limit)
+        return
+    }
+    appendWordPieceIds(out, mask, word, vocabTokens, vocabIds, vocabBuckets, vocabNext, unkId, limit)
+}
+
+fun appendWordPieceIds(out: Array<Int>, mask: Array<Int>, word: String, vocabTokens: Array<String>, vocabIds: Array<Int>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkId: Int, limit: Int) r: Void {
+    if out.length() >= limit {
+        return
+    }
+    if vocabTokens.length() == 0 {
+        out.push(stableTokenId(word))
+        mask.push(1)
+        return
+    }
+    let wholeId = findVocabIdIndexed(vocabTokens, vocabIds, vocabBuckets, vocabNext, word, -1)
+    if wholeId >= 0 {
+        out.push(wholeId)
+        mask.push(1)
+        return
+    }
+    let pieceIds = Array<Int>()
+    let remaining = limit - out.length()
+    var start = 0
+    var failed = false
+    while start < word.length() and not failed {
+        var end = word.length()
+        var matchedId = -1
+        var matchedEnd = start
+        while end > start and matchedId < 0 {
+            let rawPiece = word.substring(start, end)
+            let piece = if start == 0 { rawPiece } else { "##" + rawPiece }
+            matchedId = findVocabIdIndexed(vocabTokens, vocabIds, vocabBuckets, vocabNext, piece, -1)
+            if matchedId >= 0 {
+                matchedEnd = end
+            } else {
+                end = end - 1
+            }
+        }
+        if matchedId < 0 {
+            failed = true
+        } else {
+            if pieceIds.length() < remaining {
+                pieceIds.push(matchedId)
+            }
+            start = matchedEnd
+        }
+    }
+    if failed or pieceIds.length() == 0 {
+        out.push(unkId)
+        mask.push(1)
+        releaseIntArrayStorage(pieceIds)
+        return
+    }
+    var i = 0
+    while i < pieceIds.length() and out.length() < limit {
+        out.push(pieceIds[i])
+        mask.push(1)
+        i = i + 1
+    }
+    releaseIntArrayStorage(pieceIds)
+}
+
+fun appendMetaspacePieceIds(out: Array<Int>, mask: Array<Int>, word: String, vocabTokens: Array<String>, vocabIds: Array<Int>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkId: Int, limit: Int) r: Void {
+    if out.length() >= limit {
+        return
+    }
+    if vocabTokens.length() == 0 {
+        out.push(stableTokenId(word))
+        mask.push(1)
+        return
+    }
+    let pieceIds = Array<Int>()
+    let remaining = limit - out.length()
+    var start = 0
+    var failed = false
+    while start < word.length() and not failed {
+        var end = word.length()
+        var matchedId = -1
+        var matchedEnd = start
+        while end > start and matchedId < 0 {
+            matchedId = findMetaspaceVocabPieceId(vocabTokens, vocabIds, vocabBuckets, vocabNext, word, start, end, start == 0)
+            if matchedId >= 0 {
+                matchedEnd = end
+            } else {
+                end = end - 1
+            }
+        }
+        if matchedId < 0 {
+            failed = true
+        } else {
+            if pieceIds.length() < remaining {
+                pieceIds.push(matchedId)
+            }
+            start = matchedEnd
+        }
+    }
+    if failed or pieceIds.length() == 0 {
+        out.push(unkId)
+        mask.push(1)
+        releaseIntArrayStorage(pieceIds)
+        return
+    }
+    var i = 0
+    while i < pieceIds.length() and out.length() < limit {
+        out.push(pieceIds[i])
+        mask.push(1)
+        i = i + 1
+    }
+    releaseIntArrayStorage(pieceIds)
+}
+
 fun appendWordPieces(out: Array<String>, word: String, vocabTokens: Array<String>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, unkToken: String, limit: Int) r: Void {
     if out.length() >= limit {
         return
@@ -905,6 +1027,20 @@ fun findMetaspaceVocabPiece(vocabTokens: Array<String>, vocabBuckets: Array<Int>
         return rawPiece
     }
     return ""
+}
+
+fun findMetaspaceVocabPieceId(vocabTokens: Array<String>, vocabIds: Array<Int>, vocabBuckets: Array<Int>, vocabNext: Array<Int>, word: String, start: Int, end: Int, firstPiece: Bool) r: Int {
+    let rawPiece = word.substring(start, end)
+    if firstPiece {
+        let unicodePiece = String.fromCharCode(9601) + rawPiece
+        let unicodeId = findVocabIdIndexed(vocabTokens, vocabIds, vocabBuckets, vocabNext, unicodePiece, -1)
+        if unicodeId >= 0 {
+            return unicodeId
+        }
+        let bytePiece = String.fromCharCode(226) + String.fromCharCode(150) + String.fromCharCode(129) + rawPiece
+        return findVocabIdIndexed(vocabTokens, vocabIds, vocabBuckets, vocabNext, bytePiece, -1)
+    }
+    return findVocabIdIndexed(vocabTokens, vocabIds, vocabBuckets, vocabNext, rawPiece, -1)
 }
 
 fun tokenMatchesMetaspaceSlice(token: String, word: String, start: Int, end: Int) r: Bool {

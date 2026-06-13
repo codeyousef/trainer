@@ -4,6 +4,7 @@ import io.file.{copyFileBytes, exists, readBytesPrefix, readBytesRange, size, wr
 import io_utils.{writeAtomicText}
 import json.builder.{escapeJsonString}
 import math.math.{floor}
+import memory.allocation.{releaseIntArrayStorage}
 import tensor.{Tensor}
 
 class SafeTensorEntry {
@@ -309,22 +310,36 @@ fun loadTensorEntryF32(info: SafeTensorInfo, entry: SafeTensorEntry, backend: St
         return SafeTensorLoadResult.failure(entry.name, "F32 byte count does not match shape")
     }
 
+    let values = Array<Float>(elementCount, 0.0)
     let base = 8 + info.headerLength + entry.dataStart
-    let bytes = readBytesRange(info.path, base, entry.byteCount())
-    if bytes.length() < entry.byteCount() {
-        return SafeTensorLoadResult.failure(entry.name, "tensor data is truncated")
-    }
-
-    let values = Array<Float>()
-    var i = 0
-    while i < elementCount {
-        let byteOffset = i * 4
-        values.push(stReadF32Le(bytes, byteOffset))
-        i = i + 1
+    var loadedBytes = 0
+    var valueIndex = 0
+    while loadedBytes < entry.byteCount() {
+        let chunkBytes = safeTensorByteChunkSize(entry.byteCount() - loadedBytes)
+        let bytes = readBytesRange(info.path, base + loadedBytes, chunkBytes)
+        if bytes.length() < chunkBytes {
+            releaseIntArrayStorage(bytes)
+            return SafeTensorLoadResult.failure(entry.name, "tensor data is truncated")
+        }
+        var i = 0
+        while i + 3 < bytes.length() {
+            values[valueIndex] = stReadF32Le(bytes, i)
+            valueIndex = valueIndex + 1
+            i = i + 4
+        }
+        releaseIntArrayStorage(bytes)
+        loadedBytes = loadedBytes + chunkBytes
     }
     let rows = tensorRows(entry)
     let cols = tensorCols(entry)
     return SafeTensorLoadResult.success(entry.name, Tensor.fromArray(rows, cols, values, backend))
+}
+
+fun safeTensorByteChunkSize(remaining: Int) r: Int {
+    if remaining < 262144 {
+        return remaining
+    }
+    return 262144
 }
 
 fun findTensorEntryIndex(info: SafeTensorInfo, name: String) r: Int {
