@@ -47,7 +47,10 @@ fun normalize(values: Array<Float>) r: Array<Float> {
 fun cosine(a: Array<Float>, b: Array<Float>) r: Float {
     let na = normalize(a)
     let nb = normalize(b)
-    return dot(na, nb)
+    let score = dot(na, nb)
+    releaseFloatArrayStorage(na)
+    releaseFloatArrayStorage(nb)
+    return score
 }
 
 fun gelu(x: Float) r: Float {

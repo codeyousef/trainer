@@ -5,7 +5,6 @@ import io.file.{exists}
 import io_utils.{writeAtomicText}
 import json.builder.{escapeJsonString}
 import jsonl.{TripletExample, readTripletsLimited}
-import math_utils.{cosine}
 import memory.allocation.{releaseFloatArrayStorage}
 
 class EvalResult {
@@ -19,22 +18,78 @@ class EvalResult {
     }
 }
 
+class EvalEmbeddingCache {
+    var texts: Array<String>
+    var embeddings: Array<Float>
+    var dim: Int
+
+    static fun new(dim: Int) r: EvalEmbeddingCache {
+        return EvalEmbeddingCache{ texts: Array<String>(), embeddings: Array<Float>(), dim: dim }
+    }
+
+    fun ensure(encoder: Encoder, text: String) r: Int {
+        var i = 0
+        while i < this.texts.length() {
+            if this.texts[i] == text {
+                return i
+            }
+            i = i + 1
+        }
+        let embedding = encoder.encode(text)
+        this.texts.push(text)
+        var d = 0
+        while d < this.dim {
+            if d < embedding.length() {
+                this.embeddings.push(embedding[d])
+            } else {
+                this.embeddings.push(0.0)
+            }
+            d = d + 1
+        }
+        releaseFloatArrayStorage(embedding)
+        return this.texts.length() - 1
+    }
+
+    fun dotAt(left: Int, right: Int) r: Float {
+        var sum = 0.0
+        var d = 0
+        let leftBase = left * this.dim
+        let rightBase = right * this.dim
+        while d < this.dim {
+            let li = leftBase + d
+            let ri = rightBase + d
+            if li < this.embeddings.length() and ri < this.embeddings.length() {
+                sum = sum + this.embeddings[li] * this.embeddings[ri]
+            }
+            d = d + 1
+        }
+        return sum
+    }
+
+    fun score(encoder: Encoder, qText: String, pText: String) r: Float {
+        let qIndex = this.ensure(encoder, qText)
+        let pIndex = this.ensure(encoder, pText)
+        return this.dotAt(qIndex, pIndex)
+    }
+
+    fun release() r: Void {
+        releaseFloatArrayStorage(this.embeddings)
+    }
+}
+
 fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThreshold>) r: EvalResult {
     let items = readEvalDataset(cfg)
     let domains = uniqueEvalDomains(items)
     let totals = evalInitializedIntArray(domains.length(), 0)
     let answeredTotals = evalInitializedIntArray(domains.length(), 0)
+    let cache = EvalEmbeddingCache.new(encoder.embeddingDim)
     var total = 0
     var answered = 0
     var i = 0
     while i < items.length() {
         let domain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
         let threshold = thresholdFor(thresholds, domain)
-        let q = encoder.encode(items[i].queryText)
-        let p = encoder.encode(items[i].positiveChunkText)
-        let score = cosine(q, p)
-        releaseFloatArrayStorage(q)
-        releaseFloatArrayStorage(p)
+        let score = cache.score(encoder, items[i].queryText, items[i].positiveChunkText)
         let domainIndex = findDomainIndex(domains, domain)
         if domainIndex >= 0 {
             totals[domainIndex] = totals[domainIndex] + 1
@@ -48,6 +103,7 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
         total = total + 1
         i = i + 1
     }
+    cache.release()
     var rate = 0.0
     if total > 0 {
         rate = answered.toFloat() / total.toFloat()

@@ -2,11 +2,11 @@
 
 Date: 2026-06-13
 
-Issue context: FEL-593, FEL-600
+Issue context: FEL-593, FEL-600, FEL-601
 
-Trainer branch: `feat/FEL-593-sinai-agent-training-roadmap`
+Trainer branch: `perf/FEL-601-trainer-eval-performance`
 
-Benchmarked trainer code commit: `02ec556 FEL-593 add sinai-agent benchmark report`
+Baseline trainer code commit: `02ec556 FEL-593 add sinai-agent benchmark report`
 
 ## What Was Benchmarked
 
@@ -15,10 +15,12 @@ This is an apples-to-apples performance comparison for the same retrieval activi
 1. Start a cold process.
 2. Load the `sinai-agent` model/package.
 3. Read the same 100 Agentic-EI test rows.
-4. Encode the same 200 texts: 100 query texts and 100 positive chunk texts.
+4. Encode the same 200 row texts: 100 query texts and 100 positive chunk texts.
 5. Compute 100 cosine scores.
 6. Apply the same packaged per-domain thresholds.
 7. Report wall time, peak resident memory, throughput, answer rate, and GPU availability.
+
+The FEL-601 optimized Seen path preserves the same row-level activity and outputs, but caches duplicate text embeddings inside eval. On this 100-row test split, the 200 row texts contain 173 unique texts.
 
 This report does not compare Seen training against Python eval-only. Training feasibility is noted only at the end because it is a different activity.
 
@@ -53,14 +55,17 @@ Three cold-process runs were executed for each runnable path.
 
 | Implementation | Device Path | Status | Median Cold Process Wall | Median Peak RSS | Throughput, Cold Process | Answer Rate |
 |---|---|---|---:|---:|---:|---:|
-| Seen trainer CLI | Vulkan GPU | Passed | 38.780s | 1,796,844 KB | 2.58 pairs/s, 5.16 texts/s | 0.86 |
+| Seen trainer CLI baseline | Vulkan GPU | Passed | 38.780s | 1,796,844 KB | 2.58 pairs/s, 5.16 row-texts/s | 0.86 |
+| Seen trainer CLI after FEL-601 cache | Vulkan GPU | Passed | 31.739s | 1,672,192 KB | 3.15 pairs/s, 6.30 row-texts/s | 0.86 |
 | Python SentenceTransformer | CPU | Passed | 4.404s | 1,242,472 KB | 22.70 pairs/s, 45.41 texts/s | 1.00 |
 | Python SentenceTransformer | CUDA | Failed | Failed at model-to-CUDA | 1,314,296 KB at failure | n/a | n/a |
 
 Performance ratios:
 
-- Python SentenceTransformer CPU cold-process eval was `8.80x` faster than Seen CLI GPU/Vulkan eval for this activity.
-- Seen CLI peak RSS was `1.45x` the Python CPU path for this activity.
+- FEL-601 made Seen CLI eval `1.22x` faster than the baseline, reducing median wall time by `18.2%`.
+- FEL-601 reduced Seen CLI peak RSS by `6.9%`.
+- Python SentenceTransformer CPU cold-process eval remains `7.21x` faster than optimized Seen CLI GPU/Vulkan eval for this activity.
+- Optimized Seen CLI peak RSS remains `1.35x` the Python CPU path for this activity.
 - Python CUDA was not comparable under the cap because all full-activity attempts failed before encoding.
 
 ## Python CPU Internal Timing
@@ -83,7 +88,21 @@ The cold-process number is the fairer cross-implementation headline because the 
 
 ## Run Details
 
-Seen trainer CLI, Vulkan GPU:
+Seen trainer CLI after FEL-601 cache, Vulkan GPU:
+
+| Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
+|---:|---:|---:|---:|---|
+| 1 | 31.812s | 1,672,192 KB | 0.86 | yes |
+| 2 | 31.662s | 1,669,240 KB | 0.86 | yes |
+| 3 | 31.739s | 1,672,544 KB | 0.86 | yes |
+
+The optimized eval path:
+
+- Adds an eval-local flat embedding cache so duplicate query/chunk texts are encoded once.
+- Scores cached normalized embeddings with direct dot product, avoiding a second normalize-per-score pass.
+- Releases the temporary normalized arrays allocated by `math_utils.cosine` for call sites that still use that helper.
+
+Seen trainer CLI baseline, Vulkan GPU:
 
 | Run | Wall Time | Peak RSS | Answer Rate | GPU Confirmed |
 |---:|---:|---:|---:|---|
@@ -114,11 +133,13 @@ Python SentenceTransformer CUDA:
 
 ## Interpretation
 
-For this exact eval-style retrieval activity, Python SentenceTransformer CPU is currently much faster than the Seen trainer CLI even though Seen initializes the Vulkan GPU path.
+For this exact eval-style retrieval activity, Python SentenceTransformer CPU is still much faster than the Seen trainer CLI even though Seen initializes the Vulkan GPU path.
+
+The first Seen optimization pass removed obvious eval overhead and moved the median from `38.780s` to `31.739s`, but it did not change the main shape of the result.
 
 The most likely reasons are implementation-level rather than model-level:
 
-- The Seen CLI performs this eval through the trainer runtime path, with per-example encode/scoring behavior and substantial model/runtime setup overhead.
+- The Seen CLI performs this eval through the trainer runtime path, with per-unique-text encode behavior and substantial model/runtime setup overhead.
 - The Python path uses optimized HuggingFace tokenizer/runtime and batched SentenceTransformer encode.
 - The Seen GPU backend is active, but this eval path is not yet optimized to batch the full 200-text workload into a single high-throughput GPU execution plan.
 
@@ -170,4 +191,4 @@ TOKENIZERS_PARALLELISM=false OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_TH
 
 ## Follow-Up Needed
 
-The benchmark shows the Seen trainer is functionally runnable on GPU but not performance competitive for this eval workload yet. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes startup and dispatch overhead.
+The benchmark shows the Seen trainer is functionally runnable on GPU but not performance competitive for this eval workload yet. FEL-601 removed duplicate eval encodes and redundant score normalization. The next performance task should add a Seen benchmark mode that reports separate load, tokenize, encode, score, and threshold timings, then batch the eval text encoding path so Vulkan work amortizes startup and dispatch overhead.
