@@ -1,7 +1,7 @@
 import trainer.config.{TrainerConfig, readConfig, writeTrainerConfigJson}
 import trainer.calibration.{DomainThreshold, loadThresholds, thresholdsJson}
 import trainer.encoder.{Encoder}
-import trainer.io.file.{deleteFile, exists}
+import trainer.io.file.{deleteFile, exists, readText}
 import trainer.io_utils.{writeAtomicText}
 import trainer.jsonl.{PairExample, TripletExample, readTripletsLimited}
 import trainer.miner.{MiningEmbeddingMatrix, buildPositiveEmbeddingMatrix, buildPositiveEmbeddingMatrixBackend, findNegativeIndexWithMatrix, initializedFloatArray, initializedIntArray, insertTopCandidate, mineHardNegatives, normalizedTopK}
@@ -185,6 +185,9 @@ fun main() -> Int {
     expect(exists("/tmp/seen_trainer_test/out/mined.jsonl"), "mined output")
     expect(exists("/tmp/seen_trainer_test/out/model/thresholds.json"), "thresholds output")
     expect(exists("/tmp/seen_trainer_test/out/model/eval_results.json"), "eval output")
+    let evalResults = readText("/tmp/seen_trainer_test/out/model/eval_results.json")
+    expect(stringContains(evalResults, "\"timing_ms\""), "eval timing output")
+    expect(stringContains(evalResults, "\"unique_texts\""), "eval unique text count")
     expect(exists("/tmp/seen_trainer_test/out/model/modules.json"), "package modules")
     println("PASS test_pipeline")
     return 0

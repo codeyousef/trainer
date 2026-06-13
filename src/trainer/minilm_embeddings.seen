@@ -465,6 +465,7 @@ class MiniLMEmbeddings {
             }
             i = i + 1
         }
+        releaseTemporarySparseWordTensor(word)
 
         if tokenCount == 0 {
             releaseFloatArrayStorage(sequence)
@@ -473,6 +474,7 @@ class MiniLMEmbeddings {
 
         var encoded = sequence
         let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        let applyLayerAdapterAfterPooling = targetLayer >= 0 and targetLayer == this.readyLayers - 1
         var layer = 0
         while layer < this.readyLayers {
             var layerOut = Array<Float>()
@@ -485,7 +487,7 @@ class MiniLMEmbeddings {
                 let previous = encoded
                 encoded = layerOut
                 releaseFloatArrayStorage(previous)
-                if layer == targetLayer {
+                if layer == targetLayer and not applyLayerAdapterAfterPooling {
                     let projected = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
                     releaseFloatArrayStorage(encoded)
                     encoded = projected
@@ -496,8 +498,13 @@ class MiniLMEmbeddings {
             }
             layer = layer + 1
         }
-        let mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+        var mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
         releaseFloatArrayStorage(encoded)
+        if applyLayerAdapterAfterPooling {
+            let projectedMean = layerAdapter.apply(mean)
+            releaseFloatArrayStorage(mean)
+            mean = projectedMean
+        }
         return mean
     }
 
@@ -543,6 +550,7 @@ class MiniLMEmbeddings {
             }
             i = i + 1
         }
+        releaseTemporarySparseWordTensor(word)
 
         if tokenCount == 0 {
             releaseFloatArrayStorage(sequence)
@@ -551,6 +559,7 @@ class MiniLMEmbeddings {
 
         var encoded = sequence
         let targetLayer = normalizeMiniLMLayerAdapterLayer(adapterLayer, this.readyLayers)
+        let applyLayerAdapterAfterPooling = targetLayer >= 0 and targetLayer == this.readyLayers - 1
         let denseTargetLayer = normalizeMiniLMDenseAdapterLayer(denseAdapterLayer, this.readyLayers)
         var layer = 0
         while layer < this.readyLayers {
@@ -559,7 +568,7 @@ class MiniLMEmbeddings {
                 let previous = encoded
                 encoded = layerOut
                 releaseFloatArrayStorage(previous)
-                if layer == targetLayer {
+                if layer == targetLayer and not applyLayerAdapterAfterPooling {
                     let projected = applyProjectionAdapterToSequence(encoded, tokenCount, this.hiddenSize, layerAdapter)
                     releaseFloatArrayStorage(encoded)
                     encoded = projected
@@ -570,8 +579,13 @@ class MiniLMEmbeddings {
             }
             layer = layer + 1
         }
-        let mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
+        var mean = meanPoolFlat(encoded, tokenCount, this.hiddenSize)
         releaseFloatArrayStorage(encoded)
+        if applyLayerAdapterAfterPooling {
+            let projectedMean = layerAdapter.apply(mean)
+            releaseFloatArrayStorage(mean)
+            mean = projectedMean
+        }
         return mean
     }
 
@@ -620,6 +634,7 @@ class MiniLMEmbeddings {
             }
             i = i + 1
         }
+        releaseTemporarySparseWordTensor(word)
 
         if tokenCount == 0 {
             releaseFloatArrayStorage(sequence)
@@ -1203,7 +1218,7 @@ fun loadEmbeddingTensorMetadata(info: SafeTensorInfo, canonicalName: String, max
 }
 
 fun wordEmbeddingTensorForTokens(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds: Array<Int>, mask: Array<Int>, maxLoadElements: Int) r: EmbeddingTensorLoad {
-    if cache.embeddingsOk and cache.word.ok and cache.word.values.length() > 0 {
+    if cache.embeddingsOk and cache.word.ok and cache.word.values.length() > 0 and cache.word.rowIds.length() == 0 {
         return cache.word
     }
     let meta = if cache.embeddingsOk and cache.word.ok { cache.word } else { loadEmbeddingTensorMetadata(info, "embeddings.word_embeddings.weight", maxLoadElements) }
@@ -1221,11 +1236,14 @@ fun wordEmbeddingTensorForTokens(cache: MiniLMForwardCache, info: SafeTensorInfo
         }
         i = i + 1
     }
+    if cache.embeddingsOk and cache.word.ok {
+        return loadWordEmbeddingRowsCached(cache.word, info, rowIds, meta.rows, meta.cols, maxLoadElements)
+    }
     return loadWordEmbeddingRows(info, rowIds, meta.rows, meta.cols, maxLoadElements)
 }
 
 fun wordEmbeddingTensorForRows(cache: MiniLMForwardCache, info: SafeTensorInfo, rows: Array<Int>, maxLoadElements: Int) r: EmbeddingTensorLoad {
-    if cache.embeddingsOk and cache.word.ok and cache.word.values.length() > 0 {
+    if cache.embeddingsOk and cache.word.ok and cache.word.values.length() > 0 and cache.word.rowIds.length() == 0 {
         return cache.word
     }
     let meta = if cache.embeddingsOk and cache.word.ok { cache.word } else { loadEmbeddingTensorMetadata(info, "embeddings.word_embeddings.weight", maxLoadElements) }
@@ -1241,7 +1259,83 @@ fun wordEmbeddingTensorForRows(cache: MiniLMForwardCache, info: SafeTensorInfo, 
         }
         i = i + 1
     }
+    if cache.embeddingsOk and cache.word.ok {
+        return loadWordEmbeddingRowsCached(cache.word, info, rowIds, meta.rows, meta.cols, maxLoadElements)
+    }
     return loadWordEmbeddingRows(info, rowIds, meta.rows, meta.cols, maxLoadElements)
+}
+
+fun loadWordEmbeddingRowsCached(cacheWord: EmbeddingTensorLoad, info: SafeTensorInfo, rowIds: Array<Int>, rows: Int, cols: Int, maxLoadElements: Int) r: EmbeddingTensorLoad {
+    if rowIds.length() * cols > maxLoadElements {
+        return EmbeddingTensorLoad.failure("sparse row load exceeds cap")
+    }
+    let missing = Array<Int>()
+    var i = 0
+    while i < rowIds.length() {
+        if not meIntArrayContains(cacheWord.rowIds, rowIds[i]) {
+            missing.push(rowIds[i])
+        }
+        i = i + 1
+    }
+    if missing.length() > 0 {
+        let loaded = loadWordEmbeddingRows(info, missing, rows, cols, maxLoadElements)
+        if not loaded.ok {
+            return loaded
+        }
+        appendWordEmbeddingRowsToCache(cacheWord, loaded, cols)
+        releaseEmbeddingTensorLoadStorage(loaded)
+    }
+    return cachedWordEmbeddingSubset(cacheWord, rowIds, rows, cols)
+}
+
+fun appendWordEmbeddingRowsToCache(cacheWord: EmbeddingTensorLoad, loaded: EmbeddingTensorLoad, cols: Int) r: Void {
+    var slot = 0
+    while slot < loaded.rowIds.length() {
+        let row = loaded.rowIds[slot]
+        if not meIntArrayContains(cacheWord.rowIds, row) {
+            cacheWord.rowIds.push(row)
+            var d = 0
+            while d < cols {
+                let idx = slot * cols + d
+                if idx < loaded.values.length() {
+                    cacheWord.values.push(loaded.values[idx])
+                } else {
+                    cacheWord.values.push(0.0)
+                }
+                d = d + 1
+            }
+        }
+        slot = slot + 1
+    }
+}
+
+fun cachedWordEmbeddingSubset(cacheWord: EmbeddingTensorLoad, rowIds: Array<Int>, rows: Int, cols: Int) r: EmbeddingTensorLoad {
+    let values = Array<Float>()
+    var slot = 0
+    while slot < rowIds.length() {
+        let cacheSlot = meIntArrayIndexOf(cacheWord.rowIds, rowIds[slot])
+        if cacheSlot < 0 {
+            return EmbeddingTensorLoad.failure("missing cached sparse row")
+        }
+        var d = 0
+        while d < cols {
+            let idx = cacheSlot * cols + d
+            if idx < cacheWord.values.length() {
+                values.push(cacheWord.values[idx])
+            } else {
+                values.push(0.0)
+            }
+            d = d + 1
+        }
+        slot = slot + 1
+    }
+    return EmbeddingTensorLoad.sparse(rows, cols, rowIds, values)
+}
+
+fun releaseTemporarySparseWordTensor(word: EmbeddingTensorLoad) r: Void {
+    if word.rowIds.length() > 0 {
+        releaseEmbeddingTensorLoadStorage(word)
+    }
 }
 
 fun loadWordEmbeddingRows(info: SafeTensorInfo, rowIds: Array<Int>, rows: Int, cols: Int, maxLoadElements: Int) r: EmbeddingTensorLoad {
@@ -1292,6 +1386,17 @@ fun meIntArrayContains(values: Array<Int>, needle: Int) r: Bool {
         i = i + 1
     }
     return false
+}
+
+fun meIntArrayIndexOf(values: Array<Int>, needle: Int) r: Int {
+    var i = 0
+    while i < values.length() {
+        if values[i] == needle {
+            return i
+        }
+        i = i + 1
+    }
+    return -1
 }
 
 fun cachedEmbeddingTensor(cache: MiniLMForwardCache, info: SafeTensorInfo, canonicalName: String, maxLoadElements: Int) r: EmbeddingTensorLoad {
@@ -1972,9 +2077,11 @@ fun denseAdapterTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds:
                 sequence.push(embedded[d])
                 d = d + 1
             }
+            releaseFloatArrayStorage(embedded)
         }
         i = i + 1
     }
+    releaseTemporarySparseWordTensor(word)
     if tokenCount == 0 {
         return MiniLMDenseTrace.failure()
     }
@@ -1986,6 +2093,7 @@ fun denseAdapterTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds:
         if layerOut.length() != encoded.length() {
             return MiniLMDenseTrace.failure()
         }
+        releaseFloatArrayStorage(encoded)
         encoded = layerOut
         layer = layer + 1
     }
@@ -1994,16 +2102,24 @@ fun denseAdapterTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenIds:
         return targetTrace
     }
     var tail = targetTrace.outputSequence
+    var tailOwnedByTrace = true
     layer = targetLayer + 1
     while layer < readyLayers {
         let layerOut = applyEncoderLayerMaybeCachedBase(cache, info, tail, tokenCount, hiddenSize, attentionHeads, intermediateSize, maxLoadElements, layer, backend)
         if layerOut.length() != tail.length() {
             return MiniLMDenseTrace.failure()
         }
+        if not tailOwnedByTrace {
+            releaseFloatArrayStorage(tail)
+        }
         tail = layerOut
+        tailOwnedByTrace = false
         layer = layer + 1
     }
     let finalMean = meanPoolFlat(tail, tokenCount, hiddenSize)
+    if not tailOwnedByTrace {
+        releaseFloatArrayStorage(tail)
+    }
     return MiniLMDenseTrace.success(targetTrace.seqLen, targetTrace.inputDim, targetTrace.hiddenSize, targetTrace.intermediateInput, targetTrace.intermediatePreActivation, targetTrace.ffInput, targetTrace.attentionSequenceInput, targetTrace.attentionQ, targetTrace.attentionK, targetTrace.attentionV, targetTrace.attentionContext, targetTrace.attentionOutputDenseWeight, targetTrace.attentionLayerNormInput, targetTrace.attentionNormWeight, targetTrace.intermediateDenseWeight, targetTrace.layerNormInput, targetTrace.normWeight, targetTrace.normBias, targetTrace.outputDenseWeight, targetTrace.outputSequence, finalMean)
 }
 
@@ -2034,9 +2150,11 @@ fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensor
                 sequence.push(embedded[d])
                 d = d + 1
             }
+            releaseFloatArrayStorage(embedded)
         }
         i = i + 1
     }
+    releaseTemporarySparseWordTensor(word)
     if tokenCount == 0 {
         return MiniLMDenseTrace.failure()
     }
@@ -2053,6 +2171,7 @@ fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensor
         if layerOut.length() != encoded.length() {
             return MiniLMDenseTrace.failure()
         }
+        releaseFloatArrayStorage(encoded)
         encoded = layerOut
         layer = layer + 1
     }
@@ -2061,6 +2180,7 @@ fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensor
         return targetTrace
     }
     var tail = targetTrace.outputSequence
+    var tailOwnedByTrace = true
     layer = targetLayer + 1
     while layer < readyLayers {
         var layerOut = Array<Float>()
@@ -2072,10 +2192,17 @@ fun denseAdapterTraceWithLayerDeltas(cache: MiniLMForwardCache, info: SafeTensor
         if layerOut.length() != tail.length() {
             return MiniLMDenseTrace.failure()
         }
+        if not tailOwnedByTrace {
+            releaseFloatArrayStorage(tail)
+        }
         tail = layerOut
+        tailOwnedByTrace = false
         layer = layer + 1
     }
     let finalMean = meanPoolFlat(tail, tokenCount, hiddenSize)
+    if not tailOwnedByTrace {
+        releaseFloatArrayStorage(tail)
+    }
     return MiniLMDenseTrace.success(targetTrace.seqLen, targetTrace.inputDim, targetTrace.hiddenSize, targetTrace.intermediateInput, targetTrace.intermediatePreActivation, targetTrace.ffInput, targetTrace.attentionSequenceInput, targetTrace.attentionQ, targetTrace.attentionK, targetTrace.attentionV, targetTrace.attentionContext, targetTrace.attentionOutputDenseWeight, targetTrace.attentionLayerNormInput, targetTrace.attentionNormWeight, targetTrace.intermediateDenseWeight, targetTrace.layerNormInput, targetTrace.normWeight, targetTrace.normBias, targetTrace.outputDenseWeight, targetTrace.outputSequence, finalMean)
 }
 
@@ -2115,14 +2242,18 @@ fun embeddingDeltaTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenId
                 outputSequence.push(embedded[d])
                 d = d + 1
             }
+            releaseFloatArrayStorage(raw)
+            releaseFloatArrayStorage(embedded)
         }
         i = i + 1
     }
+    releaseTemporarySparseWordTensor(word)
     if tokenCount == 0 {
         return MiniLMEmbeddingTrace.failure()
     }
 
     var encoded = outputSequence
+    var encodedOwnedByTrace = true
     var layer = 0
     while layer < readyLayers {
         var layerOut = Array<Float>()
@@ -2134,10 +2265,18 @@ fun embeddingDeltaTrace(cache: MiniLMForwardCache, info: SafeTensorInfo, tokenId
         if layerOut.length() != encoded.length() {
             return MiniLMEmbeddingTrace.failure()
         }
+        if not encodedOwnedByTrace {
+            releaseFloatArrayStorage(encoded)
+        }
         encoded = layerOut
+        encodedOwnedByTrace = false
         layer = layer + 1
     }
-    return MiniLMEmbeddingTrace.success(tokenCount, hiddenSize, rawSequence, outputSequence, wordRows, positionRows, tokenTypeRows, meanPoolFlat(encoded, tokenCount, hiddenSize))
+    let finalMean = meanPoolFlat(encoded, tokenCount, hiddenSize)
+    if not encodedOwnedByTrace {
+        releaseFloatArrayStorage(encoded)
+    }
+    return MiniLMEmbeddingTrace.success(tokenCount, hiddenSize, rawSequence, outputSequence, wordRows, positionRows, tokenTypeRows, finalMean)
 }
 
 fun applyFinalDenseTrace(info: SafeTensorInfo, sequence: Array<Float>, seqLen: Int, hiddenSize: Int, attentionHeads: Int, intermediateSize: Int, maxLoadElements: Int, layer: Int, denseAdapter: DenseLoRAAdapter, denseDelta: DenseDeltaAdapter, intermediateDelta: DenseDeltaAdapter, queryDelta: DenseDeltaAdapter, keyDelta: DenseDeltaAdapter, valueDelta: DenseDeltaAdapter, attentionDenseDelta: DenseDeltaAdapter, attentionLayerNormDelta: LayerNormDeltaAdapter, layerNormDelta: LayerNormDeltaAdapter, backend: String) r: MiniLMDenseTrace {
@@ -3826,12 +3965,16 @@ fun encodeTokenWithTables(tokenId: Int, positionIndex: Int, hiddenSize: Int, wor
             + tokenType.valueAt(typeRow, d))
         d = d + 1
     }
-    return embeddingLayerNorm(raw, normWeight.values, normBias.values)
+    let out = embeddingLayerNorm(raw, normWeight.values, normBias.values)
+    releaseFloatArrayStorage(raw)
+    return out
 }
 
 fun encodeTokenWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, normWeight: EmbeddingTensorLoad, normBias: EmbeddingTensorLoad, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {
     let raw = encodeTokenRawWithEmbeddingDeltas(tokenId, positionIndex, hiddenSize, word, position, tokenType, embeddingDeltas)
-    return embeddingLayerNormWithEmbeddingDeltas(raw, normWeight.values, normBias.values, embeddingDeltas)
+    let out = embeddingLayerNormWithEmbeddingDeltas(raw, normWeight.values, normBias.values, embeddingDeltas)
+    releaseFloatArrayStorage(raw)
+    return out
 }
 
 fun encodeTokenRawWithEmbeddingDeltas(tokenId: Int, positionIndex: Int, hiddenSize: Int, word: EmbeddingTensorLoad, position: EmbeddingTensorLoad, tokenType: EmbeddingTensorLoad, embeddingDeltas: MiniLMEmbeddingDeltas) r: Array<Float> {

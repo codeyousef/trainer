@@ -1,5 +1,6 @@
 import env.env.{args}
 import config.{TrainerConfig, readConfig, resolvedMiniLMLayers, writeTrainerConfigJson}
+import eval.{EvalResult}
 import io.file.{readText}
 import io_utils.{writeAtomicText}
 import jsonl.{readTripletsLimited, tripletToJson}
@@ -72,6 +73,7 @@ fun trainerMain() r: Int {
     if command == "eval" {
         let result = pipeline.eval()
         println("trainer: answer rate " + result.answerRate.toString())
+        printEvalTiming(result)
         return 0
     }
     if command == "package" {
@@ -220,6 +222,16 @@ fun restoreSplitTrainConfig(cfg: TrainerConfig, trainPath: String, minedPath: St
     cfg.epochs = epochs
     cfg.batchSize = batchSize
     cfg.maxTrainTriplets = maxTrain
+}
+
+fun printEvalTiming(result: EvalResult) r: Void {
+    println("trainer: eval timing read_ms=" + result.readDatasetMs.toString()
+        + " tokenize_ms=" + result.tokenizeMs.toString()
+        + " encode_ms=" + result.encodeMs.toString()
+        + " score_threshold_ms=" + result.scoreThresholdMs.toString()
+        + " write_ms=" + result.resultWriteMs.toString()
+        + " total_ms=" + result.totalEvalMs.toString()
+        + " unique_texts=" + result.uniqueTexts.toString())
 }
 
 fun readTrainingFinalLoss(path: String) r: Float {

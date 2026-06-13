@@ -84,7 +84,15 @@ class Encoder {
     }
 
     fun encode(text: String) r: Array<Float> {
-        let raw = this.encodeRawMean(text)
+        let tokenized = this.tokenizer.tokenized(text)
+        let out = this.encodeTokenized(tokenized.ids, tokenized.masks)
+        releaseIntArrayStorage(tokenized.ids)
+        releaseIntArrayStorage(tokenized.masks)
+        return out
+    }
+
+    fun encodeTokenized(tokenIds: Array<Int>, mask: Array<Int>) r: Array<Float> {
+        let raw = this.encodeRawMeanTokenized(tokenIds, mask)
         let layer = this.layerAdapter.apply(raw)
         let adapted = this.adapter.apply(layer)
         let out = normalize(adapted)
@@ -95,17 +103,23 @@ class Encoder {
     }
 
     fun encodeBase(text: String) r: Array<Float> {
-        let raw = this.encodeRawMean(text)
+        let tokenized = this.tokenizer.tokenized(text)
+        let raw = this.encodeRawMeanTokenized(tokenized.ids, tokenized.masks)
         let layer = this.layerAdapter.apply(raw)
         let out = normalize(layer)
+        releaseIntArrayStorage(tokenized.ids)
+        releaseIntArrayStorage(tokenized.masks)
         releaseFloatArrayStorage(raw)
         releaseFloatArrayStorage(layer)
         return out
     }
 
     fun encodeLayerInput(text: String) r: Array<Float> {
-        let raw = this.encodeRawMean(text)
+        let tokenized = this.tokenizer.tokenized(text)
+        let raw = this.encodeRawMeanTokenized(tokenized.ids, tokenized.masks)
         let out = normalize(raw)
+        releaseIntArrayStorage(tokenized.ids)
+        releaseIntArrayStorage(tokenized.masks)
         releaseFloatArrayStorage(raw)
         return out
     }
@@ -114,6 +128,13 @@ class Encoder {
         let tokenized = this.tokenizer.tokenized(text)
         let tokenIds = tokenized.ids
         let mask = tokenized.masks
+        let out = this.encodeRawMeanTokenized(tokenIds, mask)
+        releaseIntArrayStorage(tokenIds)
+        releaseIntArrayStorage(mask)
+        return out
+    }
+
+    fun encodeRawMeanTokenized(tokenIds: Array<Int>, mask: Array<Int>) r: Array<Float> {
         if this.modelEmbeddings.loaded {
             var modelMean = Array<Float>()
             if this.hasMiniLMAllLayerDeltaTarget() {
@@ -122,8 +143,6 @@ class Encoder {
                 modelMean = this.modelEmbeddings.encodeMeanWithAdapters(tokenIds, mask, this.minilmDenseAdapter, this.minilmDenseDelta, this.minilmIntermediateDelta, this.minilmQueryDelta, this.minilmKeyDelta, this.minilmValueDelta, this.minilmAttentionDenseDelta, this.minilmAttentionLayerNormDelta, this.minilmLayerNormDelta, this.minilmDenseAdapterLayer, this.minilmLayerAdapter, this.minilmAdapterLayer)
             }
             if modelMean.length() == this.embeddingDim {
-                releaseIntArrayStorage(tokenIds)
-                releaseIntArrayStorage(mask)
                 return modelMean
             }
             releaseFloatArrayStorage(modelMean)
@@ -157,8 +176,6 @@ class Encoder {
                 d = d + 1
             }
         }
-        releaseIntArrayStorage(tokenIds)
-        releaseIntArrayStorage(mask)
         return sum
     }
 

@@ -5,16 +5,35 @@ import io.file.{exists}
 import io_utils.{writeAtomicText}
 import json.builder.{escapeJsonString}
 import jsonl.{TripletExample, readTripletsLimited}
-import memory.allocation.{releaseFloatArrayStorage}
+import memory.allocation.{releaseFloatArrayStorage, releaseIntArrayStorage}
 
 class EvalResult {
     var total: Int
     var answered: Int
     var answerRate: Float
     var outputPath: String
+    var uniqueTexts: Int
+    var readDatasetMs: Float
+    var tokenizeMs: Float
+    var encodeMs: Float
+    var scoreThresholdMs: Float
+    var resultWriteMs: Float
+    var totalEvalMs: Float
 
     static fun new(total: Int, answered: Int, answerRate: Float, outputPath: String) r: EvalResult {
-        return EvalResult{ total: total, answered: answered, answerRate: answerRate, outputPath: outputPath }
+        return EvalResult{ total: total, answered: answered, answerRate: answerRate, outputPath: outputPath, uniqueTexts: 0, readDatasetMs: 0.0, tokenizeMs: 0.0, encodeMs: 0.0, scoreThresholdMs: 0.0, resultWriteMs: 0.0, totalEvalMs: 0.0 }
+    }
+}
+
+class EvalTiming {
+    var readDatasetMs: Float
+    var tokenizeMs: Float
+    var encodeMs: Float
+    var scoreThresholdMs: Float
+    var totalBeforeWriteMs: Float
+
+    static fun new() r: EvalTiming {
+        return EvalTiming{ readDatasetMs: 0.0, tokenizeMs: 0.0, encodeMs: 0.0, scoreThresholdMs: 0.0, totalBeforeWriteMs: 0.0 }
     }
 }
 
@@ -27,7 +46,7 @@ class EvalEmbeddingCache {
         return EvalEmbeddingCache{ texts: Array<String>(), embeddings: Array<Float>(), dim: dim }
     }
 
-    fun ensure(encoder: Encoder, text: String) r: Int {
+    fun ensure(encoder: Encoder, text: String, timing: EvalTiming) r: Int {
         var i = 0
         while i < this.texts.length() {
             if this.texts[i] == text {
@@ -35,7 +54,14 @@ class EvalEmbeddingCache {
             }
             i = i + 1
         }
-        let embedding = encoder.encode(text)
+        let tokenizeStart = __GetTime()
+        let tokenized = encoder.tokenizer.tokenized(text)
+        timing.tokenizeMs = timing.tokenizeMs + evalElapsedMillis(tokenizeStart)
+        let encodeStart = __GetTime()
+        let embedding = encoder.encodeTokenized(tokenized.ids, tokenized.masks)
+        timing.encodeMs = timing.encodeMs + evalElapsedMillis(encodeStart)
+        releaseIntArrayStorage(tokenized.ids)
+        releaseIntArrayStorage(tokenized.masks)
         this.texts.push(text)
         var d = 0
         while d < this.dim {
@@ -66,9 +92,9 @@ class EvalEmbeddingCache {
         return sum
     }
 
-    fun score(encoder: Encoder, qText: String, pText: String) r: Float {
-        let qIndex = this.ensure(encoder, qText)
-        let pIndex = this.ensure(encoder, pText)
+    fun score(encoder: Encoder, qText: String, pText: String, timing: EvalTiming) r: Float {
+        let qIndex = this.ensure(encoder, qText, timing)
+        let pIndex = this.ensure(encoder, pText, timing)
         return this.dotAt(qIndex, pIndex)
     }
 
@@ -78,7 +104,11 @@ class EvalEmbeddingCache {
 }
 
 fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThreshold>) r: EvalResult {
+    let evalStart = __GetTime()
+    let timing = EvalTiming.new()
+    let readStart = __GetTime()
     let items = readEvalDataset(cfg)
+    timing.readDatasetMs = evalElapsedMillis(readStart)
     let domains = uniqueEvalDomains(items)
     let totals = evalInitializedIntArray(domains.length(), 0)
     let answeredTotals = evalInitializedIntArray(domains.length(), 0)
@@ -89,7 +119,10 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
     while i < items.length() {
         let domain = if items[i].domain.length() > 0 { items[i].domain } else { "default" }
         let threshold = thresholdFor(thresholds, domain)
-        let score = cache.score(encoder, items[i].queryText, items[i].positiveChunkText)
+        let qIndex = cache.ensure(encoder, items[i].queryText, timing)
+        let pIndex = cache.ensure(encoder, items[i].positiveChunkText, timing)
+        let scoreStart = __GetTime()
+        let score = cache.dotAt(qIndex, pIndex)
         let domainIndex = findDomainIndex(domains, domain)
         if domainIndex >= 0 {
             totals[domainIndex] = totals[domainIndex] + 1
@@ -101,15 +134,30 @@ fun evaluate(cfg: TrainerConfig, encoder: Encoder, thresholds: Array<DomainThres
             }
         }
         total = total + 1
+        timing.scoreThresholdMs = timing.scoreThresholdMs + evalElapsedMillis(scoreStart)
         i = i + 1
     }
-    cache.release()
+    let uniqueTexts = cache.texts.length()
     var rate = 0.0
     if total > 0 {
         rate = answered.toFloat() / total.toFloat()
     }
-    writeAtomicText(cfg.evalResultsPath, evalJson(cfg, total, answered, rate, domains, totals, answeredTotals))
-    return EvalResult.new(total, answered, rate, cfg.evalResultsPath)
+    timing.totalBeforeWriteMs = evalElapsedMillis(evalStart)
+    let outputJson = evalJson(cfg, total, answered, rate, domains, totals, answeredTotals, timing, uniqueTexts)
+    let writeStart = __GetTime()
+    writeAtomicText(cfg.evalResultsPath, outputJson)
+    let writeMs = evalElapsedMillis(writeStart)
+    let totalMs = evalElapsedMillis(evalStart)
+    cache.release()
+    let result = EvalResult.new(total, answered, rate, cfg.evalResultsPath)
+    result.uniqueTexts = uniqueTexts
+    result.readDatasetMs = timing.readDatasetMs
+    result.tokenizeMs = timing.tokenizeMs
+    result.encodeMs = timing.encodeMs
+    result.scoreThresholdMs = timing.scoreThresholdMs
+    result.resultWriteMs = writeMs
+    result.totalEvalMs = totalMs
+    return result
 }
 
 fun readEvalDataset(cfg: TrainerConfig) r: Array<TripletExample> {
@@ -129,7 +177,7 @@ fun evalWithCalibration(cfg: TrainerConfig, encoder: Encoder) r: EvalResult {
     return evaluate(cfg, encoder, thresholds)
 }
 
-fun evalJson(cfg: TrainerConfig, total: Int, answered: Int, rate: Float, domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>) r: String {
+fun evalJson(cfg: TrainerConfig, total: Int, answered: Int, rate: Float, domains: Array<String>, totals: Array<Int>, answeredTotals: Array<Int>, timing: EvalTiming, uniqueTexts: Int) r: String {
     return "{\n"
         + "  \"total\": " + total.toString() + ",\n"
         + "  \"answered\": " + answered.toString() + ",\n"
@@ -137,8 +185,24 @@ fun evalJson(cfg: TrainerConfig, total: Int, answered: Int, rate: Float, domains
         + "  \"max_eval_triplets\": " + cfg.maxEvalTriplets.toString() + ",\n"
         + "  \"bounded_eval_dataset\": " + (cfg.maxEvalTriplets > 0).toString() + ",\n"
         + "  \"pass_overall_88\": " + boolJson(rate >= 0.88) + ",\n"
-        + "  \"per_domain\": " + perDomainJson(domains, totals, answeredTotals) + "\n"
+        + "  \"per_domain\": " + perDomainJson(domains, totals, answeredTotals) + ",\n"
+        + "  \"timing_ms\": " + evalTimingJson(timing, uniqueTexts) + "\n"
         + "}\n"
+}
+
+fun evalTimingJson(timing: EvalTiming, uniqueTexts: Int) r: String {
+    return "{"
+        + "\"read_dataset\": " + timing.readDatasetMs.toString() + ", "
+        + "\"tokenize\": " + timing.tokenizeMs.toString() + ", "
+        + "\"encode\": " + timing.encodeMs.toString() + ", "
+        + "\"score_threshold\": " + timing.scoreThresholdMs.toString() + ", "
+        + "\"total_before_write\": " + timing.totalBeforeWriteMs.toString() + ", "
+        + "\"unique_texts\": " + uniqueTexts.toString()
+        + "}"
+}
+
+fun evalElapsedMillis(startSeconds: Float) r: Float {
+    return (__GetTime() - startSeconds) * 1000.0
 }
 
 fun limitTriplets(items: Array<TripletExample>, maxItems: Int) r: Array<TripletExample> {
